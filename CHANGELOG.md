@@ -4,6 +4,109 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 2 — Workspace Shell] — Advanced Application Shell & Four-Panel AI IDE
+
+### Added
+- **`/app` workspace route** (`src/app/app/`): the main CodeMind X software
+  engineering workspace — four-panel desktop shell (CodeMind X sidebar 11% ·
+  AI chat sidebar 11% · AI chat area 39% · repository/code 39%, resizable,
+  persisted), compact tablet/mobile layout (persistent CMX icon rail on
+  tablet ≥768px, chat always primary, Sheet drawers for nav / chat sidebar /
+  repository). Landing page "Open Workspace" CTAs now route to `/app` (client
+  navigation; the Phase 1 page itself was not redesigned).
+- **Workspace foundation** (`src/features/workspace/`, `src/stores/`):
+  typed contracts (`types.ts` — panel sizes/limits, destinations, conversations,
+  AIRunPhase vocabulary, editor-navigation payload, command definitions),
+  destination registry (`registry.ts`, availability reflects real
+  capabilities), central zustand store with **versioned persisted layout
+  schema v1** (sizes/collapsed/expanded widths/section/conversations/tabs;
+  validation + clamping on rehydrate; secrets and file contents never
+  persisted; conversation caps 30 × 200 messages).
+- **EditorNavigationService** (`editor-navigation.ts`): THE single file-opening
+  mechanism (spec §28) — typed payload (repository/filePath/line/column/range/
+  symbol/sourceContext/reason), verifies against the real file API, honest
+  typed failure results (not-found / binary / too-large / load-failed) with
+  toast, subscriber-based (repository workspace opens tabs).
+- **Shell components** (`components/`): `AIWorkspace` (responsive switching,
+  four-panel composition with imperative rail collapse, ⌘K/⌘P/⌘B/⌘⌥B/⌘I/⌘1–4
+  keyboard contracts, hydration gate), `TopNavigation` (real repository name +
+  real git branch, honest "Indexing unavailable", run indicator, notifications
+  popover, compact sheet openers), `AISidebar` (13 destinations, expanded +
+  functional icon rail with tooltips/aria/active states, real footer info),
+  `PanelResizer` (visible feedback, disabled when adjacent rail collapsed),
+  `CommandPalette` (⌘K commands / ⌘P real file picker over the workspace tree;
+  later-phase commands listed **disabled with honest reasons**),
+  `OverviewPanel` (real capability status list), `SettingsPanel` (layout reset,
+  shortcuts, honest data-storage notes), `SearchFilesPanel` (real filename
+  filter → opens real files), `DestinationPlaceholderPanel` (honest wired
+  extension points), `ChatAreaRouter`.
+- **AI chat side** (`chat/`): `AIChatSidebar` (New Chat, labelled conversation
+  search, Current/Pinned/Recent/Archived sections with real timestamps and
+  statuses, rename/pin/archive/delete — all real local actions, honest
+  AI-workspace-context section fed by the real meta API + open tabs, Current
+  AI Run indicator over the shared phase vocabulary, quick actions, reserved
+  Search/Code/Agent/Loop mode chips, **independent functional collapsed icon
+  rail** per spec §15), `AIChatPanel` + `ConversationView` (per-state message
+  rendering, privacy-safe ThoughtChain activity, copy/regenerate/retry, always
+  visible composer), `AIComposer` (auto-resize, Enter/Shift+Enter, attachments
+  incl. real active-file attachment, stop/regenerate, disabled mode chips),
+  `ChatMarkdown` + `ChatCodeBlock` (copy/expand/download, `// file:` reference
+  opens via EditorNavigationService), `ApprovalCardSlot` (typed contract only —
+  renders nothing until real approvals exist), `useAssistantRun` (real
+  single-shot assistant calls via backend, stop via AbortController, honest
+  error/stopped states — no simulated streaming).
+- **Repository / code side** (`repository/`): `RepositoryWorkspaceShell`
+  (activity rail: Explorer/Search/Source Control/Run/Extensions +
+  diagnostics toggle; subscribes to EditorNavigationService),
+  `RepositoryExplorerShell` + recursive file tree (real tree, filter,
+  loading/error/retry states), `EditorTabs`, `CodeEditorViewport` (read-only
+  real file preview, honest binary/too-large/missing/error states, line
+  highlighting from navigation payloads, "Monaco arrives later" note),
+  `TerminalOutputPanel` (honest no-execution state + real environment facts),
+  `DiagnosticsPanel`, `GitPanel` (real branch, explicitly no fake commits),
+  honest placeholder views for run/extensions.
+- **Real read-only repository APIs** (`src/app/api/repository/` +
+  `src/lib/server/repository-fs.ts`): `GET meta` (package.json name + real
+  `git rev-parse` branch + honest indexing status), `GET tree` (allowlisted
+  roots: `src/**`, prisma schema, key configs; traversal/dotfile/secret
+  exclusion; depth/entry caps; 30 s cache), `GET file` (strict allowlist,
+  binary detection, 512 KB cap; 400/403/404/413/415 semantics). This makes the
+  workspace shell REAL (tree/tabs/editor) while indexing/search/git engines
+  remain [PLANNED].
+- **Real assistant API** (`src/app/api/ai/chat/route.ts`): zod-validated
+  single-shot LLM completion via the backend SDK with an honesty-constrained
+  system prompt (states unimplemented engines instead of pretending); powers
+  the chat shell end-to-end (user message → activity summary → assistant
+  response → retry/stop/regenerate).
+
+### Verified
+- Lint clean across `src/features/workspace/**`, `src/stores/**`,
+  `src/lib/server/**`, new API routes, landing edits; no new TypeScript
+  errors (pre-existing `examples/`/`skills/` errors untouched).
+- Browser-verified (agent-browser + Playwright): four-panel desktop at
+  1280/1440/1920 with 11/11/39/39 defaults, drag-resize + persistence across
+  reload, both independent icon rails (collapse/expand/restore widths),
+  ⌘K/⌘P palettes (real file open via palette), real file open from tree +
+  AI-context chip, real AI conversation (send → activity → response →
+  Completed status → run indicator back to Idle), planned-destination honest
+  placeholders, mobile drawers at 390/768, **zero horizontal overflow at
+  360/390/768/1024/1280/1440/1920**, zero console errors, reduced-motion
+  probe (9/9 PASS), persisted state contains no secrets.
+- APIs verified by direct request: meta (real branch `main`), tree, file
+  (real content), traversal `../.env` → 403, `.env` → 403, missing → 404,
+  assistant round-trip.
+
+### Honest limitations (by design, Phase 2 scope)
+- Assistant is single-shot (no streaming, no tools/agents/repository
+  retrieval) — the execution engine is a later phase; the run-state
+  vocabulary and activity surfaces are typed contracts.
+- Editor is a read-only preview (Monaco [PLANNED]); repository search filters
+  filenames only (hybrid search [PLANNED]); Git shows the real branch only
+  (Git intelligence [PLANNED]); terminal shows environment facts only (sandbox
+  execution [PLANNED]); conversations persist in localStorage (database
+  persistence [PLANNED]).
+- Checkpoint: `codemind-v2/phase-02-workspace` (local commit + annotated tag).
+
 ## [Phase 1 — Public Website] — Premium Product Website & Frontend Foundation
 
 ### Added

@@ -9,6 +9,7 @@
  * gracefully; heavy pieces load client-side so text/content paint first.
  */
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { motion, useReducedMotion } from "framer-motion";
 import { ArrowDown, ArrowRight, Asterisk } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -106,16 +107,16 @@ export function Hero() {
           the system verifies, then changes are applied.
         </motion.p>
 
-        {/* CTAs — honest routing: workspace preview now, live workspace in Phase 2 */}
+        {/* CTAs — the live workspace shipped in Phase 2 lives at /app */}
         <motion.div
           {...(prefersReduced ? {} : enter(0.24))}
           className="mt-7 flex flex-wrap items-center gap-3"
         >
           <Button asChild size="lg" className="h-11 px-5 text-sm font-medium">
-            <a href="#workspace">
+            <Link href="/app">
               Open Workspace
               <ArrowRight className="size-4" aria-hidden="true" />
-            </a>
+            </Link>
           </Button>
           <Button
             asChild

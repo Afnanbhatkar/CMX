@@ -144,6 +144,14 @@ to inspect, and restore individual paths from that commit — never `reset --har
   site composition under `src/features/site/`, SEO metadata, honest
   demo-data labeling, reduced-motion + fallback coverage; dependency added:
   gsap 3.15.0, dynamically imported).
-- **Next intended phase:** Phase 2 (per the canonical order — the real
-  `/app` workspace shell at 11/11/39/39). Every phase must read `RULES.md`
-  first and consult `CAPABILITIES.md`.
+  **Phase 2 — workspace shell** (`/app`): four-panel AI IDE
+  (11/11/39/39, resizable, persisted v1 schema), CodeMind X sidebar +
+  AI chat sidebar with independent functional icon rails, command palette
+  (⌘K/⌘P), keyboard contracts, EditorNavigationService, real read-only
+  repository APIs (meta/tree/file with strict allowlisting), real single-shot
+  assistant API (backend SDK), honest empty/planned states everywhere;
+  landing CTAs now route to `/app`. Engines (indexing, hybrid search,
+  agents, Git/security/testing intelligence, sandbox, Monaco) remain
+  [PLANNED] and are represented only as honest extension points.
+- **Next intended phase:** Phase 3 (per the canonical order). Every phase
+  must read `RULES.md` first and consult `CAPABILITIES.md`.

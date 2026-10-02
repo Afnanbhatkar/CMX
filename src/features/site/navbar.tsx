@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * Public-site navbar: fixed, restrained, anchor-based navigation.
- * Links only point at anchors that exist on this page (no dead routes).
+ * Public-site navbar: fixed, restrained navigation. Anchor links point at
+ * sections on this page; "Open Workspace" routes to the live /app workspace.
  */
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -76,7 +77,7 @@ export function Navbar() {
 
         <div className="ml-auto flex items-center gap-2 lg:ml-0">
           <Button asChild size="sm" variant="secondary" className="hidden sm:inline-flex">
-            <a href="#workspace">Open Workspace</a>
+            <Link href="/app">Open Workspace</Link>
           </Button>
           {/* Mobile menu */}
           <Sheet open={open} onOpenChange={setOpen}>
@@ -121,9 +122,9 @@ export function Navbar() {
                   ))}
                   <li className="mt-2">
                     <Button asChild size="sm" className="w-full">
-                      <a href="#workspace" onClick={() => setOpen(false)}>
+                      <Link href="/app" onClick={() => setOpen(false)}>
                         Open Workspace
-                      </a>
+                      </Link>
                     </Button>
                   </li>
                 </ul>
