@@ -2,7 +2,6 @@
 
 import { motion, useReducedMotion } from "framer-motion";
 import { motionDuration, motionEase } from "@/lib/design-tokens";
-import type { ReactNode } from "react";
 
 export interface TextRevealProps {
   children: string;
@@ -71,5 +70,5 @@ export function TextReveal({
 /** Convenience alias for revealing ReactNode-free strings with markup-free API. */
 export function TextRevealHeading(props: Omit<TextRevealProps, "children"> & { text: string }) {
   const { text, ...rest } = props;
-  return <TextReveal {...rest}>{text as unknown as ReactNode}</TextReveal>;
+  return <TextReveal {...rest}>{text}</TextReveal>;
 }

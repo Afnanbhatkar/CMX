@@ -17,3 +17,6 @@ export {
 } from "./ActivityTransition";
 export { AuroraText, type AuroraTextProps } from "./AuroraText";
 export { DiaTextReveal, type DiaTextRevealProps } from "./DiaTextReveal";
+export { ScrollReveal, type ScrollRevealProps } from "./ScrollReveal";
+export { StaggerReveal, StaggerItem, type StaggerRevealProps } from "./StaggerReveal";
+export { Parallax, type ParallaxProps } from "./Parallax";

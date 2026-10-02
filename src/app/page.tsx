@@ -1,5 +1,5 @@
-import { DesignSystemShowcase } from "@/features/design-system/showcase";
+import { Site } from "@/features/site/site";
 
 export default function Home() {
-  return <DesignSystemShowcase />;
+  return <Site />;
 }

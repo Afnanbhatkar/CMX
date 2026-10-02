@@ -136,7 +136,14 @@ to inspect, and restore individual paths from that commit — never `reset --har
   (V2.1) — `RULES.md` + `CAPABILITIES.md` + proof standards; **Phase 1 —
   premium design system, motion engine, shader engine** (dark-first token
   system, 9 motion primitives, AuroraText/DiaTextReveal reconstructions,
-  6-mode WebGL ShaderBackground with CSS fallback, design-system showcase on
-  `/`).
-- **Next intended phase:** Phase 2 (per the canonical order). Every phase must
-  read `RULES.md` first and consult `CAPABILITIES.md`.
+  6-mode WebGL ShaderBackground with CSS fallback, design-system showcase);
+  **Phase 1 — public website reconstruction** (full product website on `/`:
+  navbar/hero/particles/4-pane workspace preview, 14 product sections,
+  ExpandableBentoGrid + GSAP StaggeredProductGrid, AI activity + product
+  preview component libraries under `src/components/{ai,product,layout,particles}/`,
+  site composition under `src/features/site/`, SEO metadata, honest
+  demo-data labeling, reduced-motion + fallback coverage; dependency added:
+  gsap 3.15.0, dynamically imported).
+- **Next intended phase:** Phase 2 (per the canonical order — the real
+  `/app` workspace shell at 11/11/39/39). Every phase must read `RULES.md`
+  first and consult `CAPABILITIES.md`.

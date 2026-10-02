@@ -4,6 +4,95 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 1 — Public Website] — Premium Product Website & Frontend Foundation
+
+### Added
+- **Public website reconstruction** (`src/features/site/`): the homepage is now a
+  complete CodeMind X product website (narrative order per Phase 1 spec §24):
+  navbar (fixed, anchor-based, mobile Sheet menu) → hero (shader bed +
+  interactive particle field + AuroraText headline + honest CTAs + capability
+  signals + 4-pane workspace preview) → what-is story → features bento →
+  repository intelligence → hybrid search → code understanding → AI assistant →
+  architecture → AI coding → security + testing → Git intelligence →
+  connected-context composite → product surface grid → how-it-works → final CTA
+  → footer.
+- **AI activity reference components** (`src/components/ai/`): `ThinkingOrb`
+  (dark container, layered warm orb, idle/thinking/done states),
+  `LatticeLoader` (3×3 rAF wave, pauses offscreen/hidden), `ThoughtChain`
+  (category-based, privacy-safe labels only — no chain-of-thought),
+  `ActivityPreview` (one-shot in-view sequencer + replay, categories per
+  `ActivityKind` contract).
+- **Product preview components** (`src/components/product/`): `CodePreview`
+  (hand-rolled tokenizer, line numbers, copy interaction, highlight lines),
+  `RepositoryPreview` (tree + status badges + animated dependency curves +
+  AI-context chip), `GraphPreview` (8-node SVG service graph, draw-in edges),
+  `SecurityPreview` (finding w/ severity, request path, evidence),
+  `TestingPreview` (suite rows, failure detail, coverage bar — synthetic),
+  `GitPreview` (commit chain, changed files, impact), `SearchPreview`
+  (query → keyword/semantic/symbol/related results), `AICodingPreview`
+  (Request→Plan→Diff→Verify→Apply; Apply visibly disabled — approval contract),
+  `ProductPreview` (11/11/39/39 workspace mock with entrance choreography),
+  `shared.tsx` (DemoBadge honesty marker, PreviewFrame, StatusDot, code
+  palette). All demo data is labeled — no fake metrics, customers, or
+  benchmarks anywhere on the page.
+- **Motion additions** (`src/components/motion/`): `ScrollReveal`,
+  `StaggerReveal`/`StaggerItem`, `Parallax` (scroll-linked, coarse-pointer and
+  reduced-motion safe) + barrel exports.
+- **`components/particles/InteractiveParticles.tsx`** — canvas-2D repository
+  network field (bounded counts, damped pointer attraction, DPR ≤ 2, pauses
+  hidden/offscreen, static frame under reduced motion, CSS fallback on
+  init failure).
+- **`components/layout/`**: `ExpandableBentoGrid` (layoutId shared-element
+  expansion, outside click, Escape, body scroll lock, focus restore, dialog
+  semantics), `StaggeredProductGrid` (GSAP ScrollTrigger offset columns,
+  scrub parallax, dynamic-imported gsap, context revert; content never
+  pre-hidden so JS failure cannot blank it).
+- Site composition pieces: `LogoMark` (SVG monogram), `SectionShell`,
+  skip-to-content link, sticky-footer contract (`min-h-screen flex flex-col`
+  + footer `mt-auto`).
+- SEO: full metadata (title, description, keywords, Open Graph, Twitter card)
+  in `src/app/layout.tsx`; semantic headings per section.
+
+### Changed
+- `src/app/page.tsx` — replaced the Phase 1 design-system showcase with the
+  public website (justified redesign; showcase preserved in git history at
+  `codemind-v2/phase-01-ui`^ and in `src/features/design-system/` files, kept
+  for a future gallery route).
+- Dependency added: **gsap 3.15.0** (ScrollTrigger for the staggered grid only;
+  dynamically imported so it stays out of the initial bundle).
+
+### Fixed (during browser verification)
+- Product barrel race between parallel sub-agents (2-c/2-d) — merged exports.
+- Pre-existing type errors in the site dependency path: missing `ReactNode`
+  import in `ShaderBackground.tsx`, `children` type mismatch in
+  `TextRevealHeading` (+ unused import).
+- Malformed Tailwind arbitrary value `md:grid-cols-inmax(0,1fr)_188px]` in
+  `RepositoryPreview.tsx` → `md:grid-cols-[minmax(0,1fr)_188px]`.
+- **Horizontal overflow on mobile (457px @ 390px viewport)**: grids with only
+  `lg:grid-cols-*` had content-sized implicit base columns — added explicit
+  `grid-cols-1` across site sections, footer, RepositoryPreview.
+  Overflow now **0px at 360/390/768/1024/1280/1440/1920**.
+- Radix `DialogContent` missing-description warning in the mobile nav Sheet —
+  added `sr-only` `SheetDescription`.
+
+### Verification
+- `bun run lint` clean; `tsc --noEmit` clean for all of `src/`.
+- Browser (agent-browser, desktop 1440 + mobile 390): zero console errors;
+  hero, all 14 sections, bento expand/Escape/scroll-restore, focus management,
+  anchor navigation (desktop + mobile Sheet), particle field, shader beds,
+  ProductPreview choreography, copy interaction all exercised via golden-path
+  clicks. Sticky footer verified; footer flush at document end.
+- Reduced motion verified at runtime via CDP
+  (`Emulation.setEmulatedMedia prefers-reduced-motion: reduce`): headline and
+  all product visuals fully visible immediately (h1 opacity 1), all 14 anchors
+  present, no hidden content, no overflow.
+- Honest-routing rule: "Open Workspace" scrolls to the labeled workspace
+  preview (`#workspace`); the live workspace is explicitly stated to ship in
+  Phase 2 — no fake navigation, no fake data.
+- Checkpoint: tag `codemind-v2/phase-01-ui` re-pointed (forward, local only,
+  annotated) from the design-system sub-deliverable commit to this completed
+  Phase 1 commit; prior commits untouched, nothing pushed.
+
 ## [Phase 1] — Premium Design System, Motion Engine & Shader Engine
 
 ### Added

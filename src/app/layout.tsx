@@ -16,17 +16,31 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "CodeMind X — AI Software Engineering Platform",
   description:
-    "CodeMind X V2: repository intelligence, controlled autonomous coding, and engineering answers. Phase 1 — premium design system, motion engine and shader engine.",
-  keywords: ["CodeMind X", "AI engineering", "Next.js", "TypeScript", "design system"],
+    "CodeMind X is an AI software engineering platform: repository intelligence, hybrid code search, architecture awareness, security and testing intelligence, and verified AI coding — every change reviewed before it lands.",
+  keywords: [
+    "CodeMind X",
+    "AI software engineering",
+    "repository intelligence",
+    "code search",
+    "AI coding",
+    "developer tools",
+  ],
   authors: [{ name: "CodeMind X" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "CodeMind X",
-    description: "AI-powered software engineering platform",
+    title: "CodeMind X — AI Software Engineering Platform",
+    description:
+      "Understand your codebase. Search it. Analyze it. Build with AI. Verify every change before it ships.",
     siteName: "CodeMind X",
     type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "CodeMind X — AI Software Engineering Platform",
+    description:
+      "Repository intelligence, hybrid search, architecture awareness and verified AI coding in one workspace.",
   },
 };
 
