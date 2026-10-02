@@ -20,3 +20,19 @@ Stage Summary:
 - Real recovery point now exists (entire scaffold tracked in git)
 - Decisions: keep Next.js 16 fullstack as implementation vehicle (FastAPI/Qdrant/Neo4j remain [PLANNED], nothing installed blindly); server domain logic under src/server/* while HTTP handlers stay in src/app/api; SQLite runtime artifacts untracked
 - Next intended phase: 0.5
+---
+Task ID: 0-G
+Agent: Z.ai (CodeMind X V2 orchestrator)
+Task: V2.1 governance baseline addendum to Phase 0 (RULES.md, CAPABILITIES.md, proof standards, negative-example policy, baseline-preservation test)
+
+Work Log:
+- Detected environment capabilities via binary/service probes: docker, docker-compose, redis, psql, qdrant, neo4j, ollama all ABSENT; playwright, python3, pip3, bun 1.3.14 present
+- Wrote RULES.md with all 14 required governance sections (git, protected paths, trust boundaries, prompt injection, memory, approval, autonomy L0-L3, evidence, no-fake, fallback, perf budgets, DoD, testing, observability)
+- Wrote CAPABILITIES.md: 14-entry registry with honest statuses (SQLite production, external LLM production via backend SDK, Playwright/LSP/WebGL local, vector/graph/sandbox fallback-planned, PostgreSQL/Redis/Qdrant/Neo4j/Docker/Ollama unavailable) + binding degradation ladder
+- Recorded negative-example policy in RULES.md §5/§9
+- Defined baseline-preservation test; initial architectural check: contracts are type-only, reference components leaf modules (re-verify after Phase 1 components exist)
+- Updated CHANGELOG.md and PROJECT_SAFETY.md phase tracking
+
+Stage Summary:
+- Governance baseline active; all future phases must read RULES.md first and honor CAPABILITIES.md statuses
+- No environmental limitation is hidden; degradation ladder is binding

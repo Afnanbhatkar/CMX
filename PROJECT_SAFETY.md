@@ -132,7 +132,8 @@ to inspect, and restore individual paths from that commit — never `reset --har
 
 ## 10. Phase Tracking
 
-- **Implemented phase:** Phase 0 — Safe Rebuild, Project Audit, Architecture
-  Foundation and Engineering Contract.
-- **Next intended phase:** Phase 0.5 (per the canonical execution order
-  `0 → 0.5 → 1 → 2 → …`). Phase 0 must not begin Phase 1 work.
+- **Implemented phases:** Phase 0 — Foundation; **Phase 0 governance addendum
+  (V2.1)** — `RULES.md` + `CAPABILITIES.md` + proof-of-completion standard +
+  DoD table + negative-example policy + baseline-preservation test.
+- **Next intended phase:** Phase 1 (premium design system, motion engine, shader
+  system). Every phase must read `RULES.md` first and consult `CAPABILITIES.md`.
