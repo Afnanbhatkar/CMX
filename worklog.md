@@ -36,3 +36,24 @@ Work Log:
 Stage Summary:
 - Governance baseline active; all future phases must read RULES.md first and honor CAPABILITIES.md statuses
 - No environmental limitation is hidden; degradation ladder is binding
+---
+Task ID: 1
+Agent: Z.ai (CodeMind X V2 orchestrator)
+Task: PHASE 1 — Premium design system, motion engine & shader engine (plus V2.1 governance baseline as Task 0-G)
+
+Work Log:
+- Read RULES.md first (compliance); researched Scrolltide/aurora interaction patterns via web search; reconstructed natively, nothing copied wholesale
+- Design tokens: rewrote globals.css token layer (dark-first cinematic: near-black/graphite/rust-copper, no blue-indigo chrome; success/warning/danger/info/selection/focus; motion vars) + src/lib/design-tokens.ts TS mirror (durations, easings, springs, z-index, AURORA_GRADIENT/SWEEP_GRADIENT)
+- Motion engine (src/components/motion/): FadeIn, SlideIn, ScaleIn, Shimmer, TypingText, TextReveal, GradientText, PanelTransition, ActivityTransition, barrel index — all typed, reduced-motion aware, deterministic cleanup
+- Reference reconstructions: AuroraText.tsx (exact supplied gradient/keyframes via Framer, self-contained), DiaTextReveal.tsx (sweep + clipped reveal + repeat + clamp typography), ShaderBackground.tsx (raw WebGL1, 6 modes, DPR caps, pause on hidden/offscreen, static frame under reduced motion, damped mouse, context-loss → CSS gradient + SVG grain fallback)
+- Showcase (src/features/design-system/): showcase.tsx hero+header+footer, motion-lab.tsx (9 demos + visual states + reduced-motion switch + ActivityEvent-contract activity stream), shader-lab.tsx (live controls); page.tsx replaced placeholder (justified deletion, preserved in git)
+- Fixed during verification: 1px canvas collapse (position conflict), missing useState import (500), ToggleGroup flex-1 overlap (consumer-side fix, shadcn untouched), stale CSS after globals rewrite (restarted via platform .zscripts/dev.sh after manual instances were SIGTERMed by platform supervisor)
+- Verified in browser: zero console errors, canvases 1280x725 + 758x420, all 6 modes live-switched, activity append 1→4 items, reduced-motion sim, synthetic webglcontextlost → fallback + no page break, overflow 0px @ 360/390/768/1024/1280/1440/1920, footer gap 0px, lint clean
+- Baseline-preservation test PASS: motion/background components import only react + framer-motion + design-tokens (no @/server, @/lib/db, prisma, sdk)
+- Updated CHANGELOG.md + PROJECT_SAFETY.md
+
+Stage Summary:
+- Phase 1 complete: token system + motion engine + shader engine live and browser-verified
+- 4 defects found and fixed during self-verification (documented in changelog)
+- Checkpoint: codemind-v2/phase-01-ui; screenshots in /tmp/phase1-*.png
+- Next intended phase: 2

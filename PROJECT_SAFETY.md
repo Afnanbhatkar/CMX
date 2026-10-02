@@ -132,8 +132,11 @@ to inspect, and restore individual paths from that commit — never `reset --har
 
 ## 10. Phase Tracking
 
-- **Implemented phases:** Phase 0 — Foundation; **Phase 0 governance addendum
-  (V2.1)** — `RULES.md` + `CAPABILITIES.md` + proof-of-completion standard +
-  DoD table + negative-example policy + baseline-preservation test.
-- **Next intended phase:** Phase 1 (premium design system, motion engine, shader
-  system). Every phase must read `RULES.md` first and consult `CAPABILITIES.md`.
+- **Implemented phases:** Phase 0 — Foundation; Phase 0 governance addendum
+  (V2.1) — `RULES.md` + `CAPABILITIES.md` + proof standards; **Phase 1 —
+  premium design system, motion engine, shader engine** (dark-first token
+  system, 9 motion primitives, AuroraText/DiaTextReveal reconstructions,
+  6-mode WebGL ShaderBackground with CSS fallback, design-system showcase on
+  `/`).
+- **Next intended phase:** Phase 2 (per the canonical order). Every phase must
+  read `RULES.md` first and consult `CAPABILITIES.md`.
