@@ -42,8 +42,8 @@ export function RepositoryWorkspaceShell() {
   const [lineInfo, setLineInfo] = useState<Record<string, { line?: number; range?: EditorRange }>>({});
 
   useEffect(
-    () =>
-      editorNavigation.subscribe((payload: EditorNavigationPayload) => {
+    () => {
+      const handlePayload = (payload: EditorNavigationPayload) => {
         // The service has already validated + verified the file — open the tab.
         useWorkspaceStore.getState().openTab(payload.filePath);
         const targetLine =
@@ -73,7 +73,14 @@ export function RepositoryWorkspaceShell() {
             [payload.filePath]: { line: targetLine, range: targetRange },
           }));
         }
-      }),
+      };
+      // Cross-destination navigation (V2.1): a payload fired while this shell
+      // was unmounted (search result clicked from the Search page, chat chip
+      // from the overview…) is consumed here on mount.
+      const retained = editorNavigation.consumeLastPayload();
+      if (retained) handlePayload(retained);
+      return editorNavigation.subscribe(handlePayload);
+    },
     [],
   );
 

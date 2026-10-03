@@ -18,6 +18,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
+  Bookmark,
+  Bug,
   ClipboardCheck,
   File,
   FlaskConical,
@@ -25,6 +29,7 @@ import {
   FolderGit2,
   GitBranch,
   GitCompareArrows,
+  History,
   Loader2,
   MessageSquare,
   Network,
@@ -49,6 +54,8 @@ import {
 } from "@/components/ui/command";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { editorNavigation } from "../editor-navigation";
+import { navigationHistory } from "../editor/navigation-history";
+import { getDebugCapability } from "../debug/dap-contracts";
 import type { RepoTreeNode } from "../types";
 
 export interface CommandPaletteProps {
@@ -201,8 +208,56 @@ export function CommandPalette({ filesMode, onFilesModeChange }: CommandPaletteP
           id: "search-files",
           label: "Search files",
           icon: Search,
+          shortcut: "⌘⇧F",
           run: () => {
             setSection("search");
+            close();
+          },
+        },
+        {
+          id: "nav-back",
+          label: "Navigate back",
+          icon: ArrowLeft,
+          shortcut: "Alt+←",
+          run: () => {
+            navigationHistory.back();
+            close();
+          },
+        },
+        {
+          id: "nav-forward",
+          label: "Navigate forward",
+          icon: ArrowRight,
+          shortcut: "Alt+→",
+          run: () => {
+            navigationHistory.forward();
+            close();
+          },
+        },
+        {
+          id: "nav-bookmark",
+          label: "Toggle bookmark on active file",
+          icon: Bookmark,
+          run: () => {
+            const path = useWorkspaceStore.getState().activeTabPath;
+            if (path) navigationHistory.toggleBookmark(path);
+            close();
+          },
+        },
+        {
+          id: "nav-recent",
+          label: "Recent locations",
+          icon: History,
+          run: () => {
+            const recent = navigationHistory.recentLocations();
+            if (recent.length > 0) {
+              void editorNavigation.openRange(
+                recent[0]!.path,
+                recent[0]!.line ?? 1,
+                recent[0]!.line ?? 1,
+                "manual",
+              );
+            }
             close();
           },
         },
@@ -314,6 +369,14 @@ export function CommandPalette({ filesMode, onFilesModeChange }: CommandPaletteP
     {
       heading: "Later phases",
       commands: [
+        {
+          id: "start-debugging",
+          label: "Start Debugging",
+          icon: Bug,
+          enabled: false,
+          disabledReason: getDebugCapability().reason,
+          run: () => {},
+        },
         {
           id: "analyze-security",
           label: "Analyze Security",

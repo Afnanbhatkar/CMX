@@ -18,6 +18,7 @@ import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoNS from "monaco-editor";
 
 import { editorNavigation } from "@/features/workspace/editor-navigation";
+import { parseWorkerClient } from "./parse-worker/parse-worker-client";
 
 /* ------------------------------------------------------------------ */
 /* Text-scan symbol outline (REAL — computed from actual content)      */
@@ -220,9 +221,15 @@ export function getIntelligenceCapability(feature: IntelligenceFeature): Intelli
 let providersRegistered = false;
 
 /**
- * Register the REAL text-outline document symbol provider (quick outline,
+ * Register the REAL outline document symbol provider (quick outline,
  * Ctrl+Shift+O) for the supported languages, plus the honest syntax-only
  * TS/JS diagnostics configuration. Idempotent.
+ *
+ * V2.1 §B: the outline provider is ASYNC and routes through the parse
+ * worker — Monaco runs it on the main thread, but the actual parsing work
+ * happens in the worker for files above the inline limit (tree-sitter
+ * first, structural scan fallback; the engine label in the response is the
+ * honest one).
  */
 export function registerCodeIntelligenceProviders(monaco: Monaco): void {
   if (providersRegistered) return;
@@ -232,8 +239,15 @@ export function registerCodeIntelligenceProviders(monaco: Monaco): void {
 
   for (const languageId of outlineLanguages) {
     monaco.languages.registerDocumentSymbolProvider(languageId, {
-      provideDocumentSymbols(model) {
-        const symbols = extractSymbols(model.getValue(), languageId);
+      async provideDocumentSymbols(model) {
+        const value = model.getValue();
+        const path = model.uri.path.replace(/^\//, "");
+        const result = await parseWorkerClient.parse({
+          path,
+          content: value,
+          languageId,
+        });
+        const symbols = result.ok ? result.symbols : [];
         const kindMap: Record<TextSymbolKind, MonacoNS.languages.SymbolKind> = {
           class: monaco.languages.SymbolKind.Class,
           function: monaco.languages.SymbolKind.Function,
@@ -244,6 +258,7 @@ export function registerCodeIntelligenceProviders(monaco: Monaco): void {
           variable: monaco.languages.SymbolKind.Variable,
           constant: monaco.languages.SymbolKind.Constant,
           property: monaco.languages.SymbolKind.Property,
+          component: monaco.languages.SymbolKind.Function,
         };
         return symbols.map((symbol) => ({
           name: symbol.name,
@@ -252,7 +267,7 @@ export function registerCodeIntelligenceProviders(monaco: Monaco): void {
           range: {
             startLineNumber: symbol.line,
             startColumn: symbol.column,
-            endLineNumber: symbol.line,
+            endLineNumber: symbol.endLine ?? symbol.line,
             endColumn: (symbol.column ?? 1) + symbol.name.length,
           },
           selectionRange: {

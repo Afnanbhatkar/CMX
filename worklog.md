@@ -616,3 +616,26 @@ Stage Summary:
 - V2.1 ADDITIONS live: single navigation service routes + registries, one FileReferenceChip across chat/search (approvals/tests/security ready to adopt), SharedFileState vocabulary, dock + CodeLens panel anchors reserved without redesign
 - Honesty preserved end-to-end: no fabricated diagnostics (semantic validation off + planned chips), no fake save flow, no un-sandboxed generated execution, unknown symbol/search ids fail typed, planned anchors render as disabled with reasons
 - HEAD still at Phase 5 commit when this record was written; commit + tag codemind-v2/phase-06-monaco created by the orchestrator checkpoint step (see Task 6-13)
+
+---
+Task ID: 7-v21-foundations
+Agent: Z.ai Code (orchestrator)
+Task: V2.1 ADDITIONS — AI-native editor foundations A–G (model manager, tree-sitter worker, navigation history, capability honesty, perf budgets, terminal foundation, DAP reservation)
+
+Work Log:
+- §A model-manager.ts: Monaco model reuse via file:/// URI adopt/peek, LRU sweep (cap 24; never dirty/attached), memory stats, large-file policy (>512KB flag, 6MB hard ceiling), dirty buffers persisted to sessionStorage (size+total capped, debounced) and restored into fresh models after reload. MonacoCodeEditor integrated: keepCurrentModel, dirty-peek prevents value-prop clobbering live buffers, adopt() on mount, model-manager is the single dirty source. Fixed a latent Phase 6 bug: @monaco-editor/react disposes models on unmount and clobbers dirty buffers when the (stale) value prop differs — dirty edits now survive tab switches.
+- §B parse worker: installed web-tree-sitter@0.25.10 + tree-sitter-wasms@0.1.13 (ABI-verified in bun before wiring); grammars + runtime self-hosted in public/wasm; code-parse.worker.ts (module worker) parses TS/TSX/JS/Python/JSON/CSS/bash/html via REAL tree-sitter AST walk, falls back to the shared structural scanner (honest engine label in every response); parse-worker-client routes >32KB files to the worker (main thread NEVER parses large files synchronously), inline ≤32KB, 8s timeout, engine-state subscribers. Shared scanner extracted to src/lib/code-intel/structure-scanner.ts (symbols+imports+constructs: routes/api-calls/database/env/config/test/component/hook/schema/documentation). Monaco document-symbol provider + FileIntelligencePanel outline now worker-backed with engine label + ms.
+- §C navigation-history.ts: back/forward stacks over real EditorNavigationService payloads, recent locations (deduped, cap 30), bookmarks (localStorage v1), goToTest() verifies candidate test paths against the REAL tree before opening. Strip controls in EditorTabs; Alt+←/→ = back/forward (VS Code convention), tab cycling moved to Alt+PageUp/PageDown; palette commands added.
+- §D language-capabilities.ts + CapabilityBadge.tsx: honest badge model (Definitions/References: LSP unavailable; Symbols: tree-sitter|structural-scan by the engine that really ran; Diagnostics: monaco-native for TS/JS syntax). Rendered in editor footer + intelligence panel. Command palette adds disabled "Start Debugging" with the DAP honesty reason.
+- §E perf budgets (src/lib/perf): ring-buffer samples per metric, p50/p95/max vs budgets, PerfHUD chip in the editor footer (shows "no samples yet" until measured); keystroke = keydown→content change; runLargeFileBenchmark() drives a 5MB buffer through the real model+editor path in an offscreen host (window.__cmxPerf). MEASURED in Chromium: keystroke p50 1.6ms / p95 9.3ms (budget 16); 5MB open 92–123ms (budget 1000; modelCreate ~28ms, attach ~47-75ms, first frame ~18-35ms).
+- §F terminal foundation: installed @xterm/xterm + addon-fit; TerminalAdapter contract + SandboxTerminalAdapter (reserved, honest banner, never fakes a shell); TerminalPanel in the dock (replaces Phase 2 TerminalOutputPanel); stack-trace.ts parses real file:line:col refs and resolves them through EditorNavigationService.openRange(sourceContext "terminal") — verified end-to-end in the browser.
+- §G dap-contracts.ts: DebugAdapter seam (DAP-shaped), factory registry anchor, getDebugCapability() honest probe; no fake debugging UI.
+- File API large-file path: readWorkspaceFile now serves 512KB–6MB files with largeFile:true (editor sheds minimap/folding/animation); >6MB stays honestly too-large. Viewport shows "large-file mode" badge.
+- Cross-destination navigation fix: EditorNavigationService retains the last successful payload; RepositoryWorkspaceShell consumes it on mount (opening a file from search/overview now actually opens the tab after the section switch).
+- Verification: .zscripts/verify-phase61.py — 15/15 PASS incl. no console errors; lint clean (public/wasm/** ignored, third-party artifact).
+
+Stage Summary:
+- All seven V2.1 editor foundations are REAL and wired: model manager (A), tree-sitter worker (B), navigation history (C), capability honesty badges (D), measured perf budgets + 5MB large-file path (E), xterm terminal + stack-trace navigation (F), DAP reservation (G).
+- Key artifacts: model-manager.ts, parse-worker/*, language-capabilities.ts, CapabilityBadge.tsx, navigation-history.ts, lib/perf/*, terminal/*, debug/dap-contracts.ts, structure-scanner.ts (shared with Phase 7).
+- Dependencies added: web-tree-sitter@0.25.10, tree-sitter-wasms@0.1.13, @xterm/xterm, @xterm/addon-fit.
+- No Prisma schema changes; no data touched.

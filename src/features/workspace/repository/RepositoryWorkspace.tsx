@@ -37,7 +37,7 @@ import { RepositoryExplorerShell } from "./RepositoryExplorerShell";
 export interface RepositoryWorkspaceProps {
   /** Focus the explorer filter input (Search rail view). */
   filterAutoFocus?: boolean;
-  /** Show the DiagnosticsPanel instead of TerminalOutputPanel below the editor. */
+  /** Show the Problems dock (diagnostics) instead of the Terminal below the editor. */
   showDiagnostics?: boolean;
   /** Target line for the active tab, from the last editor navigation payload. */
   targetLine?: number;
@@ -127,6 +127,8 @@ export function RepositoryWorkspace({
               language: file.language,
               truncated: file.truncated,
               size: file.size,
+              // V2.1 §A/§E — large-file path flag from the API.
+              largeFile: file.largeFile,
               // Additive provenance (V2.1 §B/§D) — present when the backend
               // resolved it, absent (never fabricated) otherwise.
               provenance: provenanceMeta ?? undefined,

@@ -218,6 +218,11 @@ export interface RepoFile {
   language: string;
   size: number;
   truncated: boolean;
+  /**
+   * V2.1 §A/§E — the file loaded through the large-file path (> 512 KB).
+   * The editor sheds expensive features (minimap, folding) for these.
+   */
+  largeFile?: boolean;
 }
 
 export type OpenTabStatus =

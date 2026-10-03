@@ -73,12 +73,30 @@ class EditorNavigationServiceImpl {
   private listeners = new Set<NavigationListener>();
   /** symbolId / resultId → resolved target (only REAL, verified entries). */
   private targets = new Map<string, RegisteredNavigationTarget>();
+  /**
+   * Last successful navigation payload, retained until a shell consumes it.
+   * Fixes cross-destination navigation: when a file is opened from a section
+   * where the repository workspace is not yet mounted (search, overview…),
+   * the shell consumes this on mount instead of the event being lost.
+   */
+  private lastPayload: EditorNavigationPayload | null = null;
 
   subscribe(listener: NavigationListener): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /**
+   * Consume the retained last payload (one-shot). Used by the repository
+   * workspace shell on mount so navigation issued from another destination
+   * still opens the file after the section switches.
+   */
+  consumeLastPayload(): EditorNavigationPayload | null {
+    const payload = this.lastPayload;
+    this.lastPayload = null;
+    return payload;
   }
 
   /* ---------------------------------------------------------------- */
@@ -279,10 +297,12 @@ class EditorNavigationServiceImpl {
         return result;
       }
 
-      // Success — notify the repository workspace.
+      // Success — retain for late mounters, then notify the subscribers.
+      const finalPayload: EditorNavigationPayload = { ...payload, filePath, line };
+      this.lastPayload = finalPayload;
       for (const listener of this.listeners) {
         try {
-          listener({ ...payload, filePath, line });
+          listener(finalPayload);
         } catch {
           // a broken subscriber must never break navigation for others
         }

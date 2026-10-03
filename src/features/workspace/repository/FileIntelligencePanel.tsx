@@ -16,19 +16,21 @@
  *          documentation.
  */
 
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
 import { Bot, FileCode2, GitCommitVertical, History, Link2, ListTree, Package, RefreshCw, ShieldCheck, Sigma, TestTube2, FileText } from "lucide-react";
 import { toast } from "sonner";
 
 import type { RepoTreeNode } from "@/features/workspace/types";
 import {
-  extractSymbols,
   getIntelligenceCapability,
   publishOutlineToNavigation,
   type TextSymbol,
 } from "@/features/workspace/editor/code-intelligence";
 import { monacoLanguageForPath } from "@/features/workspace/editor/monaco-setup";
+import { parseWorkerClient, type ParseEngine } from "@/features/workspace/editor/parse-worker/parse-worker-client";
+import { CapabilityBadge } from "@/features/workspace/editor/CapabilityBadge";
+import { recordPerfSample } from "@/lib/perf/budgets";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -222,14 +224,43 @@ export function FileIntelligencePanel({ filePath }: FileIntelligencePanelProps) 
     return scanImports(content);
   }, [content, filePath]);
 
-  /* Phase 6 §3 — REAL text-scan symbol outline (labeled honestly as a text
-     scan, not a language server). Also publishes the outline to the
-     navigation registry so openSymbol() works app-wide (V2.1 §A). */
-  const symbols = useMemo<TextSymbol[]>(() => {
-    if (!content || !filePath) return [];
-    const found = extractSymbols(content, monacoLanguageForPath(filePath));
-    publishOutlineToNavigation(filePath, found);
-    return found;
+  /* Phase 6 §3 outline — now parsed through the parse worker (V2.1 §B):
+     files above the inline limit NEVER scan on the main thread. The engine
+     that really ran is displayed (tree-sitter | structural scan). Also
+     publishes the outline to the navigation registry so openSymbol() works
+     app-wide (V2.1 §A). */
+  const [symbols, setSymbols] = useState<TextSymbol[]>([]);
+  const [symbolEngine, setSymbolEngine] = useState<ParseEngine>("unavailable");
+  const [symbolParseMs, setSymbolParseMs] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      if (!content || !filePath) {
+        setSymbols([]);
+        setSymbolEngine("unavailable");
+        setSymbolParseMs(null);
+        return;
+      }
+      const result = await parseWorkerClient.parse({
+        path: filePath,
+        content,
+        languageId: monacoLanguageForPath(filePath),
+      });
+      if (cancelled) return;
+      setSymbols(result.symbols);
+      setSymbolEngine(result.engine);
+      setSymbolParseMs(result.parseMs);
+      if (result.thread === "worker") {
+        recordPerfSample("worker.parse", result.parseMs);
+      }
+      publishOutlineToNavigation(filePath, result.symbols);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [content, filePath]);
 
   const openPath = (path: string) => {
@@ -387,9 +418,32 @@ export function FileIntelligencePanel({ filePath }: FileIntelligencePanelProps) 
             </div>
           )}
           <p className="mt-1 text-[10px] text-muted-foreground/60">
-            Text-scan outline (regex over the file) — tree-sitter symbols{" "}
-            {getIntelligenceCapability("symbols-tree-sitter").available ? "" : "[PLANNED]"}.
+            {symbolEngine === "tree-sitter"
+              ? "Parsed by tree-sitter (WASM) in the worker"
+              : symbolEngine === "structural-scan"
+                ? "Structural scan (regex over the file) — tree-sitter fallback"
+                : "Open the file to parse its structure"}
+            {symbolParseMs !== null ? ` · ${symbolParseMs} ms` : ""}
           </p>
+          <div className="mt-1">
+            <CapabilityBadge
+              feature="symbols"
+              source={
+                symbolEngine === "tree-sitter"
+                  ? "tree-sitter"
+                  : symbolEngine === "structural-scan"
+                    ? "structural-scan"
+                    : "unavailable"
+              }
+              note={
+                symbolEngine === "tree-sitter"
+                  ? "AST symbols from a real tree-sitter parse of this file."
+                  : symbolEngine === "structural-scan"
+                    ? "Deterministic scan over the real file content."
+                    : "No parse has run for this file yet."
+              }
+            />
+          </div>
         </Section>
 
         {/* Imports — REAL (parsed from the loaded tab content) */}

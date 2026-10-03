@@ -7,7 +7,9 @@
  * - Problems  — the live marker set of the ACTIVE file from Monaco's language
  *   workers (single-file syntax analysis; nothing fabricated). Clicking a
  *   problem opens the location via the EditorNavigationService.
- * - Terminal  — the honest Phase 2 output placeholder (no execution engine).
+ * - Terminal  — the xterm.js foundation (V2.1 ADDITIONS §F): the adapter
+ *   contract is wired, the sandbox shell itself arrives later; the stack
+ *   trace resolver navigates real files via EditorNavigationService.
  *
  * RESERVED anchors (V2.1 §D — added without redesigning this dock):
  * - Context Inspector, Git Timeline — disabled extension slots with honest
@@ -44,7 +46,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-import { TerminalOutputPanel } from "./TerminalOutputPanel";
+import { TerminalPanel } from "@/features/workspace/terminal/TerminalPanel";
 
 /* ------------------------------------------------------------------ */
 /* Dock registry (the extensible anchor list)                          */
@@ -368,7 +370,7 @@ export function EditorDockPanel({ requestedTab }: EditorDockPanelProps) {
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {activeAnchor.id === "problems" ? <ProblemsPanel /> : null}
-        {activeAnchor.id === "terminal" ? <TerminalOutputPanel /> : null}
+        {activeAnchor.id === "terminal" ? <TerminalPanel /> : null}
         {activeAnchor.availability === "planned" ? (
           <PlannedAnchorBody note={activeAnchor.note ?? "Planned anchor."} />
         ) : null}

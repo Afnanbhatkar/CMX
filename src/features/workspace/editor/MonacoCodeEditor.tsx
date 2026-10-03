@@ -43,6 +43,10 @@ import {
 } from "@/components/ui/tooltip";
 
 import { getEditorBaseline, registerEditorBaseline } from "./baselines";
+import { editorModelManager } from "./model-manager";
+import { parseWorkerClient } from "./parse-worker/parse-worker-client";
+import { recordPerfSample } from "@/lib/perf/budgets";
+import { exposePerfTooling } from "@/lib/perf/expose";
 import type { BlameRange, DiffHunk } from "@/features/workspace/diff-contracts";
 import {
   defineCodeMindThemes,
@@ -58,6 +62,7 @@ import {
 } from "./code-intelligence";
 
 ensureMonacoLoaderConfigured();
+exposePerfTooling();
 
 export interface MonacoCodeEditorProps {
   path: string;
@@ -195,9 +200,20 @@ export function MonacoCodeEditor({
   const decorationsRef = useRef<string[]>([]);
   const gitDecorationsRef = useRef<string[]>([]);
   const baselineRef = useRef<string>(content);
+  /** Keystroke latency measurement (V2.1 §E): keydown → content change. */
+  const keystrokeStartRef = useRef<number | null>(null);
 
   const [ready, setReady] = useState(false);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
+
+  /* Dirty-buffer continuity across remounts: when the model manager tracks a
+     dirty buffer for this path, the editor must NOT clobber it with the
+     (stale) loaded content prop — passing `undefined` keeps the live model. */
+  const trackedDirtyContent = editorModelManager.peekDirtyContent(path);
+  const [contentSnapshot] = useState(trackedDirtyContent);
+  const effectiveValue = contentSnapshot !== null && contentSnapshot !== content
+    ? undefined
+    : content;
 
   useDirtySync(path, content);
 
@@ -415,16 +431,54 @@ export function MonacoCodeEditor({
       monaco.editor.setTheme("codemind-dark");
       setActiveMonacoInstance(monaco);
 
+      /* Model manager (V2.1 §A): adopt the model Editor resolved (created or
+         reused via keepCurrentModel) so reuse / LRU / memory stats apply. */
+      const model = editor.getModel();
+      const adopt = editorModelManager.adopt(monaco, model, {
+        path,
+        languageId: language,
+        baseline: content,
+      });
+      baselineRef.current = getEditorBaseline(path) ?? content;
+      editorModelManager.setBaseline(model, baselineRef.current);
+
+      /* Dirty-buffer restore (V2.1 §A): a buffer saved earlier THIS SESSION
+         (before a reload) is restored into the freshly created model —
+         honestly, and marked dirty again. */
+      if (model && !adopt.restored && !editorModelManager.isPathDirty(path)) {
+        const saved = editorModelManager.getDirtyBuffer(path);
+        if (saved && saved.content !== model.getValue()) {
+          model.pushEditOperations(
+            [],
+            [{ range: model.getFullModelRange(), text: saved.content }],
+            () => null,
+          );
+          editorModelManager.noteModelChanged(model);
+          useWorkspaceStore.getState().setTabDirty(path, true);
+        }
+      }
+
+      /* Keystroke latency (V2.1 §E): keydown → content change, measured. */
+      editor.onKeyDown(() => {
+        if (keystrokeStartRef.current === null) keystrokeStartRef.current = performance.now();
+      });
+      editor.onDidChangeModelContent(() => {
+        if (keystrokeStartRef.current !== null) {
+          recordPerfSample("editor.keystroke", performance.now() - keystrokeStartRef.current);
+          keystrokeStartRef.current = null;
+        }
+      });
+
       editor.onDidChangeCursorSelection(() => repositionToolbar());
       editor.onDidScrollChange(() => {
         if (toolbar) repositionToolbar();
       });
-      // In-memory dirty flag: buffer differs from the loaded baseline.
-      baselineRef.current = getEditorBaseline(path) ?? content;
+      // In-memory dirty flag through the model manager (single source).
       editor.onDidChangeModelContent(() => {
-        const model = editor.getModel();
-        if (!model) return;
-        const dirty = model.getValue() !== baselineRef.current;
+        const currentModel = editor.getModel();
+        if (!currentModel) return;
+        editorModelManager.noteModelChanged(currentModel);
+        const dirty = editorModelManager.isDirty(currentModel);
         useWorkspaceStore.getState().setTabDirty(path, dirty);
       });
 
@@ -437,9 +491,14 @@ export function MonacoCodeEditor({
         void editor.getAction("editor.action.quickOutline")?.run();
       });
 
+      // Kick a parse-worker pass so the capability engine state is real for
+      // this file (V2.1 §B/§D). Result is consumed by the intelligence panel;
+      // here we only need the engine truth recorded.
+      void parseWorkerClient.parse({ path, content: model?.getValue() ?? content, languageId: language });
+
       setReady(true);
     },
-    [repositionToolbar, path, content, toolbar],
+    [repositionToolbar, path, content, toolbar, language],
   );
 
   const options = useMemo<MonacoEditorNS.IStandaloneEditorConstructionOptions>(
@@ -486,7 +545,8 @@ export function MonacoCodeEditor({
         theme="codemind-dark"
         language={language}
         path={path}
-        value={content}
+        value={effectiveValue}
+        keepCurrentModel
         options={options}
         onMount={handleMount}
         loading={

@@ -33,6 +33,9 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { MonacoCodeEditor } from "../editor/MonacoCodeEditor";
 import { DiffViewer } from "../editor/DiffViewer";
+import { CapabilityStrip } from "../editor/CapabilityBadge";
+import { parseWorkerClient } from "../editor/parse-worker/parse-worker-client";
+import { PerfHUD } from "@/lib/perf/PerfHUD";
 import {
   monacoLanguageForLabel,
   monacoLanguageForPath,
@@ -43,6 +46,8 @@ export interface CodeFileMeta {
   language?: string;
   truncated?: boolean;
   size?: number;
+  /** V2.1 §A/§E — the file opened through the large-file path. */
+  largeFile?: boolean;
   /** Provenance captured from the file API (branch/commit/status/etc.). */
   provenance?: FileProvenanceMeta;
 }
@@ -454,7 +459,10 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
     return (
       <div className="flex h-full min-h-0 flex-col">
         {breadcrumbs}
-        <StatusNotice title="File exceeds the 512 KB preview limit." />
+        <StatusNotice
+          title="File exceeds the 6 MB large-file editor limit."
+          detail="Files up to 6 MB open through the large-file path; anything bigger is refused rather than frozen."
+        />
       </div>
     );
   }
@@ -485,8 +493,10 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
   const monacoLanguage = activeTab.generated
     ? monacoLanguageForLabel(activeTab.generatedLanguage ?? null)
     : monacoLanguageForPath(activeTab.path);
-  // Perf §11: large files disable the minimap + smooth animations.
-  const largeFile = lineCount > 4_000 || (meta?.size ?? 0) > 200_000;
+  // Perf §11 + V2.1 §A/§E: large files disable the minimap + animations —
+  // policy comes from the API's large-file flag, size, and line count.
+  const largeFile =
+    meta?.largeFile || lineCount > 4_000 || (meta?.size ?? 0) > 200_000;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -553,6 +563,15 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
             title="Informational, security-oriented classification from repository indexing (V2.1 §A). Content is never treated as AI instructions."
           >
             {CLASSIFICATION_LABELS[provenance.classification] ?? provenance.classification}
+          </Badge>
+        ) : null}
+        {meta?.largeFile ? (
+          <Badge
+            variant="outline"
+            title="Opened through the large-file path — minimap, folding and animations are disabled to keep the page responsive."
+            className="shrink-0 border-warning/40 bg-warning/10 px-1.5 py-0 text-[10px] font-normal text-warning"
+          >
+            large-file mode
           </Badge>
         ) : null}
         {meta?.truncated ? (
@@ -669,7 +688,7 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
         />
       )}
 
-      {/* Footer — honest capability note */}
+      {/* Footer — honest capability note + V2.1 capability badges + perf HUD */}
       <footer className="flex h-6 shrink-0 items-center gap-2 border-t border-border-subtle px-2.5 text-[10px] text-muted-foreground">
         <span className="flex items-center gap-1">
           {activeTab.dirty ? "●" : "○"}
@@ -678,6 +697,14 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
         <span className="truncate">
           In-memory buffer — file writes arrive in a later phase.
         </span>
+        {!activeTab.generated ? (
+          <CapabilityStrip
+            languageId={monacoLanguage}
+            symbolEngine={parseWorkerClient.getEngine()}
+            className="ml-auto"
+          />
+        ) : null}
+        <PerfHUD className="shrink-0" />
       </footer>
     </div>
   );

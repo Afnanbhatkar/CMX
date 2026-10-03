@@ -19,9 +19,14 @@
  * nested <button>s — nested interactive elements are invalid HTML.
  */
 
-import { memo, useEffect } from "react";
+import { memo, useEffect, useState } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
+  Bookmark,
+  BookmarkCheck,
   Columns2,
+  FlaskConical,
   History,
   FileCode2,
   PanelLeftOpen,
@@ -33,6 +38,8 @@ import type { TreeGitStatus } from "@/features/workspace/types";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useWorkspaceStore } from "@/stores/workspace-store";
+import { navigationHistory } from "../editor/navigation-history";
+import { toast } from "@/hooks/use-toast";
 
 import {
   ContextMenu,
@@ -206,7 +213,104 @@ function ExplorerReopenButton() {
   );
 }
 
-/** Right-side strip actions: reopen closed + split editor + intelligence toggle. */
+/**
+ * Subscribes to navigation-history changes (back/forward/bookmarks) so the
+ * strip buttons reflect the real stack state. V2.1 ADDITIONS §C.
+ */
+function useNavigationHistoryVersion(): number {
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    return navigationHistory.subscribe(() => setVersion((v) => v + 1));
+  }, []);
+  return version;
+}
+
+/** Back / forward / bookmark / go-to-test cluster (V2.1 §C). */
+function NavigationControls() {
+  useNavigationHistoryVersion();
+  const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
+  const activeLine = 1; // bookmarks without a cursor line bookmark the file top
+
+  const bookmarked = activeTabPath
+    ? navigationHistory.isBookmarked(activeTabPath, activeLine) ||
+      navigationHistory.isBookmarked(activeTabPath)
+    : false;
+
+  const goTest = async () => {
+    if (!activeTabPath) return;
+    const result = await navigationHistory.goToTest(activeTabPath);
+    if (!result.ok && result.reason) {
+      toast({ title: "No test jumped", description: result.reason });
+    }
+  };
+
+  const iconButton = (
+    onClick: () => void,
+    label: string,
+    Icon: typeof ArrowLeft,
+    opts?: { disabled?: boolean; active?: boolean },
+  ) => (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          aria-pressed={opts?.active}
+          disabled={opts?.disabled}
+          onClick={onClick}
+          className={cn(
+            "flex size-7 items-center justify-center rounded-md text-muted-foreground",
+            "hover:bg-surface-hover hover:text-foreground",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "disabled:pointer-events-none disabled:opacity-40",
+            opts?.active && "text-foreground",
+          )}
+        >
+          <Icon aria-hidden="true" className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="text-[10.5px]">
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
+
+  return (
+    <>
+      {iconButton(
+        () => navigationHistory.back(),
+        "Navigate back (Alt+←)",
+        ArrowLeft,
+        { disabled: !navigationHistory.canGoBack() },
+      )}
+      {iconButton(
+        () => navigationHistory.forward(),
+        "Navigate forward (Alt+→)",
+        ArrowRight,
+        { disabled: !navigationHistory.canGoForward() },
+      )}
+      {iconButton(
+        () => {
+          if (!activeTabPath) return;
+          const added = navigationHistory.toggleBookmark(activeTabPath, undefined);
+          if (added) {
+            toast({ title: "Bookmark added", description: activeTabPath });
+          } else {
+            toast({ title: "Bookmark removed", description: activeTabPath });
+          }
+        },
+        bookmarked ? "Remove bookmark" : "Bookmark active file",
+        bookmarked ? BookmarkCheck : Bookmark,
+        { disabled: !activeTabPath, active: bookmarked },
+      )}
+      {iconButton(() => void goTest(), "Go to test", FlaskConical, {
+        disabled: !activeTabPath || activeTabPath.includes(".test.") || activeTabPath.includes(".spec."),
+      })}
+    </>
+  );
+}
+
+/** Right-side strip actions: history + reopen closed + split editor + intelligence toggle. */
 function StripActions() {
   const reopenClosedTab = useWorkspaceStore((s) => s.reopenClosedTab);
   const closedCount = useWorkspaceStore((s) => s.closedTabs.length);
@@ -217,6 +321,7 @@ function StripActions() {
 
   return (
     <div className="ml-auto flex shrink-0 items-center gap-0.5 border-l border-border-subtle px-1">
+      <NavigationControls />
       {closedCount > 0 ? (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -288,22 +393,32 @@ export function EditorTabs() {
   const reopenClosedTab = useWorkspaceStore((s) => s.reopenClosedTab);
   const explorerOpen = useWorkspaceStore((s) => s.explorerOpen);
 
-  /* Keyboard: Alt+ArrowLeft/Right cycle tabs, Alt+W closes the active tab.
-     (Ctrl+W is reserved by the browser and cannot be reliably intercepted.) */
+  /* Keyboard: Alt+ArrowLeft/Right = navigation history back/forward (V2.1 §C,
+     VS Code convention), Alt+PageUp/PageDown cycle tabs, Alt+W closes the
+     active tab. (Ctrl+W is reserved by the browser and cannot be reliably
+     intercepted.) */
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        navigationHistory.back();
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        navigationHistory.forward();
+        return;
+      }
       const openTabs = useWorkspaceStore.getState().tabs;
       if (openTabs.length === 0) return;
       const active = useWorkspaceStore.getState().activeTabPath;
       const index = openTabs.findIndex((t) => t.path === active);
 
-      if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+      if (event.key === "PageDown" || event.key === "PageUp") {
         event.preventDefault();
         const nextIndex =
-          openTabs.length === 0
-            ? 0
-            : (index + (event.key === "ArrowRight" ? 1 : openTabs.length - 1)) % openTabs.length;
+          (index + (event.key === "PageDown" ? 1 : openTabs.length - 1)) % openTabs.length;
         const next = openTabs[nextIndex];
         if (next) setActiveTab(next.path);
         return;
@@ -333,7 +448,7 @@ export function EditorTabs() {
   return (
     <div
       role="tablist"
-      aria-label="Open files — Alt+ArrowLeft/Right to cycle, Alt+W to close"
+      aria-label="Open files — Alt+ArrowLeft/Right navigate back/forward, Alt+PageUp/PageDown cycle tabs, Alt+W to close"
       className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-border-subtle bg-surface [scrollbar-width:thin]"
     >
       {!explorerOpen ? (

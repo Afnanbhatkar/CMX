@@ -20,6 +20,11 @@ import path from "node:path";
 
 import type { RepoTreeNode } from "@/features/workspace/types";
 
+/** Large-file policy (V2.1 ADDITIONS §A/§E) — matches the model manager. */
+export const LARGE_FILE_BYTES = 512 * 1024;
+/** Hard ceiling for the editor path (bytes) — above this the tab is too-large. */
+export const MAX_EDITOR_FILE_BYTES = 6 * 1024 * 1024;
+
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = process.cwd();
@@ -294,11 +299,18 @@ export type ReadFileResult =
         language: string;
         size: number;
         truncated: boolean;
+        /** V2.1 §A/§E — true when the file opened through the large-file path. */
+        largeFile: boolean;
       };
     }
   | { ok: false; code: "not-found" | "forbidden" | "too-large" | "binary" };
 
-/** Read a real workspace file (text only, size-capped, traversal-safe). */
+/**
+ * Read a real workspace file (text only, size-capped, traversal-safe).
+ * Large-file path (V2.1 §E): files between 512 KB and 6 MB load with
+ * `largeFile: true` so the editor sheds expensive features instead of
+ * freezing; above 6 MB the tab stays honestly "too-large".
+ */
 export async function readWorkspaceFile(input: string): Promise<ReadFileResult> {
   const check = resolveAllowedPath(input);
   if (!check.ok) return { ok: false, code: "forbidden" };
@@ -311,7 +323,7 @@ export async function readWorkspaceFile(input: string): Promise<ReadFileResult> 
   }
   if (!stat.isFile()) return { ok: false, code: "forbidden" };
   if (!isTextFile(path.basename(check.absolute))) return { ok: false, code: "binary" };
-  if (stat.size > MAX_FILE_BYTES) return { ok: false, code: "too-large" };
+  if (stat.size > MAX_EDITOR_FILE_BYTES) return { ok: false, code: "too-large" };
 
   try {
     const buf = await fs.readFile(check.absolute);
@@ -325,6 +337,7 @@ export async function readWorkspaceFile(input: string): Promise<ReadFileResult> 
         language: languageForPath(check.relative),
         size: stat.size,
         truncated: false,
+        largeFile: stat.size > LARGE_FILE_BYTES,
       },
     };
   } catch {
