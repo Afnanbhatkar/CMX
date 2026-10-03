@@ -54,6 +54,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { useWorkspaceStore } from "@/stores/workspace-store";
+import { dispatchEditorCommand } from "@/features/workspace/editor/monaco-setup";
 
 import { AIChatSidebar } from "@/features/workspace/chat";
 import { RepositoryWorkspaceShell } from "@/features/workspace/repository";
@@ -347,7 +348,32 @@ export function AIWorkspace() {
         useWorkspaceStore.getState().setPaletteOpen(true);
         return;
       }
-      if (isEditableTarget(event.target)) return;
+      // Phase 6 §2 — global search (Ctrl/Cmd+Shift+F).
+      if (key === "f" && event.shiftKey) {
+        event.preventDefault();
+        useWorkspaceStore.getState().setSection("search");
+        return;
+      }
+      // Inside an editable target, browser/monaco semantics win — EXCEPT the
+      // palette keys above. Inside a Monaco editor, Monaco's own bindings
+      // already handle goto-line / quick-outline; don't double-fire.
+      const insideMonaco =
+        event.target instanceof Element &&
+        event.target.closest(".monaco-editor") !== null;
+      if (isEditableTarget(event.target) || insideMonaco) return;
+
+      // Phase 6 §2 — go-to-line (Ctrl/Cmd+G) routed to the active editor.
+      if (key === "g" && !event.shiftKey) {
+        event.preventDefault();
+        dispatchEditorCommand("goto-line");
+        return;
+      }
+      // Phase 6 §2 — go-to-symbol (Ctrl/Cmd+Shift+O).
+      if (key === "o" && event.shiftKey) {
+        event.preventDefault();
+        dispatchEditorCommand("quick-outline");
+        return;
+      }
       // Alt+B — e.key is a dead-key glyph on some layouts, so accept KeyB too.
       const isB = key === "b" || event.code === "KeyB";
       if (isB && event.altKey) {

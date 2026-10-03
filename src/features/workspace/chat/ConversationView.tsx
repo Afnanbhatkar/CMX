@@ -17,7 +17,7 @@ import { Check, Copy, FileCode2, Paperclip, RotateCcw } from "lucide-react";
 
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Attachment, ChatMessage } from "@/features/workspace/types";
-import { editorNavigation } from "@/features/workspace/editor-navigation";
+import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
 import { LatticeLoader, ThoughtChain, ThinkingOrb } from "@/components/ai";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -133,15 +133,6 @@ function RegenerateButton({
 /* ------------------------------------------------------------------ */
 
 function AttachmentChip({ attachment }: { attachment: Attachment }) {
-  const open = useCallback(() => {
-    if (!attachment.path) return;
-    void editorNavigation.open({
-      filePath: attachment.path,
-      sourceContext: "chat",
-      navigationReason: "chat attachment",
-    });
-  }, [attachment.path]);
-
   if (!attachment.path) {
     return (
       <span className="inline-flex max-w-[220px] items-center gap-1 rounded-full border border-border-subtle bg-background px-2 py-0.5 text-[10px] text-muted-foreground">
@@ -151,17 +142,9 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
     );
   }
 
-  return (
-    <button
-      type="button"
-      onClick={open}
-      aria-label={`Open ${attachment.label} in editor`}
-      className="inline-flex max-w-[220px] items-center gap-1 rounded-full border border-border-subtle bg-background px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/60"
-    >
-      <FileCode2 aria-hidden="true" className="size-3 shrink-0" />
-      <span className="truncate font-mono">{attachment.label}</span>
-    </button>
-  );
+  // V2.1 §B — chat file references use the ONE shared FileReferenceChip
+  // (editor navigation routing + consistent file-state presentation).
+  return <FileReferenceChip path={attachment.path} source="chat" size="sm" />;
 }
 
 /* ------------------------------------------------------------------ */

@@ -25,13 +25,23 @@ import {
   type Attachment,
   type ChatMessage,
   type Conversation,
+  type FileSelection,
   type OpenTab,
   type OpenTabStatus,
   type PanelCollapseState,
   type PanelSizes,
+  type SelectionAIAction,
   type TreeGitStatus,
   type WorkspaceSectionId,
 } from "@/features/workspace/types";
+
+/**
+ * A real editor selection queued for a selected-code AI action (Phase 6 §5).
+ * `code` is the exact selected text; consumed once by the AI composer.
+ */
+export interface QueuedChatSelection extends FileSelection {
+  action: SelectionAIAction;
+}
 
 /* ------------------------------------------------------------------ */
 /* Limits                                                              */
@@ -160,8 +170,23 @@ export interface WorkspaceState {
   closedTabs: Array<{ path: string }>;
   /** File path queued for the chat composer ("Explain with AI"); null when empty. */
   queuedChatFile: string | null;
+  /**
+   * Editor selection queued for a selected-code AI action (Phase 6 §5);
+   * consumed by the AI composer which builds the real prompt + attachment.
+   * NEVER persisted (contains file content).
+   */
+  queuedChatSelection: QueuedChatSelection | null;
   /** Breadcrumbs/tree reveal signal — consumers react to `nonce` changes. */
   treeReveal: { path: string; nonce: number } | null;
+
+  /*
+   * Split editor (Phase 6 §1) — session-only. Pane A is the primary group
+   * driven by activeTabPath; pane B keeps its own active path. Closing a
+   * split clears pane B state. Never persisted.
+   */
+  splitEditor: boolean;
+  paneBPath: string | null;
+  activeEditorPane: "a" | "b";
 
   /* transient ui — never persisted */
   runPhase: AIRunPhase;
@@ -236,8 +261,31 @@ export interface WorkspaceState {
   queueChatFile: (path: string) => void;
   /** Returns the queued chat file path (or null) and clears the queue. */
   consumeQueuedChatFile: () => string | null;
+  /** Queues an editor selection for an AI action; switches to the assistant section. */
+  queueChatSelection: (selection: QueuedChatSelection) => void;
+  /** Returns the queued selection (or null) and clears the queue. */
+  consumeQueuedChatSelection: () => QueuedChatSelection | null;
   /** Emits a tree-reveal signal; consumers key off the incremented nonce. */
   revealInTree: (path: string) => void;
+
+  /**
+   * Opens an in-memory GENERATED tab (AI code block without a repository
+   * reference). Content is real AI output; the tab is always badged
+   * "generated" and never fetched from disk. Returns the tab path.
+   */
+  openGeneratedTab: (name: string, code: string, language?: string) => string;
+  /** Marks a file tab's in-memory buffer as changed / unchanged. */
+  setTabDirty: (path: string, dirty: boolean) => void;
+
+  /* split editor (session-only) */
+  toggleSplitEditor: () => void;
+  setPaneBPath: (path: string | null) => void;
+  setActiveEditorPane: (pane: "a" | "b") => void;
+  /**
+   * Opens a path in the FOCUSED pane: pane A uses the normal openTab flow,
+   * pane B focuses the tab there (opening it via openTab first when new).
+   */
+  openTabInFocusedPane: (path: string) => void;
 }
 
 function newId(): string {
@@ -266,7 +314,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       recentTabs: [],
       closedTabs: [],
       queuedChatFile: null,
+      queuedChatSelection: null,
       treeReveal: null,
+
+      /* split editor — session-only */
+      splitEditor: false,
+      paneBPath: null,
+      activeEditorPane: "a",
 
       explorerOpen: true,
       intelligenceOpen: true,
@@ -494,6 +548,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             const next = tabs[Math.min(Math.max(idx - 1, 0), tabs.length - 1)];
             activeTabPath = next ? next.path : null;
           }
+          // Phase 6: pane B never keeps a dangling path.
+          const paneBPath = s.paneBPath === path ? null : s.paneBPath;
           // A really-closed tab lands on the reopen stack (most recent first).
           const closedTabs =
             idx !== -1
@@ -504,7 +560,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               : s.closedTabs;
           // …and leaves the MRU list.
           const recentTabs = s.recentTabs.filter((p) => p !== path);
-          return { tabs, activeTabPath, closedTabs, recentTabs };
+          return { tabs, activeTabPath, closedTabs, recentTabs, paneBPath };
         }),
       setActiveTab: (path) =>
         set((s) => ({
@@ -598,10 +654,99 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (queued !== null) set({ queuedChatFile: null });
         return queued;
       },
+      queueChatSelection: (selection) =>
+        set({ queuedChatSelection: selection, section: "assistant" }),
+      consumeQueuedChatSelection: () => {
+        const queued = get().queuedChatSelection;
+        if (queued !== null) set({ queuedChatSelection: null });
+        return queued;
+      },
       revealInTree: (path) =>
         set((s) => ({
           treeReveal: { path, nonce: (s.treeReveal?.nonce ?? 0) + 1 },
         })),
+
+      /* ---------------- generated + dirty tabs (Phase 6) ---------------- */
+      openGeneratedTab: (name, code, language) => {
+        const slug =
+          name
+            .toLowerCase()
+            .replace(/[^a-z0-9._-]+/g, "-")
+            .replace(/^-+|-+$/g, "") || "snippet";
+        const stamp = Date.now().toString(36);
+        const path = `generated/${stamp}-${slug}`;
+        set((s) => {
+          const candidate = [
+            ...s.tabs,
+            {
+              path,
+              status: "ready" as const,
+              content: code,
+              generated: true,
+              generatedLanguage: language,
+            },
+          ];
+          let nextTabs = candidate;
+          if (candidate.length > MAX_TABS) {
+            // Honest eviction: drop the OLDEST GENERATED tab first (it stays
+            // re-openable from its original AI message); only when there are
+            // none, drop the oldest non-active tab onto the reopen stack.
+            const oldestGeneratedIdx = candidate.findIndex((t) => t.generated);
+            const evictIdx =
+              oldestGeneratedIdx !== -1
+                ? oldestGeneratedIdx
+                : candidate.findIndex((t) => t.path !== s.activeTabPath);
+            if (evictIdx !== -1) {
+              const evicted = candidate[evictIdx];
+              candidate.splice(evictIdx, 1);
+              nextTabs = candidate;
+              if (!evicted.generated) {
+                set({
+                  closedTabs: [
+                    { path: evicted.path },
+                    ...get().closedTabs.filter((c) => c.path !== evicted.path),
+                  ].slice(0, MAX_CLOSED_TABS),
+                });
+              }
+            }
+            nextTabs = nextTabs.slice(-MAX_TABS);
+          }
+          return {
+            tabs: nextTabs,
+            activeTabPath: path,
+            // The editor workspace lives on the Assistant page — focus it so
+            // the generated tab is actually visible.
+            section: "assistant",
+            recentTabs: [path, ...s.recentTabs].slice(0, MAX_RECENT_TABS),
+          };
+        });
+        return path;
+      },
+      setTabDirty: (path, dirty) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.path === path && t.dirty !== dirty ? { ...t, dirty } : t,
+          ),
+        })),
+
+      /* ---------------- split editor (Phase 6, session-only) ---------------- */
+      toggleSplitEditor: () =>
+        set((s) => ({
+          splitEditor: !s.splitEditor,
+          paneBPath: s.splitEditor ? null : (s.activeTabPath ?? null),
+          activeEditorPane: "a",
+        })),
+      setPaneBPath: (path) => set({ paneBPath: path }),
+      setActiveEditorPane: (pane) => set({ activeEditorPane: pane }),
+      openTabInFocusedPane: (path) => {
+        const s = get();
+        if (s.splitEditor && s.activeEditorPane === "b") {
+          s.openTab(path);
+          s.setPaneBPath(path);
+          return;
+        }
+        s.openTab(path);
+      },
     }),
     {
       name: "codemind-workspace",
@@ -633,8 +778,11 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         intelligenceOpen: s.intelligenceOpen,
         conversations: s.conversations,
         activeConversationId: s.activeConversationId,
-        // paths only — file contents stay transient (never persisted)
-        tabs: s.tabs.map((t) => ({ path: t.path })),
+        // paths only — file contents stay transient (never persisted);
+        // generated tabs are session-only and never persisted either
+        tabs: s.tabs
+          .filter((t) => !t.generated)
+          .map((t) => ({ path: t.path })),
         activeTabPath: s.activeTabPath,
       }),
       merge: (persisted, current) => {
@@ -658,7 +806,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
                 (t): t is OpenTab =>
                   !!t &&
                   typeof (t as OpenTab).path === "string" &&
-                  (t as OpenTab).path.length > 0,
+                  (t as OpenTab).path.length > 0 &&
+                  // generated tabs are session-only; stale persisted paths
+                  // from older builds are dropped, never fetched
+                  !(t as OpenTab).path.startsWith("generated/"),
               )
               .map((t) => ({ path: t.path, status: "loading" as const }))
               .slice(0, MAX_TABS)

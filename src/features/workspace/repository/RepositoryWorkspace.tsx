@@ -24,15 +24,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import type { FileProvenanceMeta, RepoFile } from "@/features/workspace/types";
+import { registerEditorBaseline, pruneEditorBaselines } from "@/features/workspace/editor/baselines";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
 import { CodeEditorViewport } from "./CodeEditorViewport";
 import type { CodeFileMeta, EditorRange } from "./CodeEditorViewport";
-import { DiagnosticsPanel } from "./DiagnosticsPanel";
+import { EditorDockPanel } from "./EditorDockPanel";
 import { EditorTabs } from "./EditorTabs";
 import { FileIntelligencePanel } from "./FileIntelligencePanel";
 import { RepositoryExplorerShell } from "./RepositoryExplorerShell";
-import { TerminalOutputPanel } from "./TerminalOutputPanel";
 
 export interface RepositoryWorkspaceProps {
   /** Focus the explorer filter input (Search rail view). */
@@ -79,6 +79,8 @@ export function RepositoryWorkspace({
   const setTabStatus = useWorkspaceStore((s) => s.setTabStatus);
   const explorerOpen = useWorkspaceStore((s) => s.explorerOpen);
   const intelligenceOpen = useWorkspaceStore((s) => s.intelligenceOpen);
+  const splitEditor = useWorkspaceStore((s) => s.splitEditor);
+  const paneBPath = useWorkspaceStore((s) => s.paneBPath);
 
   const compact = useCompactWidth();
 
@@ -86,13 +88,15 @@ export function RepositoryWorkspace({
   const inflightRef = useRef(new Map<string, AbortController>());
 
   useEffect(() => {
-    // Prune metadata for tabs that no longer exist (paths only, cheap).
+    // Prune metadata + editor baselines for tabs that no longer exist.
+    const livePaths = tabs.map((t) => t.path);
     if (fileMetaRegistry.size > 0) {
-      const live = new Set(tabs.map((t) => t.path));
+      const live = new Set(livePaths);
       for (const key of fileMetaRegistry.keys()) {
         if (!live.has(key)) fileMetaRegistry.delete(key);
       }
     }
+    pruneEditorBaselines(livePaths);
 
     const loading = tabs.filter((t) => t.status === "loading");
     if (loading.length === 0) return;
@@ -127,6 +131,8 @@ export function RepositoryWorkspace({
               // resolved it, absent (never fabricated) otherwise.
               provenance: provenanceMeta ?? undefined,
             });
+            // Register the loaded content as the dirty-tracking baseline.
+            registerEditorBaseline(path, file.content);
             setTabStatus(path, "ready", { content: file.content });
           } else {
             setTabStatus(path, "error", {
@@ -201,7 +207,7 @@ export function RepositoryWorkspace({
                 className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
               />
               <ResizablePanel defaultSize={28} minSize={15}>
-                {showDiagnostics ? <DiagnosticsPanel /> : <TerminalOutputPanel />}
+                <EditorDockPanel requestedTab={showDiagnostics ? "problems" : null} />
               </ResizablePanel>
             </ResizablePanelGroup>
           </div>
@@ -237,18 +243,46 @@ export function RepositoryWorkspace({
             className="min-h-0 flex-1"
           >
             <ResizablePanel defaultSize={72} minSize={25}>
-              <CodeEditorViewport
-                line={targetLine}
-                range={targetRange}
-                meta={activeMeta}
-              />
+              {splitEditor ? (
+                <ResizablePanelGroup
+                  id="cmx-editor-split-v1"
+                  direction="horizontal"
+                  className="min-h-0"
+                >
+                  <ResizablePanel defaultSize={50} minSize={20}>
+                    <CodeEditorViewport
+                      line={targetLine}
+                      range={targetRange}
+                      meta={activeMeta}
+                      paneId="a"
+                    />
+                  </ResizablePanel>
+                  <ResizableHandle
+                    aria-label="Resize split editors"
+                    className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
+                  />
+                  <ResizablePanel defaultSize={50} minSize={20}>
+                    <CodeEditorViewport
+                      meta={paneBPath ? fileMetaRegistry.get(paneBPath) : undefined}
+                      paneId="b"
+                    />
+                  </ResizablePanel>
+                </ResizablePanelGroup>
+              ) : (
+                <CodeEditorViewport
+                  line={targetLine}
+                  range={targetRange}
+                  meta={activeMeta}
+                  paneId="a"
+                />
+              )}
             </ResizablePanel>
             <ResizableHandle
               aria-label="Resize editor / output"
               className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
             />
             <ResizablePanel defaultSize={28} minSize={15}>
-              {showDiagnostics ? <DiagnosticsPanel /> : <TerminalOutputPanel />}
+              <EditorDockPanel requestedTab={showDiagnostics ? "problems" : null} />
             </ResizablePanel>
           </ResizablePanelGroup>
         </div>

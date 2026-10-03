@@ -11,12 +11,12 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { File, Search } from "lucide-react";
+import { Search } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
 import { editorNavigation } from "../editor-navigation";
 import type { RepoTreeNode } from "../types";
 import { fuzzyFilter } from "../repository/fuzzy";
@@ -33,39 +33,6 @@ function flattenFiles(nodes: RepoTreeNode[], out: string[] = []): string[] {
 }
 
 type LoadState = "loading" | "ready" | "error";
-
-/** Renders the path with fuzzy match positions highlighted (subtle, informational). */
-function HighlightPath({ path, positions }: { path: string; positions: number[] }) {
-  if (positions.length === 0) return <>{path}</>;
-  const set = new Set(positions);
-  const parts: React.ReactNode[] = [];
-  let buffer: string[] = [];
-  let matched = set.has(0);
-  const flush = (key: string) => {
-    if (buffer.length === 0) return;
-    const chunk = buffer.join("");
-    parts.push(
-      matched ? (
-        <mark key={key} className="rounded-sm bg-primary/20 text-inherit">
-          {chunk}
-        </mark>
-      ) : (
-        <span key={key}>{chunk}</span>
-      ),
-    );
-    buffer = [];
-  };
-  for (let i = 0; i < path.length; i += 1) {
-    const isMatch = set.has(i);
-    if (isMatch !== matched) {
-      flush(`c${i}`);
-      matched = isMatch;
-    }
-    buffer.push(path[i]);
-  }
-  flush("end");
-  return <>{parts}</>;
-}
 
 export function SearchFilesPanel() {
   const [state, setState] = useState<LoadState>("loading");
@@ -120,6 +87,20 @@ export function SearchFilesPanel() {
       positions: match.positions,
     }));
   }, [files, filter]);
+
+  /* V2.1 §A — every result is registered so openSearchResult(resultId) is a
+     valid programmatic route for future search surfaces. */
+  useEffect(() => {
+    editorNavigation.registerTargets(
+      "search-result",
+      filtered.map(({ path }) => ({
+        id: `res:${path}`,
+        filePath: path,
+        label: path,
+      })),
+    );
+    return () => editorNavigation.unregisterTargets("search-result");
+  }, [filtered]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -185,28 +166,13 @@ export function SearchFilesPanel() {
         {state === "ready" && filtered.length > 0 && (
           <ul className="max-h-[50vh] min-h-0 divide-y divide-border-subtle overflow-y-auto rounded-md border border-border-subtle">
             {filtered.map(({ path, positions }) => (
-              <li key={path}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void editorNavigation.open({
-                      filePath: path,
-                      sourceContext: "search",
-                    })
-                  }
-                  className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors",
-                    "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/60",
-                  )}
-                >
-                  <File
-                    className="size-3.5 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                  <span className="min-w-0 truncate font-mono text-xs text-foreground/85">
-                    <HighlightPath path={path} positions={positions} />
-                  </span>
-                </button>
+              <li key={path} className="px-2.5 py-1.5">
+                {/* V2.1 §B — the ONE shared file-reference component. */}
+                <FileReferenceChip
+                  path={path}
+                  source="search"
+                  highlightPositions={positions}
+                />
               </li>
             ))}
           </ul>

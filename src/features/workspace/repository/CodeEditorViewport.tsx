@@ -1,29 +1,26 @@
 "use client";
 
 /**
- * CodeMind X V2 — code editor viewport (Phase 5, read-only preview).
+ * CodeMind X V2 — code editor viewport (Phase 6, Monaco).
  *
  * Renders the ACTIVE tab with honest status states only:
  *   none / loading / missing / binary / too-large / error (retry) / ready.
  *
  * Phase 2 core preserved: header (path, language, line count, truncation,
- * copy), scrollable line-numbered preview contained to the panel, honest
- * read-only footer, single-line navigation highlight.
+ * copy), breadcrumbs, honest footer. Phase 5 preserved: metadata header
+ * (git badge, branch@shortSha, last-modified, classification), binary view,
+ * navigation range forwarding.
  *
- * Phase 5 (spec §3/§4/§7/§9):
- * - Breadcrumbs above the header; directory segments reveal in the tree.
- * - File metadata header: git status badge, branch@shortSha, last-modified
- *   (relative), auto-classification badge (informational, V2.1 §A).
- * - Multi-line range highlight from editor navigation payloads.
- * - Binary view: real metadata + safe image preview + download (no binary
- *   rendered as source, ever).
+ * Phase 6 (spec §1): the ready state renders the REAL Monaco editor —
+ * syntax highlighting, folding, minimap (policy-based), find/replace with
+ * regex, go-to-line, quick outline, in-memory editing with an honest dirty
+ * indicator (no faked save), and the selected-code AI actions toolbar.
  */
 
-import { memo, useEffect, useRef, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import type { ReactNode } from "react";
-import { useReducedMotion } from "framer-motion";
 import { formatDistanceToNow } from "date-fns";
-import { Check, Copy, Download, FileCode2 } from "lucide-react";
+import { Check, Copy, Download, FileCode2, FileDiff, GitCommitVertical } from "lucide-react";
 
 import type { FileProvenanceMeta } from "@/features/workspace/types";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +31,13 @@ import { cn } from "@/lib/utils";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
 import { Breadcrumbs } from "./Breadcrumbs";
+import { MonacoCodeEditor } from "../editor/MonacoCodeEditor";
+import { DiffViewer } from "../editor/DiffViewer";
+import {
+  monacoLanguageForLabel,
+  monacoLanguageForPath,
+} from "../editor/monaco-setup";
+import type { GitFileBlame, GitFileDiff } from "@/features/workspace/diff-contracts";
 
 export interface CodeFileMeta {
   language?: string;
@@ -57,6 +61,11 @@ export interface CodeEditorViewportProps {
   range?: EditorRange;
   /** Real metadata captured from the file API response. */
   meta?: CodeFileMeta;
+  /**
+   * Editor pane identity (Phase 6 split editor): "a" reads the primary
+   * active tab, "b" reads the split pane's path. Defaults to "a".
+   */
+  paneId?: "a" | "b";
 }
 
 /* Client-side fallback — mirrors the server's languageForPath values. */
@@ -109,50 +118,6 @@ const GIT_BADGE: Record<string, { label: string; className: string }> = {
   untracked: { label: "Untracked", className: "border-stone-400/40 bg-stone-400/10 text-stone-500" },
   renamed: { label: "Renamed", className: "border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-400" },
 };
-
-/* ------------------------------------------------------------------ */
-/* Line row (memoized)                                                 */
-/* ------------------------------------------------------------------ */
-
-const CodeLine = memo(function CodeLine({
-  number,
-  text,
-  highlighted,
-  inRange,
-}: {
-  number: number;
-  text: string;
-  highlighted: boolean;
-  inRange: boolean;
-}) {
-  return (
-    <div
-      data-line={number}
-      className={cn(
-        "flex w-max min-w-full",
-        (highlighted || inRange) && "bg-primary/10",
-        inRange && !highlighted && "border-l-2 border-primary/30",
-      )}
-    >
-      <span
-        aria-hidden="true"
-        className={cn(
-          "sticky left-0 z-[1] w-10 shrink-0 select-none border-l-2 pr-2 text-right font-mono text-[10.5px] leading-[1.65]",
-          highlighted
-            ? "border-primary bg-primary/10 text-primary"
-            : inRange
-              ? "border-primary/40 bg-primary/10 text-foreground/70"
-              : "border-transparent bg-surface text-muted-foreground/50",
-        )}
-      >
-        {number}
-      </span>
-      <span className="whitespace-pre pr-4 font-mono text-[11.5px] leading-[1.65] text-foreground/90">
-        {text.length === 0 ? "\u00A0" : text}
-      </span>
-    </div>
-  );
-});
 
 /* ------------------------------------------------------------------ */
 /* Binary file view (spec §9)                                          */
@@ -294,24 +259,122 @@ const LOADING_WIDTHS = ["w-full", "w-[85%]", "w-[92%]", "w-[70%]", "w-[60%]"];
 /* Viewport                                                            */
 /* ------------------------------------------------------------------ */
 
-export function CodeEditorViewport({ line, range, meta }: CodeEditorViewportProps) {
+export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEditorViewportProps) {
   const tabs = useWorkspaceStore((s) => s.tabs);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
+  const paneBPath = useWorkspaceStore((s) => s.paneBPath);
   const setTabStatus = useWorkspaceStore((s) => s.setTabStatus);
   const revealInTree = useWorkspaceStore((s) => s.revealInTree);
-  const reducedMotion = useReducedMotion();
 
-  const activeTab = activeTabPath
-    ? tabs.find((t) => t.path === activeTabPath)
-    : undefined;
+  const tabPath = paneId === "b" ? paneBPath : activeTabPath;
+  const activeTab = tabPath ? tabs.find((t) => t.path === tabPath) : undefined;
   const status = activeTab?.status;
 
-  const bodyRef = useRef<HTMLDivElement | null>(null);
   const [copied, setCopied] = useState(false);
+  /* Git-aware editor state (Phase 6 §4) — real fetches, honest failures. */
+  const [diffMode, setDiffMode] = useState(false);
+  const [blameMode, setBlameMode] = useState(false);
+  const [gitState, setGitState] = useState<{
+    diffStatus: "idle" | "loading" | "ready" | "error";
+    diff?: GitFileDiff;
+    diffError?: string;
+    blameStatus: "idle" | "loading" | "ready" | "error";
+    blame?: GitFileBlame;
+    blameError?: string;
+  }>({
+    diffStatus: "idle",
+    blameStatus: "idle",
+  });
 
-  // React Compiler memoizes this derivation; manual useMemo is rejected here
-  // because the store-derived object cannot be proven immutable.
-  const lines = activeTab?.content ? activeTab.content.split("\n") : [];
+  /* Reset git overlays when the tab changes. */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      setDiffMode(false);
+      setBlameMode(false);
+      setGitState({ diffStatus: "idle", blameStatus: "idle" });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tabPath]);
+
+  const loadDiff = useCallback(async () => {
+    if (!tabPath) return;
+    if (gitState.diffStatus === "ready" || gitState.diffStatus === "loading") return;
+    setGitState((s) => ({ ...s, diffStatus: "loading" }));
+    try {
+      const res = await fetch(`/api/repository/file-diff?path=${encodeURIComponent(tabPath)}`, {
+        cache: "no-store",
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { ok?: boolean; diff?: GitFileDiff; error?: string }
+        | null;
+      if (res.ok && data?.ok && data.diff) {
+        setGitState((s) => ({ ...s, diffStatus: "ready", diff: data.diff }));
+      } else {
+        setGitState((s) => ({
+          ...s,
+          diffStatus: "error",
+          diffError: data?.error ?? `The diff service responded with HTTP ${res.status}.`,
+        }));
+      }
+    } catch {
+      setGitState((s) => ({ ...s, diffStatus: "error", diffError: "The diff service is unreachable right now." }));
+    }
+  }, [tabPath, gitState.diffStatus]);
+
+  const fetchDiff = useCallback(() => {
+    // Toggle: a second click closes the diff view; blame always closes.
+    setDiffMode((v) => !v);
+    setBlameMode(false);
+    void loadDiff();
+  }, [loadDiff]);
+
+  /* Changed-line gutter decorations (§4): the real diff data loads quietly
+     for files that git reports MODIFIED — no mode switch, decorations only. */
+  useEffect(() => {
+    if (status !== "ready" || activeTab?.generated) return;
+    if (activeTab?.gitStatus !== "modified") return;
+    if (gitState.diffStatus !== "idle") return;
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (!cancelled) void loadDiff();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [status, activeTab?.generated, activeTab?.gitStatus, gitState.diffStatus, loadDiff]);
+
+  const fetchBlame = useCallback(async () => {
+    if (!tabPath) return;
+    setBlameMode((v) => !v);
+    setDiffMode(false);
+    if (gitState.blameStatus === "ready" || gitState.blameStatus === "loading") return;
+    setGitState((s) => ({ ...s, blameStatus: "loading" }));
+    try {
+      const res = await fetch(`/api/repository/file-blame?path=${encodeURIComponent(tabPath)}`, {
+        cache: "no-store",
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { ok?: boolean; blame?: GitFileBlame; error?: string }
+        | null;
+      if (res.ok && data?.ok && data.blame) {
+        setGitState((s) => ({ ...s, blameStatus: "ready", blame: data.blame }));
+      } else {
+        setGitState((s) => ({
+          ...s,
+          blameStatus: "error",
+          blameError: data?.error ?? `The blame service responded with HTTP ${res.status}.`,
+        }));
+      }
+    } catch {
+      setGitState((s) => ({ ...s, blameStatus: "error", blameError: "The blame service is unreachable right now." }));
+    }
+  }, [tabPath, gitState.blameStatus]);
 
   useEffect(() => {
     if (!copied) return;
@@ -329,24 +392,6 @@ export function CodeEditorViewport({ line, range, meta }: CodeEditorViewportProp
       setCopied(false);
     }
   };
-
-  /* Scroll the target (line, else range start) into view — once per change.
-     Manual math so only THIS scroll container moves. */
-  const targetLine =
-    line ?? (range && Number.isFinite(range.startLine) ? Math.floor(range.startLine) : undefined);
-  const rangeStart = range && Number.isFinite(range.startLine) ? Math.floor(range.startLine) : undefined;
-  const rangeEnd =
-    range && Number.isFinite(range.endLine) ? Math.max(rangeStart ?? 0, Math.floor(range.endLine)) : undefined;
-
-  useEffect(() => {
-    if (!targetLine) return;
-    const container = bodyRef.current;
-    if (!container) return;
-    const row = container.querySelector<HTMLElement>(`[data-line="${targetLine}"]`);
-    if (!row) return;
-    const top = row.offsetTop - container.clientHeight / 2 + row.offsetHeight / 2;
-    container.scrollTo({ top: Math.max(0, top), behavior: reducedMotion ? "auto" : "smooth" });
-  }, [targetLine, reducedMotion, status, activeTabPath]);
 
   /* ---- states (all hooks above; conditional rendering below) ---- */
 
@@ -432,10 +477,16 @@ export function CodeEditorViewport({ line, range, meta }: CodeEditorViewportProp
     );
   }
 
-  /* status === "ready" */
-  const language = meta?.language ?? inferLanguage(activeTab.path);
+  /* status === "ready" — REAL Monaco editor (Phase 6 §1) */
   const provenance = meta?.provenance;
   const gitBadge = activeTab.gitStatus ? GIT_BADGE[activeTab.gitStatus] : null;
+  const content = activeTab.content ?? "";
+  const lineCount = content.length === 0 ? 0 : content.split("\n").length;
+  const monacoLanguage = activeTab.generated
+    ? monacoLanguageForLabel(activeTab.generatedLanguage ?? null)
+    : monacoLanguageForPath(activeTab.path);
+  // Perf §11: large files disable the minimap + smooth animations.
+  const largeFile = lineCount > 4_000 || (meta?.size ?? 0) > 200_000;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -446,10 +497,28 @@ export function CodeEditorViewport({ line, range, meta }: CodeEditorViewportProp
         <span className="min-w-0 shrink-0 truncate font-mono" title={activeTab.path}>
           {activeTab.path}
         </span>
+        {activeTab.generated ? (
+          <Badge
+            variant="outline"
+            title="AI-generated snippet — not yet part of any repository file (Phase 6 §8)."
+            className="shrink-0 border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0 text-[10px] font-normal text-emerald-600 dark:text-emerald-400"
+          >
+            generated
+          </Badge>
+        ) : null}
+        {activeTab.dirty ? (
+          <Badge
+            variant="outline"
+            title="In-memory changes — file writes arrive in a later phase."
+            className="shrink-0 border-amber-500/40 bg-amber-500/10 px-1.5 py-0 text-[10px] font-normal text-amber-600 dark:text-amber-400"
+          >
+            unsaved (in-memory)
+          </Badge>
+        ) : null}
         <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px] font-normal">
-          {language}
+          {monacoLanguage}
         </Badge>
-        <span className="shrink-0 tabular-nums">{lines.length} lines</span>
+        <span className="shrink-0 tabular-nums">{lineCount} lines</span>
         {meta?.size ? (
           <span className="shrink-0 tabular-nums">{formatSize(meta.size)}</span>
         ) : null}
@@ -515,35 +584,100 @@ export function CodeEditorViewport({ line, range, meta }: CodeEditorViewportProp
           </TooltipTrigger>
           <TooltipContent side="bottom">{copied ? "Copied" : "Copy file contents"}</TooltipContent>
         </Tooltip>
+        {!activeTab.generated ? (
+          <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Toggle git diff view"
+                  aria-pressed={diffMode}
+                  onClick={() => void fetchDiff()}
+                  className={cn(
+                    "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+                    "hover:bg-surface-hover hover:text-foreground",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    diffMode && "text-primary",
+                  )}
+                >
+                  <FileDiff aria-hidden="true" className="size-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Git diff (working tree vs HEAD)</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Toggle git blame annotations"
+                  aria-pressed={blameMode}
+                  onClick={() => void fetchBlame()}
+                  className={cn(
+                    "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+                    "hover:bg-surface-hover hover:text-foreground",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    blameMode && "text-primary",
+                  )}
+                >
+                  <GitCommitVertical aria-hidden="true" className="size-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Blame annotations</TooltipContent>
+            </Tooltip>
+          </>
+        ) : null}
       </header>
 
-      {/* Body — both axes scroll INSIDE this panel; page overflow impossible */}
-      <div ref={bodyRef} className="relative min-h-0 flex-1 overflow-auto bg-surface">
-        <div role="figure" aria-label={`Preview of ${activeTab.path}`}>
-          {lines.map((text, index) => {
-            const number = index + 1;
-            const isExactTarget = line === number;
-            const inRange =
-              rangeStart !== undefined &&
-              rangeEnd !== undefined &&
-              number >= rangeStart &&
-              number <= rangeEnd;
-            return (
-              <CodeLine
-                key={number}
-                number={number}
-                text={text}
-                highlighted={isExactTarget}
-                inRange={inRange}
-              />
-            );
-          })}
+      {/* Body — the REAL editor; contained to this panel. */}
+      {diffMode ? (
+        <div className="min-h-0 flex-1 overflow-hidden p-1">
+          {gitState.diffStatus === "loading" || gitState.diffStatus === "idle" ? (
+            <div className="flex h-full items-center justify-center gap-2 text-[11px] text-muted-foreground">
+              <div className="size-4 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+              Loading git diff…
+            </div>
+          ) : gitState.diffStatus === "error" ? (
+            <div className="m-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-[11px] text-destructive">
+              {gitState.diffError}
+            </div>
+          ) : gitState.diff ? (
+            <DiffViewer
+              change={{
+                path: tabPath ?? gitState.diff.path,
+                operation: gitState.diff.hasOriginal ? "modify" : "create",
+                original: gitState.diff.original,
+                proposed: content,
+                language: monacoLanguage,
+              }}
+              height="100%"
+            />
+          ) : null}
         </div>
-      </div>
+      ) : activeTab.generated && !activeTab.content ? null : (
+        <MonacoCodeEditor
+          key={`${paneId}:${activeTab.path}`}
+          path={activeTab.path}
+          content={content}
+          language={monacoLanguage}
+          generated={activeTab.generated}
+          line={line}
+          range={range}
+          paneId={paneId}
+          largeFile={largeFile}
+          changedHunks={diffMode ? null : gitState.diff?.hunks ?? null}
+          blameRanges={blameMode ? gitState.blame?.ranges ?? null : null}
+        />
+      )}
 
-      {/* Footer */}
-      <footer className="flex h-6 shrink-0 items-center gap-1 border-t border-border-subtle px-2.5 text-[10px] text-muted-foreground">
-        Read-only preview — rich editor (Monaco) arrives in a later phase.
+      {/* Footer — honest capability note */}
+      <footer className="flex h-6 shrink-0 items-center gap-2 border-t border-border-subtle px-2.5 text-[10px] text-muted-foreground">
+        <span className="flex items-center gap-1">
+          {activeTab.dirty ? "●" : "○"}
+          {activeTab.dirty ? "Unsaved (in-memory)" : "Saved state"}
+        </span>
+        <span className="truncate">
+          In-memory buffer — file writes arrive in a later phase.
+        </span>
       </footer>
     </div>
   );

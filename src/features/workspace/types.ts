@@ -240,6 +240,113 @@ export interface OpenTab {
    * status map (applyGitStatus), never embedded in the tree.
    */
   gitStatus?: TreeGitStatus | null;
+  /**
+   * Phase 6 — true for GENERATED scratch tabs (AI code blocks opened without
+   * a repository file reference). These tabs never fetch from disk and are
+   * always clearly badged "generated". Session-only: never persisted.
+   */
+  generated?: boolean;
+  /** Phase 6 — editor language id for generated tabs (e.g. "typescript"). */
+  generatedLanguage?: string;
+  /**
+   * Phase 6 — in-memory buffer differs from the loaded file content.
+   * Session-only, per path; honest "unsaved (in-memory)" indicator, no fake
+   * save flow (file writes arrive in a later phase).
+   */
+  dirty?: boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared file state (V2.1 ADDITIONS §C)                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The ONE shared file-state vocabulary for every surface that renders a
+ * repository file (tree, tabs, chips, search, approvals, timelines…).
+ * Values beyond the working-tree `TreeGitStatus` set are stateful client or
+ * access-control states that a backend confirms — never inferred client-side.
+ */
+export type SharedFileState =
+  | "clean"
+  | "modified"
+  | "staged"
+  | "added"
+  | "deleted"
+  | "conflicted"
+  | "locked"
+  | "read-only";
+
+/**
+ * Presentation metadata for SharedFileState. Colors are applied by the
+ * rendering component (this file holds no JSX); labels are honest and
+ * short. `note` explains what the state means when it is not a plain
+ * working-tree status.
+ */
+export const FILE_STATE_META: Record<
+  SharedFileState,
+  { label: string; note?: string }
+> = {
+  clean: { label: "Clean" },
+  modified: { label: "Modified" },
+  staged: { label: "Staged", note: "Staged for commit (git index)." },
+  added: { label: "Added" },
+  deleted: { label: "Deleted" },
+  conflicted: {
+    label: "Conflicted",
+    note: "Merge/rebase conflict markers detected.",
+  },
+  locked: {
+    label: "Locked",
+    note: "Another process or agent holds an exclusive lock.",
+  },
+  "read-only": {
+    label: "Read-only",
+    note: "Writing to this file is disabled by policy or permissions.",
+  },
+};
+
+/* ------------------------------------------------------------------ */
+/* Selected-code AI actions (Phase 6 §5)                               */
+/* ------------------------------------------------------------------ */
+
+/** Vocabulary of the editor selection AI actions — each becomes AI context. */
+export type SelectionAIAction =
+  | "explain"
+  | "review"
+  | "fix"
+  | "refactor"
+  | "optimize"
+  | "tests"
+  | "docs"
+  | "security"
+  | "ask";
+
+/** Prompt preamble per action (the selected code is appended after it). */
+export const SELECTION_ACTION_PROMPTS: Record<
+  SelectionAIAction,
+  { label: string; prompt: string }
+> = {
+  explain: { label: "Explain", prompt: "Explain what this code does, step by step." },
+  review: { label: "Review", prompt: "Review this code and list concrete issues and improvements." },
+  fix: { label: "Fix", prompt: "Find the problems in this code and propose a corrected version." },
+  refactor: { label: "Refactor", prompt: "Refactor this code for clarity and maintainability. Show the refactored version." },
+  optimize: { label: "Optimize", prompt: "Optimize this code for performance. Explain the changes." },
+  tests: { label: "Generate Tests", prompt: "Generate focused unit tests for this code." },
+  docs: { label: "Generate Documentation", prompt: "Write clear documentation comments for this code." },
+  security: { label: "Security Review", prompt: "Perform a security review of this code. List vulnerabilities with severity." },
+  ask: { label: "Ask AI", prompt: "" },
+};
+
+/**
+ * A selection of real file content shared between the editor, the AI
+ * composer and the navigation service. `code` is the exact text selected.
+ */
+export interface FileSelection {
+  path: string;
+  startLine: number;
+  endLine: number;
+  language: string | null;
+  code: string;
 }
 
 /* ------------------------------------------------------------------ */

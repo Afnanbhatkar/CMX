@@ -12,7 +12,7 @@
 import { memo, isValidElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 
-import { ChatCodeBlock } from "./ChatCodeBlock";
+import { AICodeBlock } from "./AICodeBlock";
 import { cn } from "@/lib/utils";
 
 export interface ChatMarkdownProps {
@@ -39,7 +39,7 @@ const components: Components = {
     if (isValidElement<CodeElementProps>(child)) {
       const language = /language-([\w+-]+)/.exec(child.props.className ?? "")?.[1];
       const code = extractText(child.props.children).replace(/\n$/, "");
-      return <ChatCodeBlock code={code} language={language} />;
+      return <AICodeBlock code={code} language={language} />;
     }
     return (
       <pre className="overflow-x-auto rounded-lg border border-border-subtle bg-[#131110] p-2.5 font-mono text-[11.5px] leading-[1.6]">

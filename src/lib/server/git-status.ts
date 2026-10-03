@@ -37,7 +37,7 @@ const HEAD_CACHE_MS = 30_000;
 const MAX_REASON_LENGTH = 200;
 
 /** Single-line, length-capped, control-character-free reason text. */
-function sanitizeReason(raw: string): string {
+export function sanitizeReason(raw: string): string {
   const singleLine = raw
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
@@ -58,7 +58,7 @@ interface GitSpawnResult {
 }
 
 /** Spawn git with an argv array (never a shell string) + hard timeout. */
-function spawnGit(args: string[], timeoutMs: number): Promise<GitSpawnResult> {
+export function spawnGit(args: string[], timeoutMs: number): Promise<GitSpawnResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settleResolve = (result: GitSpawnResult): void => {

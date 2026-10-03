@@ -4,6 +4,108 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 6 — Monaco Code Intelligence Workspace] — real editor, navigation, diagnostics, AI code actions
+
+### Added
+- **V2.1 §A — EditorNavigationService routes**: `openFile(path)`,
+  `openRange(path, startLine, endLine)`, `openSymbol(symbolId)`,
+  `openSearchResult(resultId)`, `revealSelection(selection)` — the only
+  supported routes for programmatically opening files. Symbol outlines and
+  search results publish REAL resolved targets into typed registries
+  (`registerTargets`); unknown ids fail honestly (`not-found`).
+- **V2.1 §B — shared FileReferenceChip**: ONE file-reference component used
+  by AI chat attachments, Code Search results (fuzzy `<mark>` highlights
+  included) and future approvals/timelines/test-failures/security findings.
+  Clicking always routes through the EditorNavigationService and surfaces the
+  Assistant workspace when opened from another destination.
+- **V2.1 §C — shared file state vocabulary**: `SharedFileState`
+  (clean/modified/staged/added/deleted/conflicted/locked/read-only) +
+  `FILE_STATE_META`; chips render a state dot only when the state is actually
+  known — never inferred client-side.
+- **V2.1 §D — future panel anchors**: editor dock registry
+  (`EDITOR_DOCK_PANELS`) with REAL Problems + Terminal anchors and reserved,
+  honestly-labeled Context Inspector / Git Timeline slots; CodeLens provider
+  anchor exported in code-intelligence.ts. Future panels add ONE registry
+  entry — no redesign.
+- **Monaco editor (spec §1)**: self-hosted `monaco-editor@0.57` under
+  `public/monaco/vs` (no CDN); syntax highlighting, language detection, line
+  numbers, folding, selection, policy-based minimap, breadcrumbs, multi-tab,
+  split editor (two panes with independent active tabs), find/replace with
+  regex, go-to-line, quick outline. Warm "codemind-dark" theme matches the
+  design tokens. Buffers are editable IN MEMORY with an honest
+  "unsaved (in-memory)" dirty indicator — file writes arrive in a later
+  phase and no save is faked.
+- **Keyboard commands (spec §2)**: Ctrl/Cmd+P (files palette, existing),
+  Ctrl/Cmd+Shift+F (Code Search), Ctrl/Cmd+G (go-to-line) and
+  Ctrl/Cmd+Shift+O (quick outline) mapped to real commands via the
+  `cmx-editor-command` event contract; Monaco-native bindings stay primary
+  inside the editor.
+- **Code intelligence (spec §3, honest)**: REAL text-scan symbol outline
+  (regex over actual content; TS/JS/Python/JSON) registered as a Monaco
+  document-symbol provider AND published to the navigation registry; the
+  intelligence panel Symbols section is now real and labeled "text scan".
+  Definitions/references/callers/callees and tree-sitter symbols report
+  `available:false` with reasons — no fabricated language intelligence.
+- **Inline diagnostics (spec §6, honest)**: REAL single-file syntax
+  diagnostics from Monaco's TS/JS workers (semantic validation intentionally
+  disabled — no cross-file resolution, so no artifact "errors"); the
+  Problems panel lists markers with severity counts and click-to-navigate;
+  Lint/Type/Security/AI categories render as [PLANNED] slots.
+- **Git-aware editor (spec §4)**: `git-diff.ts` (real
+  `git diff --unified=0` hunk parsing + `git show HEAD:` baseline) and
+  `git-blame.ts` (real `--line-porcelain` grouped into ranges) +
+  `GET /api/repository/file-diff` / `GET /api/repository/file-blame` (legacy
+  envelope, audits, never throw). Editor header gains Diff (real Monaco
+  DiffEditor vs the committed baseline) and Blame (inline author·date tags)
+  toggles; changed-line gutter decorations auto-load for git-modified files.
+- **Selected-code AI actions (spec §5)**: a floating toolbar over non-empty
+  editor selections — Explain, Review, Fix, Refactor, Optimize, Generate
+  Tests, Generate Documentation, Security Review, Ask AI — queues the EXACT
+  selected text + location into the composer; the code becomes real AI
+  request context embedded in the message (selection attachment included).
+- **AI code blocks (spec §7/§8)**: `AICodeBlock` replaces the Phase 2 block —
+  header copy/download/expand plus CONTEXTUAL footer actions only:
+  Open in Editor (with `// file:` reference → that file; without → an honest,
+  clearly-badged GENERATED scratch tab), Preview (only HTML/CSS/JS/JSX),
+  Review Diff (real DiffViewer of loaded file vs snippet) and Apply (disabled
+  with the honest reason — writes arrive later).
+- **Sandboxed preview (spec §9)**: previews render inside
+  `<iframe sandbox="allow-scripts">` (no same-origin — generated code never
+  touches the app); JSX is transformed client-side with Sucrase and React 18
+  loads from esm.sh inside the sandbox; failures surface in an honest
+  on-frame error overlay.
+- **Diff system foundation (spec §10)**: `diff-contracts.ts` —
+  `ChangeOperation`, `FileChange`, `DiffHunk`, `GitFileDiff`, `BlameRange`,
+  `GitFileBlame` — plus the shared `DiffViewer` (Monaco DiffEditor, honest
+  empty-side notes) consumed by code blocks, the editor diff toggle and
+  future AI coding phases.
+- **Large-file performance (spec §11)**: files > 4000 lines or > 200 KB
+  disable the minimap and smooth animations; verified with a real 5000-line
+  432 KB source file opened from the explorer without freezing.
+
+### Verification record
+- Monaco renders real repository code (page.tsx, package.json, generated
+  HTML) with tab strip, breadcrumbs, metadata header; dirty dot + header
+  badge appear when the buffer is edited and vanish after reload (honest
+  in-memory semantics).
+- Selection toolbar → composer draft verified end-to-end: prompt + exact
+  selected code + `File: path:2-5` + selection chip.
+- Ctrl+G opened Monaco goto-line; Ctrl+Shift+O listed real symbols ("Home");
+  Ctrl+Shift+F switched to Code Search; Ctrl/Cmd+P files palette unchanged.
+- Problems panel listed a real TypeScript syntax error ("Property assignment
+  expected", 1 error) and click navigated the editor to the line.
+- Diff toggle rendered the real side-by-side diff vs HEAD; blame showed the
+  real author/date tags; navigation from a Code Search chip landed in the
+  editor with the file active.
+- Preview dialog confirmed `sandbox="allow-scripts"` and rendered the
+  generated button in isolation; AI chat produced a real HTML snippet with
+  contextual actions only (no Diff/Apply without a file reference).
+- Mobile 390px: chat, code block, repository drawer, tabs + Monaco + dock all
+  usable; desktop 1280px no horizontal overflow; console clean.
+- `bunx tsc --noEmit` clean under src/; `bun run lint` 0 errors (1 benign
+  pre-existing warning); `public/monaco/**` added to ESLint ignores (25 MB
+  vendored asset — lint OOM without it).
+
 ## [Phase 5 — Advanced Repository Explorer] — VS Code-style file intelligence + V2.1 trust metadata
 
 ### Added

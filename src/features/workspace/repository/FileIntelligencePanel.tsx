@@ -22,6 +22,13 @@ import { Bot, FileCode2, GitCommitVertical, History, Link2, ListTree, Package, R
 import { toast } from "sonner";
 
 import type { RepoTreeNode } from "@/features/workspace/types";
+import {
+  extractSymbols,
+  getIntelligenceCapability,
+  publishOutlineToNavigation,
+  type TextSymbol,
+} from "@/features/workspace/editor/code-intelligence";
+import { monacoLanguageForPath } from "@/features/workspace/editor/monaco-setup";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -215,6 +222,16 @@ export function FileIntelligencePanel({ filePath }: FileIntelligencePanelProps) 
     return scanImports(content);
   }, [content, filePath]);
 
+  /* Phase 6 §3 — REAL text-scan symbol outline (labeled honestly as a text
+     scan, not a language server). Also publishes the outline to the
+     navigation registry so openSymbol() works app-wide (V2.1 §A). */
+  const symbols = useMemo<TextSymbol[]>(() => {
+    if (!content || !filePath) return [];
+    const found = extractSymbols(content, monacoLanguageForPath(filePath));
+    publishOutlineToNavigation(filePath, found);
+    return found;
+  }, [content, filePath]);
+
   const openPath = (path: string) => {
     void editorNavigation.open({ filePath: path, sourceContext: "intelligence" });
   };
@@ -343,9 +360,36 @@ export function FileIntelligencePanel({ filePath }: FileIntelligencePanelProps) 
           <PlannedNote>Backend AI file analysis arrives in a later phase [PLANNED].</PlannedNote>
         </Section>
 
-        {/* Symbols — PLANNED */}
+        {/* Symbols — REAL text-scan outline (Phase 6 §3, honest labeling) */}
         <Section label="Symbols" icon={<ListTree aria-hidden="true" className="size-3" />}>
-          <PlannedNote>Symbol extraction is [PLANNED] — the store exists, no extractor yet.</PlannedNote>
+          {content === null ? (
+            <p className="text-[11px] text-muted-foreground">Open the file to scan its symbols.</p>
+          ) : symbols.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">No symbols detected in this file.</p>
+          ) : (
+            <div className="flex max-h-56 flex-col overflow-y-auto">
+              {symbols.slice(0, 50).map((symbol) => (
+                <RowButton
+                  key={`${symbol.line}:${symbol.name}`}
+                  onClick={() => {
+                    void editorNavigation.openRange(filePath, symbol.line, symbol.line, "intelligence");
+                  }}
+                  title={`${symbol.kind} — line ${symbol.line} (click to open)`}
+                >
+                  <ListTree aria-hidden="true" className="size-3 shrink-0 text-muted-foreground/60" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-foreground/85">
+                    {symbol.name}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground/60">{symbol.kind}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground/50">:{symbol.line}</span>
+                </RowButton>
+              ))}
+            </div>
+          )}
+          <p className="mt-1 text-[10px] text-muted-foreground/60">
+            Text-scan outline (regex over the file) — tree-sitter symbols{" "}
+            {getIntelligenceCapability("symbols-tree-sitter").available ? "" : "[PLANNED]"}.
+          </p>
         </Section>
 
         {/* Imports — REAL (parsed from the loaded tab content) */}

@@ -21,6 +21,7 @@
 
 import { memo, useEffect } from "react";
 import {
+  Columns2,
   History,
   FileCode2,
   PanelLeftOpen,
@@ -67,6 +68,9 @@ interface EditorTabProps {
   path: string;
   active: boolean;
   gitStatus: TreeGitStatus | null;
+  /** In-memory buffer differs from the loaded file (Phase 6). */
+  dirty?: boolean;
+  generated?: boolean;
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
 }
@@ -75,6 +79,8 @@ const EditorTab = memo(function EditorTab({
   path,
   active,
   gitStatus,
+  dirty,
+  generated,
   onSelect,
   onClose,
 }: EditorTabProps) {
@@ -110,9 +116,15 @@ const EditorTab = memo(function EditorTab({
           ) : null}
           <FileCode2 className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
           <span className="min-w-0 flex-1 truncate text-left font-mono text-[11px] text-foreground/90">
-            {basename(path)}
+            {generated ? "\u2699 " : ""}{basename(path)}
           </span>
-          {gitStatus ? (
+          {dirty ? (
+            <span
+              aria-label="Unsaved in-memory changes"
+              title="Unsaved (in-memory)"
+              className="size-1.5 shrink-0 rounded-full bg-amber-500"
+            />
+          ) : gitStatus ? (
             <span
               aria-label={GIT_DOT[gitStatus].label}
               title={GIT_DOT[gitStatus].label}
@@ -194,12 +206,14 @@ function ExplorerReopenButton() {
   );
 }
 
-/** Right-side strip actions: reopen closed + intelligence toggle. */
+/** Right-side strip actions: reopen closed + split editor + intelligence toggle. */
 function StripActions() {
   const reopenClosedTab = useWorkspaceStore((s) => s.reopenClosedTab);
   const closedCount = useWorkspaceStore((s) => s.closedTabs.length);
   const intelligenceOpen = useWorkspaceStore((s) => s.intelligenceOpen);
   const setIntelligenceOpen = useWorkspaceStore((s) => s.setIntelligenceOpen);
+  const splitEditor = useWorkspaceStore((s) => s.splitEditor);
+  const toggleSplitEditor = useWorkspaceStore((s) => s.toggleSplitEditor);
 
   return (
     <div className="ml-auto flex shrink-0 items-center gap-0.5 border-l border-border-subtle px-1">
@@ -222,6 +236,27 @@ function StripActions() {
           <TooltipContent side="bottom">Reopen closed tab</TooltipContent>
         </Tooltip>
       ) : null}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Toggle split editor"
+            aria-pressed={splitEditor}
+            onClick={toggleSplitEditor}
+            className={cn(
+              "flex size-7 items-center justify-center rounded-md text-muted-foreground",
+              "hover:bg-surface-hover hover:text-foreground",
+              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              splitEditor && "text-foreground",
+            )}
+          >
+            <Columns2 aria-hidden="true" className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          {splitEditor ? "Close split editor" : "Split editor"}
+        </TooltipContent>
+      </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
           <button
@@ -312,6 +347,8 @@ export function EditorTabs() {
           path={tab.path}
           active={tab.path === activeTabPath}
           gitStatus={tab.gitStatus ?? null}
+          dirty={tab.dirty}
+          generated={tab.generated}
           onSelect={setActiveTab}
           onClose={closeTab}
         />

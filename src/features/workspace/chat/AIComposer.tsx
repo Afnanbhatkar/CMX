@@ -29,6 +29,7 @@ import {
 
 import { selectActiveConversation, useWorkspaceStore } from "@/stores/workspace-store";
 import type { Attachment } from "@/features/workspace/types";
+import { SELECTION_ACTION_PROMPTS } from "@/features/workspace/types";
 import { useRepositoryMeta } from "@/features/workspace/use-repository-meta";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -79,6 +80,8 @@ export function AIComposer() {
   const newConversation = useWorkspaceStore((s) => s.newConversation);
   const queuedChatFile = useWorkspaceStore((s) => s.queuedChatFile);
   const consumeQueuedChatFile = useWorkspaceStore((s) => s.consumeQueuedChatFile);
+  const queuedChatSelection = useWorkspaceStore((s) => s.queuedChatSelection);
+  const consumeQueuedChatSelection = useWorkspaceStore((s) => s.consumeQueuedChatSelection);
   const lastIsAssistant = useWorkspaceStore((s) => {
     const conversation = selectActiveConversation(s);
     const messages = conversation?.messages ?? [];
@@ -131,6 +134,46 @@ export function AIComposer() {
       cancelled = true;
     };
   }, [queuedChatFile, consumeQueuedChatFile]);
+
+  /* Selected-code AI actions (editor toolbar) queue a real selection → the
+     EXACT selected text becomes the AI request context, embedded in the
+     draft message; a selection attachment records the location. */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      const queued = consumeQueuedChatSelection();
+      if (!queued) return;
+      const actionMeta = SELECTION_ACTION_PROMPTS[queued.action];
+      const location = `${queued.path}:${queued.startLine}-${queued.endLine}`;
+      const fence = "```";
+      const langTag = queued.language ?? "";
+      const prompt = actionMeta.prompt
+        ? `${actionMeta.prompt}\n\n`
+        : "Regarding this selection:\n\n";
+      const message = `${prompt}File: ${location}\n${fence}${langTag}\n${queued.code}\n${fence}`;
+      setDraft(message);
+      setAttachments((prev) =>
+        prev.some((a) => a.label === location)
+          ? prev
+          : [
+              ...prev,
+              {
+                id: newAttachmentId(),
+                kind: "selection" as const,
+                label: location,
+                path: queued.path,
+              },
+            ],
+      );
+      const el = textareaRef.current;
+      if (el) el.focus();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [queuedChatSelection, consumeQueuedChatSelection, setDraft]);
 
   /* Auto-resize (rows=1 → grows with content, capped at max-h-40). */
   useEffect(() => {
