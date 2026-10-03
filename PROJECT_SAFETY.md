@@ -1,7 +1,7 @@
 # CodeMind X V2 — Project Safety Document
 
 > Living document. Every phase must re-verify and update this file.
-> Last updated: Phase 0 (Foundation).
+> Last updated: Phase 3 (Backend, API, Database, Jobs, Streaming Infrastructure).
 
 ---
 
@@ -9,11 +9,12 @@
 
 - Fresh Next.js 16 scaffold (Z.ai Code baseline, package `nextjs_tailwind_shadcn_ts` v0.2.1)
   being transformed into **CodeMind X V2**.
-- **Phase 0 (Safe Rebuild / Audit / Foundation) implemented. No other phase started.**
-- The application is runnable: dev server on port 3000, `/` renders, API route
-  `/api` responds.
-- No destructive operations were performed in Phase 0. No source was deleted,
-  overwritten, or replaced with a template.
+- **Phases 0–3 implemented** (foundation; governance; design system + website;
+  workspace shell; backend/API/database/jobs/streaming infrastructure).
+- The application is runnable: dev server on port 3000, `/` renders, `/app`
+  renders the four-panel workspace, `/api/health` reports real dependency state.
+- No destructive operations were performed. Existing `User`/`Post` models and
+  data survived every schema change (additive `prisma db push` only).
 
 ## 2. Git State
 
@@ -153,5 +154,35 @@ to inspect, and restore individual paths from that commit — never `reset --har
   landing CTAs now route to `/app`. Engines (indexing, hybrid search,
   agents, Git/security/testing intelligence, sandbox, Monaco) remain
   [PLANNED] and are represented only as honest extension points.
-- **Next intended phase:** Phase 3 (per the canonical order). Every phase
+- **Next intended phase:** Phase 4 (per the canonical order). Every phase
   must read `RULES.md` first and consult `CAPABILITIES.md`.
+- **Phase 2.5 — V2.1 fixed-shell directive (user, mid-Phase-3):** both the
+  CodeMind X sidebar and the AI Chat Sidebar are FIXED at exactly 11%
+  (`PANEL_LIMITS min === max`, permanently disabled boundary handles —
+  react-resizable-panels requires handle elements between panels, disabled
+  ones register no drag/keyboard handler). Only the chat|repo split remains
+  user-adjustable. Workspace layout schema v3 resets persisted v2 layouts.
+  "Reset workspace layout" now re-syncs mounted panels live (reset nonce +
+  imperative resize). Mobile responsiveness intentionally not reworked in
+  this pass (user directive).
+- **Phase 3 — backend, API, database, jobs, streaming infrastructure:**
+  decision taken under the spec's escape clause ("Use Python + FastAPI
+  unless an existing backend architecture should safely be retained") — the
+  Next.js + Prisma backend was retained; FastAPI/PostgreSQL/Redis remain
+  [PLANNED] in `CAPABILITIES.md` with the local-runtime equivalents built
+  for real. Delivered: 20 additive Prisma domain models (22 tables, FKs,
+  indexes, timestamps, delete rules, public ids; legacy data untouched);
+  layered `src/server/{api,schemas,services,security,events,jobs}`;
+  consistent `{success, data, requestId}` / `{success:false, error:{code,message}}`
+  envelope on 16 route files across the 14 spec API groups (real: health,
+  repositories, branches, files, search, git, assistant; honest-501
+  skeletons: auth, architecture, security, testing, documentation, impact,
+  evaluation); security foundation (structured logs, request ids, body-size
+  guard, honest auth seam, `.env.example`, security headers); job system
+  with the 6 spec states + checkpoints + restart recovery; typed SSE event
+  streaming (`/api/events`, `/api/assistant/stream`) with privacy-enforced
+  schemas; real `repository.index` job (207 files indexed). Deviations:
+  no pytest/backend test files (platform policy forbids test code in this
+  environment) — compensated with live curl/browser probes; `bun run
+  build` not run (platform constraint) — lint + tsc + runtime verification
+  used instead.

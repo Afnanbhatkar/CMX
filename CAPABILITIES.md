@@ -9,13 +9,14 @@
 > substitute available or planned) · **unavailable** (no support; must not be used
 > or claimed).
 >
-> Never hide environmental limitations. Verified: Phase 0 governance addendum.
+> Never hide environmental limitations. Verified: Phase 0 governance addendum; updated Phase 3.
 
 | Capability | Status | Evidence / Notes |
 | --- | --- | --- |
-| **PostgreSQL** | `unavailable` | No `psql`/server in sandbox. Prisma provider is `sqlite`. Revisit only if platform provides a host. |
-| **SQLite fallback** | `production` | Active datastore: Prisma 6 + `db/custom.db` (tables `User`, `Post`). This is the real database — not a demo. |
+| **PostgreSQL** | `unavailable` | No `psql`/server in sandbox. Prisma provider is `sqlite`. `/api/health` reports it `unavailable (planned)` — never healthy. Revisit only if platform provides a host. |
+| **SQLite fallback** | `production` | Active datastore: Prisma 6 + `db/custom.db` — **22 tables** (legacy `User`/`Post` preserved + 20 Phase 3 domain tables: repositories, repository_files, analysis_jobs, chat_sessions, agent_runs, activities, approvals, security_findings, git_commits, …). This is the real database — not a demo. |
 | **Redis** | `unavailable` | No `redis-server`/`redis-cli`, no daemon on :6379. Use in-process memory caching (allowed by platform stack). |
+| **Job queue (Redis-spec semantics)** | `local` | Phase 3: in-process queue + SQLite persistence (`analysis_jobs` + `analysis_checkpoints`), 6 spec states (QUEUED/RUNNING/PAUSED/CANCELLED/COMPLETED/FAILED), pause/resume/cancel, checkpointed resume, restart-survival via recovery requeue (verified). Redis-backed workers remain `unavailable`/[PLANNED] — the DB is the source of truth. |
 | **Qdrant** | `unavailable` | No service/binary. Vector search needs a local fallback (below) until a host exists. |
 | **Local vector fallback** | `fallback` | Feasible in-process (Bun/TS): brute-force cosine index persisted in SQLite. Not yet implemented — owned by a retrieval phase. |
 | **Neo4j** | `unavailable` | No service/binary. |
@@ -27,6 +28,7 @@
 | **WebGL** | `local` | Browser-GPU dependent; verified working in the preview browser (Phase 1 shader). Must always ship a non-WebGL fallback. |
 | **Local LLM / Ollama** | `unavailable` | `ollama` absent, :11434 down. No local model serving. |
 | **External LLM providers** | `production` | `z-ai-web-dev-sdk` platform gateway (LLM, VLM, embeddings, search, ASR/TTS, image/video). **Backend-only** — never imported client-side. |
+| **Streaming (SSE)** | `production` | Phase 3: typed event bus (`src/server/events`) + SSE at `/api/events` (+ `/api/events/stream`) and `/api/assistant/stream` — replay buffer, heartbeats, privacy-enforced event schemas (operational labels only, `.strict()` zod). Token-level assistant streaming awaits a gateway streaming API — no fake chunking is performed. WebSocket [PLANNED]. |
 
 ## Degradation ladder (binding for future phases)
 

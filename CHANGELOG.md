@@ -4,6 +4,83 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 3 — Backend, API, Database, Jobs, Streaming] — infrastructure foundation
+
+### Added
+- **Database (Prisma/SQLite, purely additive)**: 20 domain models per the
+  Phase 3 spec — repositories, repository_branches, repository_files,
+  repository_symbols, repository_chunks, analysis_jobs, analysis_checkpoints,
+  chat_sessions, chat_messages, agent_runs, activities, approvals,
+  security_findings, generated_tests, documents, git_commits, git_branches,
+  evaluations, code_changes, change_sets — with FKs + explicit delete rules
+  (Cascade/SetNull), indexes, timestamps, composite uniques, public ids.
+  Legacy `User`/`Post` and data preserved byte-for-byte (`prisma db push`
+  without data-loss flags; never destructive).
+- **API layer** (`src/server/api`): consistent envelope
+  `{success:true,data,requestId}` / `{success:false,error:{code,message},requestId}`,
+  `ApiError` + zod validation mapping, request-id header, structured
+  per-request log lines, 1 MB body guard, security headers; Next 16 async
+  params stay type-safe.
+- **Versioned API groups**: real — `/api/health` (+ `/health` alias),
+  `/api/repositories` (+`/[id]`), `/api/branches`, `/api/files`,
+  `/api/search`, `/api/git` (real branch + last 20 commits), `/api/assistant`;
+  honest-501 skeletons — `/api/auth`, `/api/architecture`, `/api/security`,
+  `/api/testing`, `/api/documentation`, `/api/impact`, `/api/evaluation`.
+  Legacy `/api/repository/*` and `/api/ai/chat` contracts unchanged.
+- **Security foundation** (`src/server/security`): JSON structured logger,
+  auth-ready seam (honest "unconfigured" — never claims auth), security
+  config (same-origin CORS strategy, upload limits, rate-limit [PLANNED]),
+  `.env.example` (names only).
+- **Job system** (`src/server/jobs`): spec's 6 states
+  QUEUED/RUNNING/PAUSED/CANCELLED/COMPLETED/FAILED, DB as source of truth,
+  pause/resume/cancel controls with 409 on invalid transitions,
+  throttled progress + checkpoints (`analysis_checkpoints`), restart
+  survival (orphaned RUNNING jobs are requeued with attempts+1 on boot;
+  verified live), registry-validated job types.
+- **Real `repository.index` job**: walks the workspace tree with the
+  established ignore rules, upserts Repository/RepositoryBranch/
+  RepositoryFile rows (207 files indexed in verification), emits typed
+  progress events, resumes from checkpoint.
+- **Typed event streaming** (`src/server/events` + routes): discriminated
+  `CodeMindEvent` union (ACTIVITY_*, JOB_*, REPOSITORY_INDEXING,
+  ASSISTANT_*, STREAM_HEARTBEAT) with `.strict()` zod schemas enforcing the
+  activity-privacy contract (operational labels only — no model reasoning);
+  SSE endpoints `/api/events` (+`/stream`) with replay buffer + heartbeats,
+  and `/api/assistant/stream` streaming real completions (token-level
+  granularity honestly deferred until the gateway exposes streaming — no
+  fake chunking).
+
+### Changed
+- Chat completion logic extracted into `src/server/services/assistant-service.ts`;
+  `/api/ai/chat` is now a thin handler with a byte-identical public contract
+  (verified against the frontend payload shape). Assistant turns now persist
+  honest `activities` rows.
+
+## [Phase 3 — V2.1 Fixed-Shell Directive] — fixed sidebars + shell contracts
+
+### Changed
+- **Sidebars fixed at 11%** (user directive): `PANEL_LIMITS` for `cmx` and
+  `chatSidebar` locked to `min === max = 11`; the boundary handles are
+  permanently disabled (react-resizable-panels requires handle elements
+  between adjacent panels — disabled handles register no drag/keyboard
+  handler, so the rail is honestly fixed with zero resize affordance). Only
+  the chat|repo split remains adjustable (keyboard + drag verified).
+- **Workspace layout schema v3** (`WORKSPACE_LAYOUT_VERSION = 3`): persisted
+  v2 layouts reset to the canonical 11 | 11 | 39 | 39; conversations, tabs
+  and section preserved. `repoRailView` now persists (V2.1 §D).
+- **"Reset workspace layout" now re-syncs mounted panels** via a transient
+  `layoutResetNonce` + imperative panel resizes (previously it only reset
+  the store and the visible layout kept the old split until reload).
+
+### Verified (V2.1 additions A–H)
+- A shared `EditorNavigationService` (single file-opening path), B
+  keyboard-first contracts (⌘K/⌘P/⌘B/⌘⌥B/⌘I/⌘1–4, visible shortcuts,
+  honest disabled palette entries), C AI Context rail surface, D/E
+  persistence incl. independent rail states, F canonical 11+11+39+39
+  (measured 10.99/10.99/38.96/38.96 at 1920 fullscreen), G modular
+  replacement seams, H functional collapsed icon rails (48px exact, tooltips,
+  badges, focus states) — all browser-verified.
+
 ## [Phase 2 — Shell UX Fixes] — Assistant-scoped chrome & exact rail collapse
 
 ### Fixed

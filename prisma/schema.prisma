@@ -30,3 +30,481 @@ model Post {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ============================================================================
+// PHASE 3 — DOMAIN MODELS (CodeMind X V2.1, spec sections 2 + 3)
+//
+// Conventions binding for every model below:
+// - SQLite has NO native enum or JSON types. Every "enum-like" field is a
+//   `String` whose allowed values are documented in a comment on the field;
+//   runtime validation (zod) is enforced by later phases that write these
+//   tables. JSON payloads are stored as JSON text in String columns.
+// - Every model: `id` uuid PK, `createdAt` (default now), `updatedAt` (auto).
+// - Deletion rules: owned children use `onDelete: Cascade`; optional
+//   references use `onDelete: SetNull` (FK column is therefore nullable).
+// - Public identifier (`publicId String @unique @default(uuid())`) exists on
+//   models that external surfaces (API, URLs) may reference:
+//   analysis_jobs, chat_sessions, agent_runs, change_sets. Repository's
+//   public identifier is its unique human-readable `slug`.
+// - No foreign keys to User: relations to the legacy User model are deferred
+//   until the auth phase (spec allows safe additive evolution). No
+//   back-relations were added to the legacy User/Post models.
+// - Embedding vectors are [PLANNED] — nothing in this schema stores vectors.
+// ============================================================================
+
+/// A connected code repository.
+model Repository {
+  id            String   @id @default(uuid())
+  name          String
+  /// Unique, URL-safe public identifier (also serves as the slug index).
+  slug          String   @unique
+  description   String?
+  defaultBranch String?
+  /// "connected" | "indexing" | "unavailable"
+  status        String
+  /// Workspace-relative root of the checked-out repository, when present.
+  sourcePath    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  branches         RepositoryBranch[]
+  files            RepositoryFile[]
+  symbols          RepositorySymbol[]
+  chunks           RepositoryChunk[]
+  jobs             AnalysisJob[]
+  chatSessions     ChatSession[]
+  agentRuns        AgentRun[]
+  securityFindings SecurityFinding[]
+  generatedTests   GeneratedTest[]
+  documents        Document[]
+  commits          GitCommit[]
+  gitBranches      GitBranch[]
+  evaluations      Evaluation[]
+  codeChanges      CodeChange[]
+  changeSets       ChangeSet[]
+
+  @@index([status])
+  @@map("repositories")
+}
+
+/// Branch cache populated by indexing (live git state is mirrored in GitBranch).
+model RepositoryBranch {
+  id           String   @id @default(uuid())
+  repositoryId String
+  name         String
+  headSha      String?
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("repository_branches")
+}
+
+/// A file (or directory row) tracked by the indexer.
+model RepositoryFile {
+  id            String    @id @default(uuid())
+  repositoryId  String
+  path          String
+  isDir         Boolean   @default(false)
+  size          Int       @default(0)
+  language      String?
+  contentHash   String?
+  lastIndexedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  repository Repository         @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  symbols    RepositorySymbol[]
+  chunks     RepositoryChunk[]
+
+  @@unique([repositoryId, path])
+  @@index([repositoryId, isDir])
+  @@map("repository_files")
+}
+
+/// A code symbol extracted by indexing.
+model RepositorySymbol {
+  id           String   @id @default(uuid())
+  repositoryId String
+  fileId       String?
+  name         String
+  /// "function" | "class" | "method" | "variable" | "type" | "other"
+  kind         String
+  path         String
+  line         Int
+  endLine      Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository      @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  file       RepositoryFile? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+
+  @@index([repositoryId, kind])
+  @@index([fileId])
+  @@map("repository_symbols")
+}
+
+/// A retrieval chunk used by the search engine.
+model RepositoryChunk {
+  id              String   @id @default(uuid())
+  repositoryId    String
+  fileId          String
+  ordinal         Int
+  /// Retrieval text — populated only when indexing writes it; embedding
+  /// vectors are [PLANNED] (this schema stores no vectors).
+  content         String?
+  /// "none" | "pending" | "embedded"
+  embeddingStatus String   @default("none")
+  tokens          Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  repository Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  file       RepositoryFile @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@index([fileId, ordinal])
+  @@index([repositoryId])
+  @@map("repository_chunks")
+}
+
+/// A unit of analysis/indexing work. `type` is registry-validated in later
+/// phases (e.g. "repository.index" | "analysis.full").
+model AnalysisJob {
+  id           String    @id @default(uuid())
+  publicId     String    @unique @default(uuid())
+  repositoryId String?
+  type         String
+  /// QUEUED | RUNNING | PAUSED | CANCELLED | COMPLETED | FAILED
+  status       String    @default("QUEUED")
+  stage        String?
+  /// Completion progress; semantics defined by the job runner in later phases.
+  progress     Float     @default(0)
+  /// Opaque JSON checkpoint text written by the job runner.
+  checkpoint   String?
+  attempts     Int       @default(0)
+  error        String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  /// Liveness timestamp updated by the runner while the job is RUNNING.
+  heartbeatAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  repository  Repository?          @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  checkpoints AnalysisCheckpoint[]
+  activities  Activity[]
+  approvals   Approval[]
+
+  @@index([status])
+  @@index([repositoryId, status])
+  @@index([type, status])
+  @@map("analysis_jobs")
+}
+
+/// Resumable-state checkpoint for an AnalysisJob. `payload` is JSON text.
+model AnalysisCheckpoint {
+  id        String   @id @default(uuid())
+  jobId     String
+  key       String
+  payload   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  job AnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, key])
+  @@index([jobId])
+  @@map("analysis_checkpoints")
+}
+
+/// A persisted chat conversation. `publicId` is the external identifier.
+model ChatSession {
+  id            String    @id @default(uuid())
+  publicId      String    @unique @default(uuid())
+  repositoryId  String?
+  title         String?
+  /// "active" | "archived" | "deleted"
+  status        String    @default("active")
+  lastMessageAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  repository Repository?   @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  messages   ChatMessage[]
+  agentRuns  AgentRun[]
+
+  @@index([repositoryId])
+  @@index([status])
+  @@map("chat_sessions")
+}
+
+/// One message in a ChatSession. `content` maps to TEXT in SQLite.
+model ChatMessage {
+  id        String   @id @default(uuid())
+  sessionId String
+  /// "user" | "assistant" | "system"
+  role      String
+  content   String
+  /// "complete" | "generating" | "error" | "stopped"
+  state     String   @default("complete")
+  error     String?
+  tokens    Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("chat_messages")
+}
+
+/// An orchestrated agent execution. `publicId` is the external identifier.
+model AgentRun {
+  id           String    @id @default(uuid())
+  publicId     String    @unique @default(uuid())
+  sessionId    String?
+  repositoryId String?
+  /// "assistant" | "analysis" | "coding" | "testing" | "review" | "custom"
+  kind         String
+  /// "queued" | "running" | "waiting-approval" | "completed" | "failed" | "cancelled"
+  status       String    @default("queued")
+  input        String?
+  output       String?
+  error        String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  session     ChatSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  repository  Repository?  @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  activities  Activity[]
+  approvals   Approval[]
+  evaluations Evaluation[]
+  codeChanges CodeChange[]
+  changeSets  ChangeSet[]
+
+  @@index([status])
+  @@index([sessionId])
+  @@index([repositoryId])
+  @@map("agent_runs")
+}
+
+/// A user-visible activity step performed by a run or job.
+/// Privacy contract (ARCHITECTURE.md §8): `label` is a short operational
+/// string only. Model reasoning is NEVER stored here.
+model Activity {
+  id        String    @id @default(uuid())
+  runId     String?
+  jobId     String?
+  /// Closed vocabulary aligned with ActivityKind in src/types/contracts.ts:
+  /// "understanding" | "search" | "read" | "plan" | "code" | "test" |
+  /// "security" | "git" | "architecture" | "finalize"
+  kind      String
+  /// Short operational label — never model reasoning (privacy contract).
+  label     String
+  /// "pending" | "active" | "done" | "error"
+  status    String    @default("pending")
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  run AgentRun?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+  job AnalysisJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@index([jobId])
+  @@map("activities")
+}
+
+/// A human-in-the-loop approval request raised by a run or job.
+model Approval {
+  id           String    @id @default(uuid())
+  runId        String?
+  jobId        String?
+  /// "file-write" | "command" | "git-write" | "external" | "other"
+  kind         String
+  /// "pending" | "approved" | "rejected" | "expired"
+  status       String    @default("pending")
+  /// JSON payload describing exactly what is being approved.
+  payload      String?
+  decisionNote String?
+  decidedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  run AgentRun?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+  job AnalysisJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([runId])
+  @@index([jobId])
+  @@map("approvals")
+}
+
+/// A finding produced by the security scanner.
+model SecurityFinding {
+  id           String   @id @default(uuid())
+  repositoryId String
+  /// "critical" | "high" | "medium" | "low" | "info"
+  severity     String
+  ruleId       String
+  path         String?
+  line         Int?
+  message      String
+  /// "open" | "resolved" | "dismissed"
+  status       String   @default("open")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@index([repositoryId, severity])
+  @@index([status])
+  @@map("security_findings")
+}
+
+/// A test generated by the testing engine.
+model GeneratedTest {
+  id           String   @id @default(uuid())
+  repositoryId String
+  /// Test file path.
+  path         String
+  /// Path of the code under test.
+  targetPath   String?
+  framework    String?
+  /// "draft" | "generated" | "passed" | "failed" | "outdated"
+  status       String   @default("draft")
+  content      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@index([repositoryId, status])
+  @@map("generated_tests")
+}
+
+/// A document produced or indexed for a repository.
+model Document {
+  id           String   @id @default(uuid())
+  repositoryId String?
+  /// "readme" | "design" | "api" | "runbook" | "other"
+  kind         String
+  path         String?
+  title        String
+  content      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+
+  @@index([repositoryId, kind])
+  @@map("documents")
+}
+
+/// A commit mirrored from the repository's git history.
+model GitCommit {
+  id           String    @id @default(uuid())
+  repositoryId String
+  sha          String
+  message      String
+  authorName   String?
+  authorEmail  String?
+  committedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, sha])
+  @@index([repositoryId, committedAt])
+  @@map("git_commits")
+}
+
+/// A branch mirrored from live git state (indexing-side cache: RepositoryBranch).
+model GitBranch {
+  id           String   @id @default(uuid())
+  repositoryId String
+  name         String
+  headSha      String?
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("git_branches")
+}
+
+/// A quality evaluation of a run or repository.
+model Evaluation {
+  id           String   @id @default(uuid())
+  repositoryId String?
+  runId        String?
+  /// "assistant-quality" | "test-pass" | "regression" | "other"
+  kind         String
+  score        Float?
+  summary      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  run        AgentRun?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([repositoryId, kind])
+  @@index([runId])
+  @@map("evaluations")
+}
+
+/// A proposed/applied file-level change produced by an agent run.
+model CodeChange {
+  id           String   @id @default(uuid())
+  repositoryId String?
+  runId        String?
+  changeSetId  String?
+  path         String
+  /// "add" | "modify" | "delete"
+  changeKind   String
+  /// "proposed" | "applied" | "reverted"
+  status       String   @default("proposed")
+  diff         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  run        AgentRun?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+  changeSet  ChangeSet?  @relation(fields: [changeSetId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@index([repositoryId, status])
+  @@index([changeSetId])
+  @@map("code_changes")
+}
+
+/// A reviewable group of code changes. `publicId` is the external identifier.
+model ChangeSet {
+  id           String   @id @default(uuid())
+  publicId     String   @unique @default(uuid())
+  repositoryId String?
+  runId        String?
+  title        String
+  /// "draft" | "proposed" | "applied" | "discarded"
+  status       String   @default("draft")
+  description  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository?  @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  run        AgentRun?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+  changes    CodeChange[]
+
+  @@index([repositoryId, status])
+  @@index([runId])
+  @@map("change_sets")
+}

@@ -20,7 +20,7 @@ const AIWorkspace = dynamic(
         aria-busy="true"
         aria-label="Loading CodeMind X workspace"
       >
-        <LatticeLoader size={36} />
+        <LatticeLoader />
         <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
           CodeMind X
         </p>

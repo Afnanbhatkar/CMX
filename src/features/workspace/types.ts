@@ -19,11 +19,14 @@ import type { ActivityKind } from "@/types/contracts";
 /**
  * Versioned persistence schema (spec §31). Bump when the shape changes.
  *
- * v2 — assistant-scoped chrome + exact rail collapse: persisted v1 sizes are
- * intentionally reset to the defaults (11% | 11% | 39% | 39%) so every user
- * starts from the intended composition again. Conversations are preserved.
+ * v2 — assistant-scoped chrome + exact rail collapse.
+ * v3 — FIXED sidebar widths (user directive, V2.1 addition §F): the CodeMind
+ *      X sidebar and the AI Chat Sidebar are locked at exactly 11% and are
+ *      NO LONGER user-adjustable. Only the chat|repo split remains
+ *      draggable. Persisted v2 layouts reset to 11% | 11% | 39% | 39%.
+ *      Conversations are preserved.
  */
-export const WORKSPACE_LAYOUT_VERSION = 2;
+export const WORKSPACE_LAYOUT_VERSION = 3;
 
 /** Default desktop composition: 11% | 11% | 39% | 39%. */
 export const PANEL_DEFAULTS = {
@@ -33,10 +36,17 @@ export const PANEL_DEFAULTS = {
   repo: 39,
 } as const;
 
-/** Safe resize boundaries (percent of workspace width). */
+/**
+ * Panel size boundaries (percent of workspace width).
+ *
+ * Sidebar panels are FIXED at exactly 11% (min === max) per the V2.1
+ * canonical-shell directive: the user cannot resize them; the collapse
+ * toggle is the only width change (11% ⇄ exact 48px rail). The chat|repo
+ * split remains user-adjustable and always absorbs the remaining 78%.
+ */
 export const PANEL_LIMITS = {
-  cmx: { min: 4, max: 22 },
-  chatSidebar: { min: 4, max: 22 },
+  cmx: { min: 11, max: 11 },
+  chatSidebar: { min: 11, max: 11 },
   chat: { min: 20, max: 60 },
   repo: { min: 20, max: 60 },
 } as const;

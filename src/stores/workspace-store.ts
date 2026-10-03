@@ -135,6 +135,8 @@ export interface WorkspaceState {
   runPhase: AIRunPhase;
   paletteOpen: boolean;
   composerFocusNonce: number;
+  /** Incremented by resetLayout so mounted panels can re-sync (never persisted). */
+  layoutResetNonce: number;
   repoRailView: RepoRailView;
   chatSidebarSheetOpen: boolean;
   navSheetOpen: boolean;
@@ -211,6 +213,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       runPhase: "idle",
       paletteOpen: false,
       composerFocusNonce: 0,
+      layoutResetNonce: 0,
       repoRailView: "explorer",
       chatSidebarSheetOpen: false,
       navSheetOpen: false,
@@ -243,14 +246,16 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           navSheetOpen: false,
         })),
       resetLayout: () =>
-        set({
+        set((s) => ({
           sizes: { ...PANEL_DEFAULTS },
           collapsed: { cmx: false, chatSidebar: false },
           expandedWidths: {
             cmx: PANEL_DEFAULTS.cmx,
             chatSidebar: PANEL_DEFAULTS.chatSidebar,
           },
-        }),
+          // Notify mounted panels so they re-sync to the defaults on screen.
+          layoutResetNonce: s.layoutResetNonce + 1,
+        })),
 
       /* ---------------- conversations ---------------- */
       newConversation: () => {
@@ -413,6 +418,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         collapsed: s.collapsed,
         expandedWidths: s.expandedWidths,
         section: s.section,
+        // V2.1 §D — editor layout detail: the active repository rail view
+        // (explorer/search/git/run) restores with the workspace.
+        repoRailView: s.repoRailView,
         conversations: s.conversations,
         activeConversationId: s.activeConversationId,
         // paths only — file contents stay transient (never persisted)
@@ -454,6 +462,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           cmx: number;
           chatSidebar: number;
         }>;
+        const repoRailViewRaw = raw.repoRailView;
+        const repoRailView: RepoRailView =
+          repoRailViewRaw === "search" ||
+          repoRailViewRaw === "git" ||
+          repoRailViewRaw === "run" ||
+          repoRailViewRaw === "extensions"
+            ? repoRailViewRaw
+            : "explorer";
         /*
          * Layout reset policy (spec §31): a persisted layout from an older
          * schema version is NEVER clamped into the new one — it is reset to
@@ -492,6 +508,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
                 chatSidebar: PANEL_DEFAULTS.chatSidebar,
               },
           section,
+          repoRailView,
           conversations,
           activeConversationId,
           tabs,

@@ -3,12 +3,15 @@
 /**
  * CodeMind X V2 — root component of the AI workspace shell.
  *
- * Composition (spec §29, assistant-scoped chrome update):
+ * Composition (spec §29, assistant-scoped chrome + V2.1 fixed-shell update):
  * - TopNavigation (h-12) on every breakpoint.
  * - DESKTOP (≥1024px):
  *   - Assistant destination: four panels — CodeMind X sidebar | AI chat
- *     sidebar | AI chat area | Repository (VSCode-style) — persisted via the
- *     workspace store (sizes + collapsed + expand widths).
+ *     sidebar | AI chat area | Repository (VSCode-style). Both sidebars are
+ *     FIXED at exactly 11% (V2.1 §F canonical layout — not user-adjustable;
+ *     only the chat|repo split is draggable, and it always absorbs the
+ *     remaining 78%). Sizes + collapsed state persist via the workspace
+ *     store.
  *   - Every other destination: two panels — CodeMind X sidebar | destination
  *     main area. The VSCode-style repository panel and the AI chat sidebar
  *     are Assistant-scoped chrome and render ONLY on the Assistant page.
@@ -17,13 +20,13 @@
  * - CommandPalette mounted once, driven by store.paletteOpen plus a small
  *   `paletteFilesMode` React state (⌘K commands / ⌘P files).
  *
- * Sidebar collapse logic: when a sidebar flips to collapsed, its current
- * width is saved (`setExpandedWidth`) and the panel is LOCKED to the exact
- * rail width — `minSize` and `maxSize` both become the rail percentage for
- * the collapsed panel, so the rail is always exactly RAIL_PX (48px) wide at
+ * Sidebar collapse logic: when a sidebar flips to collapsed, the panel is
+ * LOCKED to the exact rail width — `minSize` and `maxSize` both become the
+ * rail percentage, so the rail is always exactly RAIL_PX (48px) wide at
  * every viewport size (no dead space around the rail icons on large or full
- * screen windows). When it expands again the saved width is restored and the
- * normal limits return. The handle before a collapsed sidebar is disabled.
+ * screen windows). When it expands again the panel returns to its FIXED 11%
+ * width. The sidebar boundaries render a non-interactive 1px separator —
+ * no resize affordance, per the fixed-width directive.
  *
  * Panel focus contract: ⌘1–4 focuses the panel wrappers. Other code can
  * dispatch the window CustomEvent "cmx-focus-panel" with `detail: {index}`
@@ -162,6 +165,8 @@ export function AIWorkspace() {
   /* Panel imperative handles + focus targets. */
   const cmxPanelRef = useRef<ImperativePanelHandle | null>(null);
   const chatSidebarPanelRef = useRef<ImperativePanelHandle | null>(null);
+  const chatPanelRef = useRef<ImperativePanelHandle | null>(null);
+  const repoPanelRef = useRef<ImperativePanelHandle | null>(null);
   const cmxFocusRef = useRef<HTMLDivElement | null>(null);
   const chatSidebarFocusRef = useRef<HTMLDivElement | null>(null);
   const chatFocusRef = useRef<HTMLDivElement | null>(null);
@@ -261,6 +266,27 @@ export function AIWorkspace() {
     if (state.collapsed.cmx) state.toggleCmx();
     if (state.collapsed.chatSidebar) state.toggleChatSidebar();
   }, [isDesktop]);
+
+  /**
+   * Layout reset (command palette "Reset workspace layout"): the store reset
+   * alone does not move the already-mounted panels — imperatively re-sync
+   * them to the canonical composition (fixed 11% sidebars or exact 48px
+   * rails, 39% | 39% split). Nonce stays transient (never persisted).
+   */
+  const layoutResetNonce = useWorkspaceStore((s) => s.layoutResetNonce);
+  useEffect(() => {
+    if (layoutResetNonce === 0 || !isDesktop) return;
+    const s = useWorkspaceStore.getState();
+    const rp = computeRailPct();
+    cmxPanelRef.current?.resize(s.collapsed.cmx ? rp : PANEL_DEFAULTS.cmx);
+    if (s.section === "assistant") {
+      chatSidebarPanelRef.current?.resize(
+        s.collapsed.chatSidebar ? rp : PANEL_DEFAULTS.chatSidebar,
+      );
+      chatPanelRef.current?.resize(PANEL_DEFAULTS.chat);
+      repoPanelRef.current?.resize(PANEL_DEFAULTS.repo);
+    }
+  }, [layoutResetNonce, isDesktop]);
 
   /* ---------------------------------------------------------------- */
   /* Panel focus (⌘1–4 + "cmx-focus-panel" event contract)             */
@@ -385,8 +411,13 @@ export function AIWorkspace() {
             onLayout={handleLayout}
           >
             {/*
-             * CodeMind X sidebar — present on every destination. While
-             * collapsed, min/max lock the panel to the exact rail width.
+             * CodeMind X sidebar — present on every destination. FIXED at
+             * 11% when expanded (PANEL_LIMITS min === max); locked to the
+             * exact rail width while collapsed. The boundary handle is
+             * PERMANENTLY disabled: react-resizable-panels requires a
+             * handle element between adjacent panels, but a disabled one
+             * registers no drag/keyboard handler — so the sidebar is
+             * honestly fixed at 11% with zero resize affordance.
              */}
             <ResizablePanel
               ref={cmxPanelRef}
@@ -406,7 +437,8 @@ export function AIWorkspace() {
               </div>
             </ResizablePanel>
 
-            <PanelResizer disabled={collapsed.cmx} />
+            {/* Fixed sidebar boundary — permanently disabled handle (see above). */}
+            <PanelResizer disabled />
 
             {isAssistantSection ? (
               <>
@@ -431,9 +463,11 @@ export function AIWorkspace() {
                   </div>
                 </ResizablePanel>
 
-                <PanelResizer disabled={collapsed.chatSidebar} />
+                {/* Fixed sidebar boundary — permanently disabled handle. */}
+                <PanelResizer disabled />
 
                 <ResizablePanel
+                  ref={chatPanelRef}
                   id="chat"
                   order={3}
                   minSize={PANEL_LIMITS.chat.min}
@@ -456,6 +490,7 @@ export function AIWorkspace() {
                  * VSCode-style repository workspace — Assistant-scoped chrome.
                  */}
                 <ResizablePanel
+                  ref={repoPanelRef}
                   id="repo"
                   order={4}
                   minSize={PANEL_LIMITS.repo.min}
