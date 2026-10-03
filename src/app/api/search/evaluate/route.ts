@@ -3,22 +3,24 @@ import { z } from "zod";
 import { withApi } from "@/server/api/with-api";
 import { ApiError, jsonOk } from "@/server/api/envelope";
 import { getSearchIndex } from "@/server/search/index/search-index";
-import { evaluateSearch, NOT_RUN_MESSAGE, BUILTIN_JUDGMENTS, type EvaluationResult } from "@/server/search/evaluate";
+import { evaluateSearch, NOT_RUN_MESSAGE, GOLDEN_DATASET, type EvaluationResult } from "@/server/search/evaluate";
 import { db } from "@/lib/db";
 
 /**
- * /api/search/evaluate — Phase 7 spec §11.
+ * /api/search/evaluate — Phase 7 spec §11 + V2.1 §C golden dataset.
  *
  * GET  → the last persisted search evaluation, or exactly "Evaluation not
  *         run." when none exists. Never displays made-up metrics.
- * POST → RUNS the evaluation now over a judgments dataset (the built-in
- *         workspace dataset by default), computes P@K / R@K / MRR / NDCG /
- *         latency from the live engine, persists an Evaluation row and
- *         returns the full measured result.
+ * POST → RUNS the evaluation now over the golden dataset (the built-in
+ *         workspace judgments), computes P@K / R@K / MRR / NDCG / latency
+ *         from the live engine, persists an Evaluation row and returns the
+ *         full measured result. Phase 7.5 adds benchmark cases to the same
+ *         dataset structure — nothing is pre-claimed before a real run.
  */
 
 const evaluateRequestSchema = z.object({
-  dataset: z.enum(["builtin"]).default("builtin"),
+  // "builtin" is the legacy alias of the golden dataset v1 cases.
+  dataset: z.enum(["builtin", "codemind-golden-search-v1"]).default("builtin"),
 });
 
 export const GET = withApi(async (_req, ctx) => {
@@ -63,12 +65,12 @@ export const POST = withApi(
     }
     const parsed = evaluateRequestSchema.parse(body);
 
-    if (parsed.dataset !== "builtin") {
+    if (parsed.dataset !== "builtin" && parsed.dataset !== GOLDEN_DATASET.id) {
       throw new ApiError("BAD_REQUEST", "Unknown dataset.", 400);
     }
 
     const { index } = await getSearchIndex();
-    const evaluation = await evaluateSearch(index, BUILTIN_JUDGMENTS);
+    const evaluation = await evaluateSearch(index, GOLDEN_DATASET.cases);
 
     try {
       await db.evaluation.create({
@@ -82,7 +84,10 @@ export const POST = withApi(
       // persistence is best-effort; the measured result is still returned
     }
 
-    return jsonOk({ ok: true, evaluation }, { requestId: ctx.requestId });
+    return jsonOk(
+      { ok: true, dataset: GOLDEN_DATASET.id, evaluation },
+      { requestId: ctx.requestId },
+    );
   },
   { allowBody: true },
 );

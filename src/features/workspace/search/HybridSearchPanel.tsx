@@ -65,6 +65,8 @@ const METHOD_CHIP_CLASS: Record<string, string> = {
   lexical: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
   path: "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
   graph: "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400",
+  metadata: "border-zinc-400/40 bg-zinc-400/10 text-zinc-500",
+  reranker: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400",
   exact: "border-primary/40 bg-primary/10 text-primary",
   regex: "border-primary/40 bg-primary/10 text-primary",
   git: "border-stone-400/40 bg-stone-400/10 text-stone-500",
@@ -78,11 +80,32 @@ const METHOD_LABELS: Record<string, string> = {
   lexical: "Keyword",
   path: "Path",
   graph: "Graph",
+  metadata: "Metadata",
+  reranker: "Reranker",
   exact: "Exact",
   regex: "Regex",
   git: "Git",
   security: "Security",
   documentation: "Docs",
+};
+
+/** Honest confidence tiers (V2.1 §D) — chips state the tier, tooltip the rule. */
+const CONFIDENCE_CHIP: Record<
+  "high" | "probable" | "weak",
+  { label: string; className: string }
+> = {
+  high: {
+    label: "High confidence",
+    className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  },
+  probable: {
+    label: "Probable",
+    className: "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  },
+  weak: {
+    label: "Related",
+    className: "border-border-subtle bg-surface text-muted-foreground",
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -150,6 +173,25 @@ function HitRow({ hit, tokens, onOpen }: { hit: SearchHit; tokens: string[]; onO
           {hit.lineEnd > hit.lineStart ? `–${hit.lineEnd}` : ""}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {hit.confidence ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  data-testid="search-confidence"
+                  data-confidence={hit.confidence}
+                  className={cn(
+                    "rounded border px-1 py-0 text-[9px] leading-3.5",
+                    CONFIDENCE_CHIP[hit.confidence].className,
+                  )}
+                >
+                  {CONFIDENCE_CHIP[hit.confidence].label}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="left" className="max-w-52 text-[10px]">
+                {hit.confidenceReason}
+              </TooltipContent>
+            </Tooltip>
+          ) : null}
           {hit.retrievalMethod.map((method) => (
             <span
               key={method}
@@ -498,6 +540,49 @@ export function HybridSearchPanel() {
             </>
           ) : null}
         </div>
+
+        {/* Query contract (V2.1 §A): original → normalized → rewritten,
+            with detected language, intent, repository and scope. */}
+        {store.response ? (
+          <div
+            className="shrink-0 rounded-md border border-border-subtle bg-surface-elevated/40 px-3 py-2 text-[10.5px] text-muted-foreground"
+            data-testid="search-query-contract"
+          >
+            <span className="font-mono">
+              “{store.response.query.original.trim().slice(0, 80)}”
+            </span>
+            <span className="mx-1.5 text-muted-foreground/50">→</span>
+            <span className="font-mono text-foreground/70">
+              {store.response.query.normalized || "(empty after normalization)"}
+            </span>
+            {store.response.query.rewritten ? (
+              <>
+                <span className="mx-1.5 text-muted-foreground/50">→</span>
+                <span className="font-mono text-primary/80" title="interpretation-rewritten retrieval query">
+                  {store.response.query.rewritten}
+                </span>
+              </>
+            ) : null}
+            <span className="ml-2 inline-flex flex-wrap items-center gap-1 align-baseline">
+              <span className="rounded border border-border-subtle px-1 py-0 text-[9px] leading-3.5">
+                lang: {store.response.query.language}
+              </span>
+              {store.response.query.intent && store.response.query.intent !== "general" ? (
+                <span className="rounded border border-border-subtle px-1 py-0 text-[9px] leading-3.5">
+                  intent: {store.response.query.intent}
+                </span>
+              ) : null}
+              {store.response.query.repository ? (
+                <span className="rounded border border-border-subtle px-1 py-0 text-[9px] leading-3.5">
+                  repo: {store.response.query.repository}
+                </span>
+              ) : null}
+              <span className="rounded border border-border-subtle px-1 py-0 text-[9px] leading-3.5">
+                scope: {store.response.query.scope.scope}
+              </span>
+            </span>
+          </div>
+        ) : null}
 
         {/* Interpretation (honest, spec §5/§9) */}
         {store.response?.query.interpretation.length ? (

@@ -135,6 +135,13 @@ export interface NormalizedQuery {
   keywords: string[];
   intent: SearchIntent;
   isHinglish: boolean;
+  /**
+   * Query language (V2.1 search query contract), detected honestly:
+   * "en" — no Hinglish markers and no Devanagari; "hi-en" — Hinglish
+   * (Latin-script Hindi function words around technical terms); "hi" —
+   * Devanagari detected. Detection only — never a translation claim.
+   */
+  language: "en" | "hi-en" | "hi";
   /** Honest interpretation notes (shown in the UI "why" explanations). */
   notes: string[];
   /** English keywords injected by intent/domain interpretation. */
@@ -153,6 +160,10 @@ export function normalizeQuery(raw: string): NormalizedQuery {
   const baseTokens = tokenizeForRetrieval(trimmed);
 
   const isHinglish = baseTokens.some((t) => HINGLISH_MARKERS.has(t));
+  // Devanagari detection is honest and cheap: if it is present the query is
+  // labeled "hi". There is NO transliteration step — nothing is fabricated.
+  const hasDevanagari = /[\u0900-\u097F]/.test(trimmed);
+  const language: NormalizedQuery["language"] = hasDevanagari ? "hi" : isHinglish ? "hi-en" : "en";
   if (isHinglish) {
     notes.push("Hinglish query — function words (ka/ki/kaha/dikhao…) interpreted, technical terms preserved");
   }
@@ -235,10 +246,24 @@ export function normalizeQuery(raw: string): NormalizedQuery {
     keywords,
     intent,
     isHinglish,
+    language,
     notes,
     injected,
     anaphora,
   };
+}
+
+/**
+ * The retrieval query after normalization (V2.1 query contract): content
+ * tokens plus interpretation-injected keywords. Deterministic and shown in
+ * the UI so the user can see exactly what the engine searched for.
+ */
+export function normalizedQueryText(normalized: NormalizedQuery): string {
+  const parts: string[] = [];
+  for (const token of [...normalized.tokens, ...normalized.injected]) {
+    if (!parts.includes(token)) parts.push(token);
+  }
+  return parts.join(" ");
 }
 
 /* ------------------------------------------------------------------ */

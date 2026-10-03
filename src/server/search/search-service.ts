@@ -18,24 +18,48 @@
 
 import type { SearchIndex } from "./index/search-index";
 import { embed, cosine } from "./index/dense";
-import { normalizeQuery, resolveContext, type NormalizedQuery, type SearchContext, type SearchIntent } from "./query/normalize";
+import {
+  normalizeQuery,
+  normalizedQueryText,
+  resolveContext,
+  type NormalizedQuery,
+  type SearchContext,
+  type SearchIntent,
+} from "./query/normalize";
 import { tokenizeForRetrieval } from "@/lib/code-intel/structure-scanner";
 
 /* ------------------------------------------------------------------ */
-/* Public result model (spec §5)                                       */
+/* Public result model (spec §5 + V2.1 SEARCH QUALITY FOUNDATION)      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Retrieval provenance (V2.1 §B) — every result names the mechanisms that
+ * actually contributed. `metadata` is listed when metadata filters
+ * (language/path/scope) actively shaped the candidate set; `reranker` is
+ * RESERVED for the day a real reranker runs — RRF+MMR is fusion/diversification,
+ * not a learned reranker, so it is never listed today (honest absence).
+ */
 export type RetrievalMethod =
   | "lexical"
   | "semantic"
   | "symbol"
   | "path"
   | "graph"
+  | "metadata"
+  | "reranker"
   | "exact"
   | "regex"
   | "git"
   | "security"
   | "documentation";
+
+/**
+ * Honest confidence (V2.1 §D) — qualitative tiers derived from REAL fusion
+ * signals (how many independent mechanisms agreed, and how strong they are).
+ * Never presented as a probability; the companion `confidenceReason` states
+ * the actual rule that fired.
+ */
+export type SearchConfidence = "high" | "probable" | "weak";
 
 export interface SearchHit {
   file: string;
@@ -50,6 +74,13 @@ export interface SearchHit {
   retrievalMethod: RetrievalMethod[];
   /** Honest human-readable reasons ("keyword 'login' in symbol name"). */
   whyMatched: string[];
+  /**
+   * Honest confidence tier (V2.1 §D): "high" | "probable" | "weak" —
+   * derived from real fusion agreement, never a fabricated percentage.
+   */
+  confidence: SearchConfidence;
+  /** The actual rule that produced the confidence tier. */
+  confidenceReason: string;
   /** True when the workspace git reports this file modified in the worktree. */
   gitStatus: string | null;
   intent: SearchIntent | null;
@@ -72,11 +103,27 @@ export interface SearchActivity {
 export interface SearchResponse {
   ok: true;
   query: {
+    /** Exactly what the user typed (V2.1 §A query contract). */
+    original: string;
     raw: string;
     mode: string;
+    /** The retrieval query after normalization (stopwords dropped, identifiers kept). */
+    normalized: string;
+    /** The interpretation-rewritten retrieval query, or null when untouched. */
+    rewritten: string | null;
+    /** Detected query language: "en" | "hi-en" | "hi" — detection, not translation. */
+    language: "en" | "hi-en" | "hi";
     intent: SearchIntent | null;
     isHinglish: boolean;
     interpretation: string[];
+    /** Real repository identity from git (V2.1 §A). */
+    repository: string | null;
+    /** Resolved scope of this search (V2.1 §A). */
+    scope: {
+      scope: string;
+      language: string | null;
+      pathPrefix: string | null;
+    };
   };
   results: SearchHit[];
   totalHits: number;
@@ -150,6 +197,8 @@ const METHOD_PRIOR: Record<RetrievalMethod, number> = {
   lexical: 1.0,
   semantic: 1.0,
   graph: 0.95,
+  metadata: 1.0,
+  reranker: 1.0,
   exact: 1.15,
   regex: 1.0,
   git: 0.9,
@@ -632,12 +681,65 @@ const METHOD_LABELS: Record<RetrievalMethod, string> = {
   symbol: "symbol",
   path: "path",
   graph: "graph",
+  metadata: "metadata",
+  reranker: "reranker",
   exact: "exact",
   regex: "regex",
   git: "git",
   security: "security",
   documentation: "docs",
 };
+
+/**
+ * Confidence derivation (V2.1 §D) — deterministic, explainable, grounded in
+ * the actual fusion result. Tiers:
+ *   high     — exact/symbol-name equality, or ≥3 independent mechanisms
+ *              (≥2 of them strong: lexical/symbol/exact/graph/regex/security)
+ *   probable — ≥2 mechanisms, or one strong mechanism
+ *   weak     — a single non-strong mechanism (e.g. semantic- or path-only)
+ * The reason string states the rule that fired — no numeric certainty is
+ * implied anywhere.
+ */
+const STRONG_CONFIDENCE_METHODS = new Set<RetrievalMethod>([
+  "lexical",
+  "symbol",
+  "exact",
+  "graph",
+  "regex",
+  "security",
+]);
+
+function deriveConfidence(
+  methods: RetrievalMethod[],
+  symbol: string | null,
+  normalizedRaw: string,
+): { confidence: SearchConfidence; confidenceReason: string } {
+  const distinct = methods.filter((m) => m !== "metadata");
+  const strongCount = distinct.filter((m) => STRONG_CONFIDENCE_METHODS.has(m)).length;
+
+  if (symbol && symbol.toLowerCase() === normalizedRaw.toLowerCase()) {
+    return { confidence: "high", confidenceReason: `exact symbol name match '${symbol}'` };
+  }
+  if (distinct.length >= 3 && strongCount >= 2) {
+    return {
+      confidence: "high",
+      confidenceReason: `${distinct.length} independent retrieval mechanisms agreed (${strongCount} strong)`,
+    };
+  }
+  if (distinct.length >= 2 || strongCount >= 1) {
+    return {
+      confidence: "probable",
+      confidenceReason:
+        distinct.length >= 2
+          ? `${distinct.length} retrieval mechanisms agreed`
+          : `single strong signal (${distinct[0] ?? "unknown"})`,
+    };
+  }
+  return {
+    confidence: "weak",
+    confidenceReason: `weak/related signal only (${distinct[0] ?? "unknown"})`,
+  };
+}
 
 export async function runHybridSearch(
   index: SearchIndex,
@@ -747,6 +849,11 @@ export async function runHybridSearch(
 
   // Build final results (real snippets, real line spans, honest whys).
   const maxRrf = diversified[0]?.rrf ?? 1;
+  // V2.1 §B provenance: when metadata filters actively shaped the candidate
+  // set, "metadata" is a real contributing mechanism and is listed.
+  const filtersActive = Boolean(
+    filters.language || filters.pathPrefix?.trim() || (filters.scope && filters.scope !== "all"),
+  );
   const results: SearchHit[] = diversified.map((candidate) => {
     const language = languageByPath.get(candidate.path) ?? "text";
     const tokens = [...normalized.tokens, ...normalized.injected];
@@ -759,6 +866,11 @@ export async function runHybridSearch(
       tokens,
     );
     const methods = [...candidate.methods.keys()];
+    const { confidence, confidenceReason } = deriveConfidence(
+      methods,
+      candidate.symbol ?? null,
+      normalized.raw,
+    );
     const whyMatched = [...candidate.methods.values()]
       .flatMap((m) => m.why)
       .slice(0, 4);
@@ -774,8 +886,10 @@ export async function runHybridSearch(
       snippet,
       language,
       score: maxRrf > 0 ? Math.min(1, candidate.rrf / maxRrf) : 0,
-      retrievalMethod: methods,
+      retrievalMethod: filtersActive ? [...methods, "metadata" as const] : methods,
       whyMatched,
+      confidence,
+      confidenceReason,
       gitStatus,
       intent: normalized.intent,
     };
@@ -788,14 +902,30 @@ export async function runHybridSearch(
     interpretationNotes.push(`intent: ${normalized.intent}`);
   }
 
+  // V2.1 §A query contract: preserve original → normalized → rewritten, plus
+  // detected language, intent, repository and scope. `rewritten` is honest:
+  // non-null only when the interpretation actually injected retrieval terms.
+  const normalizedText = normalizedQueryText(normalized);
+  const rewritten = normalized.injected.length > 0 ? normalizedText : null;
+
   return {
     ok: true,
     query: {
+      original: request.query,
       raw: request.query,
       mode,
+      normalized: normalizedText,
+      rewritten,
+      language: normalized.language,
       intent: normalized.intent,
       isHinglish: normalized.isHinglish,
       interpretation: interpretationNotes,
+      repository: index.git.repository,
+      scope: {
+        scope: filters.scope ?? "all",
+        language: filters.language ?? null,
+        pathPrefix: filters.pathPrefix ?? null,
+      },
     },
     results,
     totalHits: fused.length,

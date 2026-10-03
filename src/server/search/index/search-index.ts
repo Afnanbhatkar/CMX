@@ -59,6 +59,8 @@ export interface ImportEdge {
 
 export interface GitContext {
   branch: string | null;
+  /** Real repository identity — basename of the git top-level (V2.1 query contract). */
+  repository: string | null;
   /** path → working-tree status (porcelain). */
   status: Map<string, string>;
   /** Recently touched paths (last 200 commits, name-only). */
@@ -126,6 +128,7 @@ function resolveImport(specifier: string, fromPath: string, fileSet: Set<string>
 async function readGitContext(): Promise<GitContext> {
   const context: GitContext = {
     branch: null,
+    repository: null,
     status: new Map(),
     recentPaths: new Set(),
   };
@@ -137,6 +140,18 @@ async function readGitContext(): Promise<GitContext> {
     context.branch = stdout.trim() || null;
   } catch {
     context.branch = null;
+  }
+  try {
+    // Real repository identity (V2.1 search query contract): the basename of
+    // the git top-level directory — not a fabricated label.
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: process.cwd(),
+      timeout: 3_000,
+    });
+    const toplevel = stdout.trim();
+    context.repository = toplevel ? toplevel.split("/").pop() ?? null : null;
+  } catch {
+    context.repository = null;
   }
   try {
     const { stdout } = await execFileAsync("git", ["status", "--porcelain"], {

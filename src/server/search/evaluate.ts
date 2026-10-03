@@ -100,6 +100,21 @@ export const BUILTIN_JUDGMENTS: JudgmentEntry[] = [
   },
 ];
 
+/**
+ * The GOLDEN DATASET (V2.1 §C) — formalized now so measurable evaluation
+ * never waits for a later phase. v1 ships with the judgments above; Phase
+ * 7.5 adds the first benchmark expansion cases on this exact structure.
+ */
+export const GOLDEN_DATASET = {
+  id: "codemind-golden-search-v1",
+  version: 1 as const,
+  description:
+    "Golden search-quality dataset: real, verifiable relevance judgments against this workspace's actual files.",
+  cases: BUILTIN_JUDGMENTS,
+  /** Phase 7.5 owns the first benchmark-case additions; nothing is pre-claimed. */
+  nextExpansion: "phase-7.5",
+} as const;
+
 function dcg(gains: number[]): number {
   return gains.reduce((sum, gain, index) => sum + (Math.pow(2, gain) - 1) / Math.log2(index + 2), 0);
 }
@@ -166,7 +181,7 @@ export async function evaluateSearch(
   return {
     status: "ok",
     kind: "search-quality",
-    dataset: "builtin-workspace-judgments-v1",
+    dataset: GOLDEN_DATASET.id,
     queries: queryEvaluations,
     aggregate,
     ranAt: new Date().toISOString(),
