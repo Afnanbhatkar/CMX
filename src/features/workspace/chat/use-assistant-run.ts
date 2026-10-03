@@ -26,6 +26,19 @@ import type {
   Attachment,
   ChatActivityStep,
 } from "@/features/workspace/types";
+import {
+  createRunId,
+  exposeAssistantTooling,
+  runActivityCompleted,
+  runActivityStarted,
+  runCancelled,
+  runCompleted,
+  runFailed,
+  runStarted,
+} from "../assistant";
+
+/* Verification tooling (window.__cmxAssistant, read-only observation). */
+exposeAssistantTooling();
 
 /** Wire format of POST /api/ai/chat (1..30 messages, each ≤ 8000 chars). */
 interface ApiChatMessage {
@@ -172,6 +185,29 @@ export function useAssistantRun(): AssistantRun {
 
       const activeFile = useWorkspaceStore.getState().activeTabPath ?? undefined;
 
+      /* Phase 8 plumbing: report the run through the ActivityEngine. Both
+         steps are genuinely in-flight during the single backend call —
+         reading the request and composing the response — so both start now
+         and complete only when the response proves it. */
+      const runId = createRunId();
+      runStarted(runId, conversationId);
+      runActivityStarted(runId, {
+        id: "understand",
+        kind: "steps",
+        title: "Reading your request",
+        summary: null,
+        metadata: null,
+        children: [],
+      });
+      runActivityStarted(runId, {
+        id: "compose",
+        kind: "steps",
+        title: "Composing response",
+        summary: null,
+        metadata: null,
+        children: [],
+      });
+
       try {
         const res = await fetch("/api/ai/chat", {
           method: "POST",
@@ -188,6 +224,9 @@ export function useAssistantRun(): AssistantRun {
           typeof data?.content === "string" ? data.content : "";
 
         if (res.ok && data?.ok === true && content.trim().length > 0) {
+          runActivityCompleted(runId, "understand", "Request read");
+          runActivityCompleted(runId, "compose", "Response composed");
+          runCompleted(runId);
           useWorkspaceStore.getState().updateMessage(
             conversationId,
             assistantMsgId,
@@ -205,6 +244,11 @@ export function useAssistantRun(): AssistantRun {
             typeof data?.error === "string" && data.error.trim().length > 0
               ? data.error
               : `The assistant request failed (HTTP ${res.status}).`;
+          // The request was read (the backend answered with an error);
+          // whether composition happened is unknowable, so "compose" stays
+          // active inside a failed run — honest, not decorated.
+          runActivityCompleted(runId, "understand", "Request read");
+          runFailed(runId, error);
           useWorkspaceStore.getState().updateMessage(
             conversationId,
             assistantMsgId,
@@ -220,6 +264,7 @@ export function useAssistantRun(): AssistantRun {
         }
       } catch (error) {
         if (isAbortError(error)) {
+          runCancelled(runId);
           useWorkspaceStore.getState().updateMessage(
             conversationId,
             assistantMsgId,
@@ -229,6 +274,9 @@ export function useAssistantRun(): AssistantRun {
             .getState()
             .setConversationStatus(conversationId, "stopped");
         } else {
+          // Unreachable service: the request may never have been read — no
+          // activity is marked complete, and the run fails honestly.
+          runFailed(runId, "The assistant service is unreachable right now.");
           useWorkspaceStore.getState().updateMessage(
             conversationId,
             assistantMsgId,

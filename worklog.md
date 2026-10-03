@@ -678,3 +678,38 @@ Work Log:
 Stage Summary:
 - The reported runtime error is fixed at the root (disposal order), not masked: diff dialogs and git-diff toggling are stable, dirty buffers keep both their content and their honest badge across remounts, and the model manager LRU contract is actually live now.
 - No Prisma/schema/data changes; no API contract changes; Phase 7 tag untouched. .zscripts/verify-dispose-fix.py added as the regression harness; result JSON alongside.
+
+---
+Task ID: 8-v21-search-quality
+Agent: Z.ai Code (orchestrator)
+Task: V2.1 ADDITIONS — Search Quality Foundation (query contract, retrieval provenance, golden dataset now, honest confidence)
+
+Work Log:
+- §A query contract: SearchResponse.query now carries original (verbatim), raw (back-compat), normalized (retrieval text after stopword dropping + identifier preservation via normalizedQueryText), rewritten (null unless interpretation actually injected terms — honest), language ("en" | "hi-en" | "hi" — Devanagari detection added, detection only, no translation claim), intent, repository (REAL git identity — new GitContext.repository from `git rev-parse --show-toplevel` basename), scope (resolved filters echoed). UI: query-contract row above interpretation ("original" → normalized → rewritten + lang/intent/repo/scope chips), data-testid=search-query-contract.
+- §B provenance: RetrievalMethod vocabulary extended with metadata (listed only when language/path/scope filters actively shaped the candidate set) and reranker (RESERVED in the type, never emitted — RRF+MMR is fusion/diversification, not a learned reranker; honest absence). All 12 mechanisms verified against the live engine; UI labels/chips added for both.
+- §C golden dataset: formalized as GOLDEN_DATASET (id codemind-golden-search-v1, v1, cases = the real verified workspace judgments; nextExpansion = phase-7.5). Evaluate route accepts "builtin" (legacy alias) and the golden id; response labels dataset: codemind-golden-search-v1. Every judged path verified to exist in the workspace. Measured run: P@5 0.1667 · R@5 0.3611 · MRR 0.6944 · NDCG@10 0.422 · mean 23.5 ms.
+- §D honest confidence: SearchHit.confidence = high | probable | weak from deterministic real fusion signals (exact symbol-name match, ≥3 mechanisms with ≥2 strong, ≥2 mechanisms / 1 strong, single non-strong), plus confidenceReason stating the actual rule. No probability numbers anywhere. UI chips (High confidence / Probable / Related) with the rule in the tooltip; data-testid=search-confidence + data-confidence.
+- Verification (.zscripts/verify-phase8-foundation.py): 32/32 PASS incl. Hinglish contract (login ka pura flow kaha hai? → hi-en, rewritten "login flow"), metadata provenance under filters, reranker never fabricated, golden dataset id round-trip, weak tier real for semantic-only hits; lint 0 errors; no new tsc errors.
+
+Stage Summary:
+- Search quality foundation is live on the Phase 7 engine: full query contract, per-result provenance, golden dataset v1 measurable NOW (no waiting for Phase 17), and honest qualitative confidence — nothing fabricated.
+- No schema/data changes; no API breakage (raw + "builtin" aliases preserved).
+
+---
+Task ID: 8-phase-08-parent
+Agent: Z.ai Code (orchestrator)
+Task: PHASE 8 (V2.1 partition) — shared AI-assistant integration contract + minimal plumbing ONLY (no sub-phase implementations)
+
+Work Log:
+- Scope discipline per the V2.1 execution partition: parent Phase 8 ships ONLY the integration contract + plumbing that 8A/8B/8C/8.5/8.75 consume. NOT built here: composer mode UI + attachments below textarea (8A), Lattice loader / Thinking Orb / Thought Chain / category activity visuals (8B), Context Inspector + approval/question UI (8C), Response Engine v2 + reference rendering (8.5), inline completion + Cmd+K (8.75). The full baseline §1–§15 remains the master contract, preserved in contracts.ts documentation.
+- src/features/workspace/assistant/contracts.ts (ASSISTANT_CONTRACT_VERSION 2.1.0-phase8): 12 streaming event types (§13) as a discriminated union with typed payloads; ActivityNode + ActivityStatus state machine with ACTIVITY_TRANSITIONS + canTransition (§10); SafeToolSummary vocabulary (read_file/search/run_tests/create_patch — safe facts only, never chain-of-thought); ActivityCategory set (§9 categories; selection logic contract left to 8B); PIPELINE_STAGES (§1); ComposerMode search|code|agent|loop + ComposerAttachment/ComposerContext/handlers + DEFAULT_COMPOSER_MODE="agent" (honest default until 8A) + ComposerModelSlot available:false (model selection is a contract slot until a real model list exists); ApprovalRequest + ClarifyQuestion payloads (§11/§12 — UI in 8C); ResponseSegment union (§4/§8.5 — rendering in 8.5).
+- src/features/workspace/assistant/activity-engine.ts: the REAL ActivityEngine — subscribable snapshot store (useSyncExternalStore-ready), run lifecycle (started/completed/failed/cancelled with MEASURED durationMs, never live-ticked), activity state-machine enforcement, file references + search results ledgers, and applyEvent() as the single ingestion route for all 12 event types. Illegal transitions/foreign runs are rejected defensively into lastRejection (visible, never crash a live run). RESPONSE_CHUNK/APPROVAL_REQUIRED/QUESTION_REQUIRED are honest no-ops in the engine until 8.5/8C exist.
+- src/features/workspace/assistant/run-adapter.ts + wiring: the current single-shot chat run now reports through the engine — RUN_STARTED, ACTIVITY_STARTED understand+compose (both genuinely in-flight during one backend call), ACTIVITY_COMPLETED with real evidence, RUN_COMPLETED/RUN_FAILED/RUN_CANCELLED with real durations. Deliberately NOT emitted: RESPONSE_CHUNK (no real streaming exists; a single-shot answer is never re-dressed as chunks), FILE_REFERENCED/SEARCH_RESULT (arrive with 8.5/tool runs). Unreachable-service failures leave activities uncompleted — honest unknowns.
+- Verification tooling: expose.ts puts window.__cmxAssistant {contractVersion, engineState()} on window (same read-only precedent as __cmxPerf); use-assistant-engine.ts exports useAssistantEngineSnapshot() for 8B; index.ts is the module barrel.
+- use-assistant-run.ts wire contract with /api/ai/chat UNCHANGED; all existing chat UI behavior preserved.
+- Verification (.zscripts/verify-phase8-foundation.py, Chromium): real chat send → engine state status=completed, activities [understand→completed, compose→completed], durationMs=297 (measured), lastRejection=null, contractVersion=2.1.0-phase8; assistant reply rendered; zero console errors; 32/32 checks PASS overall.
+- Quality gates: bun run lint → 0 errors (1 pre-existing benign warning); bunx tsc --noEmit → no new errors vs HEAD.
+
+Stage Summary:
+- Phase 8 parent complete per partition: the typed integration contract (events, activity model + state machine, categories, composer modes, approval/question payloads, response segments, pipeline stages) exists, the ActivityEngine is real and enforced, and the live chat run already flows through it honestly. Sub-phases have clean seams: 8A renders composer controls from ComposerMode/Attachment contracts, 8B renders from useAssistantEngineSnapshot, 8C consumes ApprovalRequest/ClarifyQuestion payloads, 8.5 introduces real RESPONSE_CHUNK streaming into the same engine, 8.75 builds on the editor foundations.
+- No fabricated streaming, no fabricated model selection, no hidden reasoning anywhere. No Prisma/schema/data changes.
