@@ -77,6 +77,8 @@ export function AIComposer() {
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
   const composerFocusNonce = useWorkspaceStore((s) => s.composerFocusNonce);
   const newConversation = useWorkspaceStore((s) => s.newConversation);
+  const queuedChatFile = useWorkspaceStore((s) => s.queuedChatFile);
+  const consumeQueuedChatFile = useWorkspaceStore((s) => s.consumeQueuedChatFile);
   const lastIsAssistant = useWorkspaceStore((s) => {
     const conversation = selectActiveConversation(s);
     const messages = conversation?.messages ?? [];
@@ -100,6 +102,35 @@ export function AIComposer() {
     el.focus();
     el.select();
   }, [composerFocusNonce]);
+
+  /* "Explain with AI" (file context menu) queues a file path → attach it.
+     Yields a microtask first so no state update happens synchronously inside
+     the effect body (react-hooks/set-state-in-effect). */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      const queued = consumeQueuedChatFile();
+      if (!queued) return;
+      setAttachments((prev) =>
+        prev.some((a) => a.path === queued)
+          ? prev
+          : [
+              ...prev,
+              {
+                id: newAttachmentId(),
+                kind: "file" as const,
+                label: queued,
+                path: queued,
+              },
+            ],
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [queuedChatFile, consumeQueuedChatFile]);
 
   /* Auto-resize (rows=1 → grows with content, capped at max-h-40). */
   useEffect(() => {

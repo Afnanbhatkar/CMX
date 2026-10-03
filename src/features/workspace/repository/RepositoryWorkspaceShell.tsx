@@ -20,12 +20,14 @@ import { useCallback, useEffect, useState } from "react";
 import { Blocks, Play } from "lucide-react";
 
 import { editorNavigation } from "@/features/workspace/editor-navigation";
+import type { EditorNavigationPayload } from "@/features/workspace/types";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
 import { GitPanel } from "./GitPanel";
 import { PlaceholderView } from "./PlaceholderView";
 import { RepoActivityRail } from "./RepoActivityRail";
 import { RepositoryWorkspace } from "./RepositoryWorkspace";
+import type { EditorRange } from "./CodeEditorViewport";
 
 export function RepositoryWorkspaceShell() {
   const repoRailView = useWorkspaceStore((s) => s.repoRailView);
@@ -34,22 +36,42 @@ export function RepositoryWorkspaceShell() {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   /**
-   * Latest navigation target line per file path, from editorNavigation
-   * payloads (keyed by path; the active tab reads its own entry).
+   * Latest navigation target per file path (line and/or range), from
+   * editorNavigation payloads (keyed by path; the active tab reads its own).
    */
-  const [lineTargets, setLineTargets] = useState<Record<string, number>>({});
+  const [lineInfo, setLineInfo] = useState<Record<string, { line?: number; range?: EditorRange }>>({});
 
   useEffect(
     () =>
-      editorNavigation.subscribe((payload) => {
+      editorNavigation.subscribe((payload: EditorNavigationPayload) => {
         // The service has already validated + verified the file — open the tab.
         useWorkspaceStore.getState().openTab(payload.filePath);
         const targetLine =
           typeof payload.line === "number" && payload.line > 0
             ? Math.floor(payload.line)
             : undefined;
-        if (targetLine !== undefined) {
-          setLineTargets((prev) => ({ ...prev, [payload.filePath]: targetLine }));
+        const targetRange =
+          payload.range &&
+          Number.isFinite(payload.range.startLine) &&
+          Number.isFinite(payload.range.endLine)
+            ? {
+                startLine: Math.floor(payload.range.startLine),
+                endLine: Math.floor(payload.range.endLine),
+                startColumn:
+                  typeof payload.range.startColumn === "number"
+                    ? Math.floor(payload.range.startColumn)
+                    : undefined,
+                endColumn:
+                  typeof payload.range.endColumn === "number"
+                    ? Math.floor(payload.range.endColumn)
+                    : undefined,
+              }
+            : undefined;
+        if (targetLine !== undefined || targetRange !== undefined) {
+          setLineInfo((prev) => ({
+            ...prev,
+            [payload.filePath]: { line: targetLine, range: targetRange },
+          }));
         }
       }),
     [],
@@ -57,7 +79,7 @@ export function RepositoryWorkspaceShell() {
 
   const toggleDiagnostics = useCallback(() => setShowDiagnostics((v) => !v), []);
 
-  const targetLine = activeTabPath ? lineTargets[activeTabPath] : undefined;
+  const target = activeTabPath ? lineInfo[activeTabPath] : undefined;
 
   return (
     <div className="flex h-full min-h-0 bg-surface">
@@ -68,7 +90,8 @@ export function RepositoryWorkspaceShell() {
           <RepositoryWorkspace
             filterAutoFocus={repoRailView === "search"}
             showDiagnostics={showDiagnostics}
-            targetLine={targetLine}
+            targetLine={target?.line}
+            targetRange={target?.range}
           />
         ) : null}
 

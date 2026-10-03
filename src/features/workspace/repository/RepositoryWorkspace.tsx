@@ -1,35 +1,36 @@
 "use client";
 
 /**
- * CodeMind X V2 — developer workspace (Phase 2).
+ * CodeMind X V2 — developer workspace (Phase 5).
  *
- * Shown for the "explorer" and "search" rail views: explorer sidebar on the
- * left, editor tabs + a vertical resizable editor/output split on the right.
+ * Three conceptual regions (spec §1), all user-resizable:
+ *   LEFT   — repository tree (RepositoryExplorerShell)
+ *   CENTER — tab strip + editor/output vertical split
+ *   RIGHT  — file intelligence panel (Phase 5)
  *
- * FOCUS MODE (Phase 4 session directive): the explorer column can be closed
- * from its own header icon; when `explorerOpen` is false the editor takes
- * the FULL repository-panel width. Reopening is available from the editor
- * tab strip and the repository activity rail (explorer/search icons).
- *
- * FILE LOADER: for every tab with status "loading" it fetches
- * GET /api/repository/file?path=… (one in-flight request at a time; the
- * ACTIVE tab is served first, the rest queue via store re-renders) and maps
- * the real HTTP contract onto honest tab states:
+ * Phase 2/4 behavior preserved: focus mode (`explorerOpen=false` gives the
+ * editor the full width), the vertical editor/output split, and the honest
+ * file loader contract:
  *   200 → ready · 403/404 → missing · 413 → too-large · 415 → binary
  *   other / network failure → error (+ message)
- * Aborts are cleaned up on unmount; no state is written after unmount.
+ *
+ * Phase 5: per-path request aborts, provenance metadata captured from the
+ * file API's additive `meta` field (session-only, never persisted), range
+ * targets forwarded to the editor, compact stacked layout below 768px
+ * container width (intelligence hidden — honest, no cramped panels).
  */
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
-import type { RepoFile } from "@/features/workspace/types";
+import type { FileProvenanceMeta, RepoFile } from "@/features/workspace/types";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
 import { CodeEditorViewport } from "./CodeEditorViewport";
-import type { CodeFileMeta } from "./CodeEditorViewport";
+import type { CodeFileMeta, EditorRange } from "./CodeEditorViewport";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { EditorTabs } from "./EditorTabs";
+import { FileIntelligencePanel } from "./FileIntelligencePanel";
 import { RepositoryExplorerShell } from "./RepositoryExplorerShell";
 import { TerminalOutputPanel } from "./TerminalOutputPanel";
 
@@ -40,25 +41,46 @@ export interface RepositoryWorkspaceProps {
   showDiagnostics?: boolean;
   /** Target line for the active tab, from the last editor navigation payload. */
   targetLine?: number;
+  /** Target range for the active tab, from the last editor navigation payload. */
+  targetRange?: EditorRange;
 }
 
 /**
  * Transient per-file metadata captured from the last successful file API
- * response (language / truncated / size). The store persists tab paths only,
- * so this lives here with the same lifetime as tab contents — session only,
- * never persisted.
+ * response (language / truncated / size / provenance). The store persists tab
+ * paths only, so this lives here with the same lifetime as tab contents —
+ * session only, never persisted.
  */
 const fileMetaRegistry = new Map<string, CodeFileMeta>();
+
+/** Compact-width probe: stacked layout below this breakpoint (sheet mounts). */
+const COMPACT_QUERY = "(max-width: 767px)";
+
+function useCompactWidth(): boolean {
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const mql = window.matchMedia(COMPACT_QUERY);
+    const update = () => setCompact(mql.matches);
+    update();
+    mql.addEventListener("change", update);
+    return () => mql.removeEventListener("change", update);
+  }, []);
+  return compact;
+}
 
 export function RepositoryWorkspace({
   filterAutoFocus = false,
   showDiagnostics = false,
   targetLine,
+  targetRange,
 }: RepositoryWorkspaceProps) {
   const tabs = useWorkspaceStore((s) => s.tabs);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
   const setTabStatus = useWorkspaceStore((s) => s.setTabStatus);
   const explorerOpen = useWorkspaceStore((s) => s.explorerOpen);
+  const intelligenceOpen = useWorkspaceStore((s) => s.intelligenceOpen);
+
+  const compact = useCompactWidth();
 
   /* path → AbortController for the request currently in flight. */
   const inflightRef = useRef(new Map<string, AbortController>());
@@ -92,14 +114,18 @@ export function RepositoryWorkspace({
 
         if (res.ok) {
           const data = (await res.json().catch(() => null)) as
-            | { ok?: boolean; file?: RepoFile }
+            | { ok?: boolean; file?: RepoFile; meta?: FileProvenanceMeta }
             | null;
           const file = data?.ok === true ? data.file : undefined;
+          const provenanceMeta = data?.ok === true ? data.meta : undefined;
           if (file && typeof file.content === "string") {
             fileMetaRegistry.set(path, {
               language: file.language,
               truncated: file.truncated,
               size: file.size,
+              // Additive provenance (V2.1 §B/§D) — present when the backend
+              // resolved it, absent (never fabricated) otherwise.
+              provenance: provenanceMeta ?? undefined,
             });
             setTabStatus(path, "ready", { content: file.content });
           } else {
@@ -144,41 +170,104 @@ export function RepositoryWorkspace({
     };
   }, []);
 
+  const activeMeta = activeTabPath ? fileMetaRegistry.get(activeTabPath) : undefined;
+
+  /* Compact layout: tabs + editor stacked, no horizontal resizing panels. */
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1">
+        {explorerOpen ? (
+          <div className="flex w-full min-w-0 flex-col border-r border-border-subtle">
+            <RepositoryExplorerShell filterAutoFocus={filterAutoFocus} />
+          </div>
+        ) : null}
+        {!explorerOpen ? (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <EditorTabs />
+            <ResizablePanelGroup
+              id="cmx-repo-vertical-v1"
+              direction="vertical"
+              className="min-h-0 flex-1"
+            >
+              <ResizablePanel defaultSize={72} minSize={25}>
+                <CodeEditorViewport
+                  line={targetLine}
+                  range={targetRange}
+                  meta={activeMeta}
+                />
+              </ResizablePanel>
+              <ResizableHandle
+                aria-label="Resize editor / output"
+                className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
+              />
+              <ResizablePanel defaultSize={28} minSize={15}>
+                {showDiagnostics ? <DiagnosticsPanel /> : <TerminalOutputPanel />}
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-0 flex-1">
-      {/* Left column — fixed width in v1: NOT user-resizable yet (planned).
-          Hidden entirely in focus mode (explorerOpen = false). */}
+    <ResizablePanelGroup id="cmx-repo-h-v1" direction="horizontal" className="min-h-0 flex-1">
+      {/* LEFT — repository tree (hidden entirely in focus mode). */}
       {explorerOpen ? (
-        <div className="flex w-[42%] min-w-[180px] max-w-[320px] flex-col border-r border-border-subtle">
-          <RepositoryExplorerShell filterAutoFocus={filterAutoFocus} />
-        </div>
-      ) : null}
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        <EditorTabs />
-
-        <ResizablePanelGroup
-          id="cmx-repo-vertical-v1"
-          direction="vertical"
-          className="min-h-0 flex-1"
-        >
-          <ResizablePanel defaultSize={72} minSize={25}>
-            <CodeEditorViewport
-              line={targetLine}
-              meta={activeTabPath ? fileMetaRegistry.get(activeTabPath) : undefined}
-            />
+        <>
+          <ResizablePanel defaultSize={28} minSize={14} maxSize={40}>
+            <div className="flex h-full min-h-0 flex-col border-r border-border-subtle">
+              <RepositoryExplorerShell filterAutoFocus={filterAutoFocus} />
+            </div>
           </ResizablePanel>
-
           <ResizableHandle
-            aria-label="Resize editor / output"
+            aria-label="Resize explorer panel"
             className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
           />
+        </>
+      ) : null}
 
-          <ResizablePanel defaultSize={28} minSize={15}>
-            {showDiagnostics ? <DiagnosticsPanel /> : <TerminalOutputPanel />}
+      {/* CENTER — tabs + editor/output vertical split (preserved ids/sizes). */}
+      <ResizablePanel minSize={35}>
+        <div className="flex h-full min-h-0 min-w-0 flex-col">
+          <EditorTabs />
+          <ResizablePanelGroup
+            id="cmx-repo-vertical-v1"
+            direction="vertical"
+            className="min-h-0 flex-1"
+          >
+            <ResizablePanel defaultSize={72} minSize={25}>
+              <CodeEditorViewport
+                line={targetLine}
+                range={targetRange}
+                meta={activeMeta}
+              />
+            </ResizablePanel>
+            <ResizableHandle
+              aria-label="Resize editor / output"
+              className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
+            />
+            <ResizablePanel defaultSize={28} minSize={15}>
+              {showDiagnostics ? <DiagnosticsPanel /> : <TerminalOutputPanel />}
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+      </ResizablePanel>
+
+      {/* RIGHT — file intelligence (Phase 5). Hidden when toggled off. */}
+      {intelligenceOpen ? (
+        <>
+          <ResizableHandle
+            aria-label="Resize file intelligence panel"
+            className="transition-colors after:bg-primary/20 hover:after:bg-primary/50"
+          />
+          <ResizablePanel defaultSize={24} minSize={16} maxSize={34}>
+            <div className="flex h-full min-h-0 flex-col border-l border-border-subtle">
+              <FileIntelligencePanel filePath={activeTabPath} />
+            </div>
           </ResizablePanel>
-        </ResizablePanelGroup>
-      </div>
-    </div>
+        </>
+      ) : null}
+    </ResizablePanelGroup>
   );
 }

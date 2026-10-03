@@ -1,24 +1,30 @@
 "use client";
 
 /**
- * CodeMind X V2 — repository explorer sidebar (Phase 2).
+ * CodeMind X V2 — repository explorer sidebar (Phase 5).
  *
- * Real tree from GET /api/repository/tree (via useRepositoryTree):
- * - header with view label + reload + CLOSE (focus mode, Phase 4 session:
- *   closing the explorer gives the code editor the full panel width; the
- *   editor tab strip and the activity rail reopen it)
- * - filter input: case-insensitive substring match over the flattened file
- *   list; while filtering, a flat result list replaces the tree
- * - recursive, memoized file tree; depth-0 directories start open, deeper
- *   directories start collapsed (user overrides win)
- * - file clicks go through editorNavigation.open — the single opening mechanism
+ * Phase 2 core preserved: real tree from GET /api/repository/tree, filter
+ * input, focus-mode close, editorNavigation.open as the single file-opening
+ * mechanism, honest skeleton/error/empty states.
+ *
+ * Phase 5 (spec §2/§8/§10):
+ * - VIRTUALIZED rows via @tanstack/react-virtual — large trees never render
+ *   thousands of DOM nodes simultaneously.
+ * - Fuzzy filter (subsequence + scoring + highlight) replaces substring match.
+ * - Per-extension file icons and git working-tree status letters
+ *   (M/A/D/R/U) from the shared /api/repository/status map.
+ * - Lazy directory loading for server-`truncated` directories.
+ * - Right-click context menu (FileContextMenu) on every row.
+ * - Breadcrumb/tree reveal support: store `treeReveal` expands ancestors,
+ *   scrolls the row into view and flash-highlights it.
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, FileCode2, Folder, FolderOpen, PanelLeftClose, RefreshCw } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { ChevronRight, PanelLeftClose, RefreshCw } from "lucide-react";
 
 import { editorNavigation } from "@/features/workspace/editor-navigation";
-import type { RepoTreeNode } from "@/features/workspace/types";
+import type { RepoTreeNode, TreeGitStatus } from "@/features/workspace/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -26,6 +32,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
+import { DirIcon, FileIcon } from "./file-icons";
+import { FileContextMenu } from "./FileContextMenu";
+import { fuzzyFilter, type FuzzyResult } from "./fuzzy";
 import { useRepositoryTree } from "./use-repository-tree";
 
 export interface RepositoryExplorerShellProps {
@@ -34,63 +43,178 @@ export interface RepositoryExplorerShellProps {
 }
 
 /* ------------------------------------------------------------------ */
+/* Git status letter badge                                             */
+/* ------------------------------------------------------------------ */
+
+const GIT_STATUS_META: Record<TreeGitStatus, { letter: string; className: string; label: string }> = {
+  modified: { letter: "M", className: "text-amber-500", label: "Modified" },
+  added: { letter: "A", className: "text-emerald-500", label: "Added" },
+  deleted: { letter: "D", className: "text-red-500", label: "Deleted" },
+  untracked: { letter: "U", className: "text-stone-400", label: "Untracked" },
+  renamed: { letter: "R", className: "text-violet-500", label: "Renamed" },
+};
+
+const GitStatusLetter = memo(function GitStatusLetter({ status }: { status: TreeGitStatus }) {
+  const meta = GIT_STATUS_META[status];
+  return (
+    <span
+      aria-label={meta.label}
+      title={`${meta.label} (working tree)`}
+      className={cn(
+        "w-3 shrink-0 text-right font-mono text-[10px] font-semibold leading-none",
+        meta.className,
+      )}
+    >
+      {meta.letter}
+    </span>
+  );
+});
+
+/* ------------------------------------------------------------------ */
+/* Fuzzy highlight text                                                */
+/* ------------------------------------------------------------------ */
+
+const HighlightedText = memo(function HighlightedText({
+  text,
+  positions,
+}: {
+  text: string;
+  positions: number[];
+}) {
+  if (positions.length === 0) return <>{text}</>;
+  const set = new Set(positions);
+  const parts: React.ReactNode[] = [];
+  let current: string[] = [];
+  let currentMatched = set.has(0);
+
+  const flush = (key: string) => {
+    if (current.length === 0) return;
+    const chunk = current.join("");
+    parts.push(
+      currentMatched ? (
+        <mark key={key} className="rounded-sm bg-primary/20 text-inherit">
+          {chunk}
+        </mark>
+      ) : (
+        <span key={key}>{chunk}</span>
+      ),
+    );
+    current = [];
+  };
+
+  for (let i = 0; i < text.length; i += 1) {
+    const matched = set.has(i);
+    if (matched !== currentMatched) {
+      flush(`c${i}`);
+      currentMatched = matched;
+    }
+    current.push(text[i]);
+  }
+  flush("end");
+
+  return <>{parts}</>;
+});
+
+/* ------------------------------------------------------------------ */
+/* Visible row model (virtualized)                                     */
+/* ------------------------------------------------------------------ */
+
+interface VisibleRow {
+  kind: "node";
+  node: RepoTreeNode;
+  depth: number;
+}
+
+interface LoadingRow {
+  kind: "loading";
+  path: string;
+  depth: number;
+}
+
+type Row = VisibleRow | LoadingRow;
+
+const ROW_HEIGHT = 28;
+
+function buildVisibleRows(
+  nodes: RepoTreeNode[],
+  openOverrides: Map<string, boolean>,
+  loadingDirs: ReadonlySet<string>,
+  out: Row[],
+): void {
+  for (const node of nodes) {
+    out.push({ kind: "node", node, depth: 0 });
+    if (node.type === "dir") {
+      const isOpen = openOverrides.get(node.path) ?? false;
+      if (isOpen) {
+        if (node.truncated && loadingDirs.has(node.path)) {
+          out.push({ kind: "loading", path: node.path, depth: 1 });
+        }
+        if (node.children && node.children.length > 0) {
+          pushDescendants(node.children, openOverrides, loadingDirs, out, 1);
+        }
+      }
+    }
+  }
+}
+
+function pushDescendants(
+  nodes: RepoTreeNode[],
+  openOverrides: Map<string, boolean>,
+  loadingDirs: ReadonlySet<string>,
+  out: Row[],
+  depth: number,
+): void {
+  for (const node of nodes) {
+    out.push({ kind: "node", node, depth });
+    if (node.type === "dir") {
+      const isOpen = openOverrides.get(node.path) ?? false;
+      if (isOpen) {
+        if (node.truncated && loadingDirs.has(node.path)) {
+          out.push({ kind: "loading", path: node.path, depth: depth + 1 });
+        }
+        if (node.children && node.children.length > 0) {
+          pushDescendants(node.children, openOverrides, loadingDirs, out, depth + 1);
+        }
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Tree row (memoized)                                                 */
 /* ------------------------------------------------------------------ */
 
-interface TreeNodeRowProps {
-  node: RepoTreeNode;
-  depth: number;
+interface TreeRowProps {
+  row: VisibleRow;
   activePath: string | null;
   openOverrides: Map<string, boolean>;
-  onToggleDir: (path: string, next: boolean) => void;
+  statusMap: Record<string, TreeGitStatus>;
+  flashPath: string | null;
+  onToggleDir: (node: RepoTreeNode, next: boolean) => void;
   onOpenFile: (path: string) => void;
 }
 
-const TreeNodeRow = memo(function TreeNodeRow({
-  node,
-  depth,
+const TreeRow = memo(function TreeRow({
+  row,
   activePath,
   openOverrides,
+  statusMap,
+  flashPath,
   onToggleDir,
   onOpenFile,
-}: TreeNodeRowProps) {
-  // Default: depth-0 directories open, deeper ones collapsed. User toggles win.
-  const isOpen = openOverrides.get(node.path) ?? depth === 0;
+}: TreeRowProps) {
+  const { node, depth } = row;
+  const isOpen = openOverrides.get(node.path) ?? false;
+  const gitStatus = node.type === "file" ? (statusMap[node.path] ?? null) : null;
+  const active = node.path === activePath;
+  const flashing = flashPath === node.path;
 
-  if (node.type === "file") {
-    const active = node.path === activePath;
-    return (
-      <button
-        type="button"
-        onClick={() => onOpenFile(node.path)}
-        aria-current={active ? "true" : undefined}
-        title={node.path}
-        className={cn(
-          "relative flex h-7 w-full items-center gap-1 rounded px-1 text-left text-[12px]",
-          "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-          active && "bg-surface-hover",
-        )}
-      >
-        {active ? (
-          <span aria-hidden="true" className="absolute left-0 h-4 w-0.5 rounded bg-primary" />
-        ) : null}
-        <FileCode2 className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <span className="min-w-0 truncate">{node.name}</span>
-      </button>
-    );
-  }
-
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={() => onToggleDir(node.path, !isOpen)}
-        aria-expanded={isOpen}
-        className={cn(
-          "flex h-7 w-full items-center gap-1 rounded px-1 text-left text-[12px]",
-          "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-        )}
-      >
+  const content = (
+    <>
+      {active ? (
+        <span aria-hidden="true" className="absolute left-0 h-4 w-0.5 rounded bg-primary" />
+      ) : null}
+      {node.type === "dir" ? (
         <ChevronRight
           aria-hidden="true"
           className={cn(
@@ -98,30 +222,59 @@ const TreeNodeRow = memo(function TreeNodeRow({
             isOpen && "rotate-90",
           )}
         />
-        {isOpen ? (
-          <FolderOpen className="size-3.5 shrink-0 text-primary/80" aria-hidden="true" />
-        ) : (
-          <Folder className="size-3.5 shrink-0 text-primary/80" aria-hidden="true" />
-        )}
-        <span className="min-w-0 truncate">{node.name}</span>
-      </button>
+      ) : (
+        <span className="size-3.5 shrink-0" aria-hidden="true" />
+      )}
+      {node.type === "dir" ? (
+        <DirIcon open={isOpen} />
+      ) : (
+        <FileIcon name={node.name} />
+      )}
+      <span className="min-w-0 truncate">{node.name}</span>
+      {gitStatus ? <GitStatusLetter status={gitStatus} /> : null}
+    </>
+  );
 
-      {isOpen && node.children && node.children.length > 0 ? (
-        <div className="ml-2.5 border-l border-border-subtle pl-3">
-          {node.children.map((child) => (
-            <TreeNodeRow
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              activePath={activePath}
-              openOverrides={openOverrides}
-              onToggleDir={onToggleDir}
-              onOpenFile={onOpenFile}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
+  const style: React.CSSProperties = { paddingLeft: 4 + depth * 12 };
+
+  if (node.type === "file") {
+    return (
+      <button
+        type="button"
+        data-tree-row="true"
+        data-node-path={node.path}
+        onClick={() => onOpenFile(node.path)}
+        aria-current={active ? "true" : undefined}
+        title={node.path}
+        style={style}
+        className={cn(
+          "relative flex h-7 w-full items-center gap-1 rounded pr-1 text-left text-[12px]",
+          "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          active && "bg-surface-hover",
+          flashing && "bg-primary/10 transition-colors",
+        )}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      data-tree-row="true"
+      data-node-path={node.path}
+      onClick={() => onToggleDir(node, !isOpen)}
+      aria-expanded={isOpen}
+      style={style}
+      className={cn(
+        "flex h-7 w-full items-center gap-1 rounded pr-1 text-left text-[12px]",
+        "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        flashing && "bg-primary/10 transition-colors",
+      )}
+    >
+      {content}
+    </button>
   );
 });
 
@@ -129,16 +282,31 @@ const TreeNodeRow = memo(function TreeNodeRow({
 /* Filter result row (memoized)                                        */
 /* ------------------------------------------------------------------ */
 
+interface FilterRowProps {
+  path: string;
+  name: string;
+  match: FuzzyResult;
+  active: boolean;
+  gitStatus: TreeGitStatus | null;
+}
+
 const FilterResultRow = memo(function FilterResultRow({
   path,
+  name,
+  match,
   active,
-}: {
-  path: string;
-  active: boolean;
-}) {
+  gitStatus,
+}: FilterRowProps) {
+  // Map full-path match positions onto the displayed basename when possible.
+  const offset = path.length - name.length;
+  const localPositions = match.positions
+    .filter((p) => p >= offset)
+    .map((p) => p - offset);
+
   return (
     <button
       type="button"
+      data-tree-row="true"
       onClick={() => void editorNavigation.open({ filePath: path, sourceContext: "manual" })}
       aria-current={active ? "true" : undefined}
       title={path}
@@ -151,8 +319,14 @@ const FilterResultRow = memo(function FilterResultRow({
       {active ? (
         <span aria-hidden="true" className="absolute left-0 h-4 w-0.5 rounded bg-primary" />
       ) : null}
-      <FileCode2 className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <span className="min-w-0 truncate font-mono text-[11px] text-foreground/85">{path}</span>
+      <FileIcon name={name} />
+      <span className="min-w-0 truncate font-mono text-[11px] text-foreground/85">
+        <HighlightedText text={name} positions={localPositions} />
+      </span>
+      <span className="ml-auto shrink-0 truncate pl-1 font-mono text-[10px] text-muted-foreground/60">
+        {path.slice(0, Math.max(0, offset - 1))}
+      </span>
+      {gitStatus ? <GitStatusLetter status={gitStatus} /> : null}
     </button>
   );
 });
@@ -172,40 +346,174 @@ function CenteredNote({ children }: { children: React.ReactNode }) {
 }
 
 export function RepositoryExplorerShell({ filterAutoFocus = false }: RepositoryExplorerShellProps) {
-  const { tree, loading, error, reload, flattened } = useRepositoryTree();
+  const { tree, loading, error, reload, flattened, statusNote, loadingDirs, loadDir } =
+    useRepositoryTree();
   const repoRailView = useWorkspaceStore((s) => s.repoRailView);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
   const setExplorerOpen = useWorkspaceStore((s) => s.setExplorerOpen);
+  const tabs = useWorkspaceStore((s) => s.tabs);
+  const treeReveal = useWorkspaceStore((s) => s.treeReveal);
+
+  // Store-derived per-path git status (memoized — never a fresh object per
+  // render, which would defeat zustand's equality check).
+  const gitStatusMap = useMemo(() => {
+    const map: Record<string, TreeGitStatus> = {};
+    for (const tab of tabs) if (tab.gitStatus) map[tab.path] = tab.gitStatus;
+    return map;
+  }, [tabs]);
 
   const [filter, setFilter] = useState("");
-  // Sparse open/closed overrides; absent = default (depth 0 open).
-  const [openOverrides, setOpenOverrides] = useState<Map<string, boolean>>(() => new Map());
+  // Sparse open/closed overrides; absent = collapsed (depth-0 dirs start open
+  // in the flat model below via the initial walk).
+  const [openOverrides, setOpenOverrides] = useState<Map<string, boolean>>(() => {
+    const initial = new Map<string, boolean>();
+    for (const node of tree) if (node.type === "dir") initial.set(node.path, true);
+    return initial;
+  });
+  const [flashPath, setFlashPath] = useState<string | null>(null);
 
   const filterRef = useRef<HTMLInputElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const pendingRevealRef = useRef<{ path: string; attempts: number } | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (filterAutoFocus) filterRef.current?.focus();
   }, [filterAutoFocus]);
 
-  const toggleDir = useCallback((path: string, next: boolean) => {
+  /* Keep depth-0 dirs open when the tree first arrives. */
+  useEffect(() => {
     setOpenOverrides((prev) => {
-      const map = new Map(prev);
-      map.set(path, next);
-      return map;
+      const next = new Map(prev);
+      let changed = false;
+      for (const node of tree) {
+        if (node.type === "dir" && !next.has(node.path)) {
+          next.set(node.path, true);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
     });
-  }, []);
+  }, [tree]);
+
+  const toggleDir = useCallback(
+    (node: RepoTreeNode, next: boolean) => {
+      setOpenOverrides((prev) => {
+        const map = new Map(prev);
+        map.set(node.path, next);
+        return map;
+      });
+      // Lazy-load truncated directories when expanded (honest server data).
+      if (next && node.truncated) void loadDir(node.path);
+    },
+    [loadDir],
+  );
 
   const openFile = useCallback((path: string) => {
     void editorNavigation.open({ filePath: path, sourceContext: "manual" });
   }, []);
 
-  const query = filter.trim().toLowerCase();
+  const query = filter.trim();
   const filtering = query.length > 0;
 
   const matches = useMemo(() => {
     if (!filtering) return [];
-    return flattened.filter((node) => node.path.toLowerCase().includes(query));
+    return fuzzyFilter(flattened, (node) => node.path, query, 100);
   }, [filtering, flattened, query]);
+
+  /* Visible rows for the virtualized list. */
+  const rows = useMemo<Row[]>(() => {
+    if (filtering || loading || error) return [];
+    const out: Row[] = [];
+    buildVisibleRows(tree, openOverrides, loadingDirs, out);
+    return out;
+  }, [filtering, loading, error, tree, openOverrides, loadingDirs]);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 12,
+  });
+
+  /* ---- reveal (breadcrumb clicks): expand ancestors → scroll → flash ---- */
+  useEffect(() => {
+    if (!treeReveal) return;
+    if (filtering) setFilter("");
+    pendingRevealRef.current = { path: treeReveal.path, attempts: 0 };
+    const segments = treeReveal.path.split("/");
+    setOpenOverrides((prev) => {
+      const next = new Map(prev);
+      for (let i = 1; i < segments.length; i += 1) {
+        next.set(segments.slice(0, i).join("/"), true);
+      }
+      return next;
+    });
+  }, [treeReveal, filtering]);
+
+  useEffect(() => {
+    const pending = pendingRevealRef.current;
+    if (!pending || filtering || loading) return;
+    const index = rows.findIndex(
+      (row) => row.kind === "node" && row.node.path === pending.path,
+    );
+    if (index >= 0) {
+      virtualizer.scrollToIndex(index, { align: "center" });
+      setFlashPath(pending.path);
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = setTimeout(() => setFlashPath(null), 1400);
+      pendingRevealRef.current = null;
+      return;
+    }
+    // Target not visible yet — a truncated ancestor may need lazy loading.
+    pending.attempts += 1;
+    if (pending.attempts > 4) {
+      pendingRevealRef.current = null;
+      return;
+    }
+    const segments = pending.path.split("/");
+    for (let i = segments.length - 1; i > 0; i -= 1) {
+      const dirPath = segments.slice(0, i).join("/");
+      const dirRow = rows.find(
+        (row) => row.kind === "node" && row.node.path === dirPath,
+      );
+      if (dirRow && dirRow.kind === "node" && dirRow.node.truncated) {
+        void loadDir(dirPath);
+        break;
+      }
+    }
+  }, [rows, filtering, loading, virtualizer, loadDir]);
+
+  useEffect(() => {
+    const timer = flashTimerRef.current;
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  /* Arrow-key navigation across the currently rendered rows. */
+  const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const container = event.currentTarget;
+    const rowButtons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>("[data-tree-row]"),
+    );
+    if (rowButtons.length === 0) return;
+    const currentIndex = rowButtons.findIndex((el) => el === document.activeElement);
+    event.preventDefault();
+    if (currentIndex === -1) {
+      rowButtons[0]?.focus();
+      return;
+    }
+    const nextIndex =
+      event.key === "ArrowDown"
+        ? Math.min(currentIndex + 1, rowButtons.length - 1)
+        : Math.max(currentIndex - 1, 0);
+    rowButtons[nextIndex]?.focus();
+  }, []);
+
+  const totalHeight = virtualizer.getTotalSize();
+  const virtualItems = virtualizer.getVirtualItems();
 
   return (
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
@@ -270,8 +578,20 @@ export function RepositoryExplorerShell({ filterAutoFocus = false }: RepositoryE
         />
       </div>
 
-      {/* Body */}
-      <div aria-busy={loading} className="min-h-0 flex-1 overflow-y-auto p-1">
+      {/* Honest git-status note (never fabricated) */}
+      {statusNote ? (
+        <p className="shrink-0 px-2 pb-1 text-[10px] leading-snug text-muted-foreground/70">
+          {statusNote}
+        </p>
+      ) : null}
+
+      {/* Body — virtualized both for tree rows and fuzzy results */}
+      <div
+        ref={scrollRef}
+        aria-busy={loading}
+        onKeyDown={onKeyDown}
+        className="min-h-0 flex-1 overflow-y-auto p-1"
+      >
         {loading ? (
           <div aria-hidden="true" className="flex flex-col gap-1 p-0.5">
             {SKELETON_WIDTHS.map((width, index) => (
@@ -291,29 +611,66 @@ export function RepositoryExplorerShell({ filterAutoFocus = false }: RepositoryE
               <p className="text-[12px] text-muted-foreground">No files match.</p>
             </CenteredNote>
           ) : (
-            <div className="max-h-full space-y-0.5 overflow-y-auto" aria-label="Matching files">
-              {matches.map((node) => (
-                <FilterResultRow key={node.path} path={node.path} active={node.path === activeTabPath} />
-              ))}
-            </div>
+            <>
+              <p className="px-1 pb-1 text-[10px] text-muted-foreground/70">
+                {matches.length} {matches.length === 1 ? "match" : "matches"} — fuzzy scored
+              </p>
+              <div className="space-y-0.5" aria-label="Matching files">
+                  {matches.map(({ item, match }) => (
+                    <FilterResultRow
+                      key={item.path}
+                      path={item.path}
+                      name={item.name}
+                      match={match}
+                      active={item.path === activeTabPath}
+                      gitStatus={gitStatusMap[item.path] ?? null}
+                    />
+                  ))}
+                </div>
+            </>
           )
         ) : tree.length === 0 ? (
           <CenteredNote>
             <p className="text-[12px] text-muted-foreground">No files</p>
           </CenteredNote>
         ) : (
-          <div className="space-y-0.5">
-            {tree.map((node) => (
-              <TreeNodeRow
-                key={node.path}
-                node={node}
-                depth={0}
-                activePath={activeTabPath}
-                openOverrides={openOverrides}
-                onToggleDir={toggleDir}
-                onOpenFile={openFile}
-              />
-            ))}
+          <div className="relative" style={{ height: totalHeight }}>
+            {virtualItems.map((virtualRow) => {
+              const row = rows[virtualRow.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={row.kind === "node" ? row.node.path : `loading-${row.path}`}
+                  data-index={virtualRow.index}
+                  className="absolute left-0 top-0 w-full px-0.5"
+                  style={{ height: ROW_HEIGHT, transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  <div className="ml-2.5 border-l border-transparent pl-0" style={{ marginLeft: 0 }}>
+                    {row.kind === "node" ? (
+                      <FileContextMenu path={row.node.path} isDir={row.node.type === "dir"}>
+                        <TreeRow
+                          row={row}
+                          activePath={activeTabPath}
+                          openOverrides={openOverrides}
+                          statusMap={gitStatusMap}
+                          flashPath={flashPath}
+                          onToggleDir={toggleDir}
+                          onOpenFile={openFile}
+                        />
+                      </FileContextMenu>
+                    ) : (
+                      <div
+                        style={{ paddingLeft: 8 }}
+                        className="flex h-7 items-center gap-2"
+                        aria-label={`Loading ${row.path}`}
+                      >
+                        <Skeleton className="h-3 w-2/3 rounded" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

@@ -4,6 +4,91 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 5 — Advanced Repository Explorer] — VS Code-style file intelligence + V2.1 trust metadata
+
+### Added
+- **V2.1 §A — content classification**: `src/server/ingestion/classify.ts`
+  tags indexed files as `repository_data` / `repository_documentation` /
+  `repository_comment` / `repository_fixture` / `repository_generated_output`
+  (informational, security-oriented — content is never treated as AI
+  instructions; `null` = ordinary unclassified source). Persisted on
+  `RepositoryFile.classification`; surfaced as an explainer badge in the
+  editor header and intelligence panel.
+- **V2.1 §B — index version metadata**: every `repository.index` run creates
+  a `RepositoryIndexSnapshot` (ref, commitSha, kind, parser/chunking/embedding
+  versions from `INDEX_METADATA_VERSIONS`, real `filesIndexed`,
+  sha256 algorithm) with per-file `snapshotId` linkage, and computes REAL
+  sha256 `contentHash` per indexed file (streamed, never fabricated). Prepares
+  Phase 4.5 incremental processing.
+- **V2.1 §C — symlink/archive safety**: refused entries are RECORDED, never
+  executed — `DiscoveryResult.suspicious` + `ZipExtractResult.suspicious`
+  persist as `RepositoryImportFinding` rows (symlink / unsafe_path /
+  zip_rejected_entry), delete-before-insert idempotent per job.
+- **V2.1 §D — import provenance**: every indexed file is traceable to
+  repository (repositoryId) → snapshot (ref/commit) → source path → content
+  hash.
+- **Git working-tree status**: `src/lib/server/git-status.ts`
+  (`git status --porcelain=v1 -z`, 3s timeout, never throws, honest 503) +
+  `GET /api/repository/status`; tree rows, tabs and headers show real
+  M/A/D/R/U indicators.
+- **File provenance + history services**: `src/lib/server/file-provenance.ts`
+  (mime/size/binary sniff, lastModified via `git log -1`, branch/sha via
+  cached rev-parse, `--follow` history 1..20) + `GET /api/repository/file-history`.
+- **File API variants**: `/api/repository/file?variant=full|meta|preview|download`
+  (full stays byte-compatible + additive `meta`; meta works for binaries;
+  image preview as data URL ≤2MB; raw download ≤10MB with attachment header).
+- **Lazy directory loading**: `GET /api/repository/tree?path=<dir>` subtree
+  route + client `loadDir` for server-`truncated` directories; per-dir 30s
+  cache; file nodes carry `language`, capped dirs carry `truncated: true`.
+- **Virtualized explorer** (`@tanstack/react-virtual`): only visible rows
+  render (28px rows, overscan 12) — large trees never mount thousands of
+  nodes; arrow-key row navigation; tree-reveal flash (breadcrumb-driven).
+- **Fuzzy file search**: `repository/fuzzy.ts` subsequence scorer (boundary/
+  consecutive/gap) powers the explorer filter and Code Search panel with
+  `<mark>` highlights and scored ranking (top 100).
+- **File-type icons**: `repository/file-icons.tsx` extension/name → lucide
+  icon + color mapping across tree, tabs and lists.
+- **Context menu** (real Radix ContextMenu): Open, Copy path, Copy relative
+  path, Explain with AI (queues the file into the chat composer), Git
+  history; references/symbols/review/tests/security/blame are explicitly
+  disabled `[PLANNED]` — nothing simulated.
+- **Three-region resizable editor** (`cmx-repo-h-v1`): tree | editor/output |
+  file intelligence, all user-resizable; focus mode preserved; compact
+  (<768px) stacked layout without horizontal panels.
+- **Editor upgrades**: breadcrumbs (dir segments reveal in tree), metadata
+  header (size, git badge, branch@shortSha, relative last-modified,
+  classification), multi-line range highlight from navigation payloads,
+  binary file view (metadata + safe image preview + download — never
+  rendered as source).
+- **Tab system upgrades**: git-status dots, middle-click close, per-tab menu
+  (close/close others/close all), reopen-closed stack, 8-tab overflow menu,
+  Alt+ArrowLeft/Right cycling, Alt+W close (Ctrl+W is browser-reserved —
+  honest tooltip), LRU eviction pushes evicted tabs onto the reopen stack.
+- **File Intelligence panel**: Overview (real provenance meta), Imports
+  (REAL scan of loaded content; relative imports navigate), Tests (sibling
+  heuristic), Git History (real `--follow` list, click copies SHA), Related
+  Files (real siblings) + explicit `[PLANNED]` slots for AI summary,
+  symbols, dependency graph, complexity, security, documentation.
+- **Persistence v5** (`WORKSPACE_LAYOUT_VERSION 4→5`): adds persisted
+  `intelligenceOpen`; older layouts reset per spec §31 while conversations/
+  tabs/section survive; migrate bridge (Task 6) upgrades silently.
+
+### Fixed
+- Radix `ContextMenuTrigger asChild` on a memo component silently dropped
+  the trigger's `onContextMenu`/ref (found via Playwright trusted-event
+  right-click); the trigger now wraps a transparent div. Documented as a
+  root-cause learning.
+- `ClockRotateLeft` lucide icon does not exist in 0.525 → `History`.
+
+### Verification
+- tsc zero errors under `src/`; lint exit 0 (one benign React-Compiler
+  incompatible-library note for react-virtual). Playwright (trusted events):
+  context menu 5 real + 6 disabled-planned items, Explain-with-AI chip lands
+  in the composer, tab close→reopen works, intelligence toggles, breadcrumbs
+  present, zero horizontal overflow at 1280 and 390, zero page errors;
+  live API probes for tree/status/file-variants/history all green; db:push
+  purely additive (row counts verified before/after; 33 tables).
+
 ## [Phase 4 — GitHub + Large-Repository Ingestion] — import engine, auth/observability/audit foundations
 
 ### Added

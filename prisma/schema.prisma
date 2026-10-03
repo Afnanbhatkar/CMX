@@ -97,6 +97,8 @@ model Repository {
   glossaryEntries  GlossaryEntry[]
   decisionRecords  DecisionRecord[]
   auditLogs        AuditLog[]
+  snapshots        RepositoryIndexSnapshot[]
+  findings         RepositoryImportFinding[]
 
   @@index([status])
   @@map("repositories")
@@ -120,23 +122,35 @@ model RepositoryBranch {
 
 /// A file (or directory row) tracked by the indexer.
 model RepositoryFile {
-  id            String    @id @default(uuid())
-  repositoryId  String
-  path          String
-  isDir         Boolean   @default(false)
-  size          Int       @default(0)
-  language      String?
-  contentHash   String?
-  lastIndexedAt DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id             String    @id @default(uuid())
+  repositoryId   String
+  path           String
+  isDir          Boolean   @default(false)
+  size           Int       @default(0)
+  language       String?
+  /// PHASE 5: sha256 hex of the file bytes at index time (null when the file
+  /// could not be read — never fabricated). Provenance chain:
+  /// repository → snapshot (ref/commit) → file (path + hash).
+  contentHash    String?
+  lastIndexedAt  DateTime?
+  /// PHASE 5: index run that produced this row. SetNull on snapshot delete.
+  snapshotId     String?
+  /// PHASE 5 trust classification (informational, NEVER authoritative):
+  /// "repository_data" | "repository_documentation" | "repository_comment" |
+  /// "repository_fixture" | "repository_generated_output" | null
+  /// (null = ordinary source code — unclassified, not flagged).
+  classification String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  repository Repository         @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  repository Repository               @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  snapshot   RepositoryIndexSnapshot? @relation(fields: [snapshotId], references: [id], onDelete: SetNull)
   symbols    RepositorySymbol[]
   chunks     RepositoryChunk[]
 
   @@unique([repositoryId, path])
   @@index([repositoryId, isDir])
+  @@index([snapshotId])
   @@map("repository_files")
 }
 
@@ -760,3 +774,70 @@ model AuditLog {
 
 /// Resumable import job input. JSON text; NEVER contains credentials/tokens.
 // (AnalysisJob.input — added to the model above.)
+
+// ============================================================================
+// PHASE 5 — V2.1 TRUST METADATA (provenance snapshots + import findings)
+//
+// Conventions carried over from Phase 3 (see the block above): SQLite has no
+// enum/JSON types — enum-like fields are commented Strings; deletion rules are
+// Cascade for owned children, SetNull for optional references.
+// NOTE: these two tables use cuid() ids per the Phase 5 spec (older tables use
+// uuid()); they are append-only fact rows without updatedAt by design.
+// ============================================================================
+
+/// One indexing run over a repository. Anchors the provenance chain:
+/// repository (repositoryId) → ref/commit at index time (ref/commitSha) →
+/// per-file rows (RepositoryFile.snapshotId). parentSnapshotId enables
+/// lineage between runs ("full" today; "incremental" reserved for later).
+model RepositoryIndexSnapshot {
+  id                   String   @id @default(cuid())
+  repositoryId         String
+  /// Snapshot this run derives from (SetNull when the parent is deleted).
+  parentSnapshotId     String?
+  /// Branch/tag/ref string at index time (honest null when unknown).
+  ref                  String?
+  /// HEAD sha at index time (honest null when unknown).
+  commitSha            String?
+  /// "full" | "incremental"
+  kind                 String   @default("full")
+  /// Pipeline versions in force for this run (see index-metadata.ts).
+  parserVersion        String
+  chunkingVersion      String
+  embeddingVersion     String
+  /// Hash algorithm used for RepositoryFile.contentHash.
+  contentHashAlgorithm String   @default("sha256")
+  /// REAL count of files written under this snapshot (updated at completion).
+  filesIndexed         Int      @default(0)
+  createdAt            DateTime @default(now())
+
+  repository Repository                @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  parent     RepositoryIndexSnapshot?  @relation("SnapshotLineage", fields: [parentSnapshotId], references: [id], onDelete: SetNull)
+  children   RepositoryIndexSnapshot[] @relation("SnapshotLineage")
+  files      RepositoryFile[]
+
+  @@index([repositoryId, createdAt])
+  @@map("repository_index_snapshots")
+}
+
+/// Import/index findings — honest observations, never a failure by itself
+/// (skipped symlinks, refused archive entries, unsafe paths). Append-only;
+/// prior rows for the same (repositoryId, jobId) are deleted before a re-run
+/// re-inserts (idempotent per job).
+model RepositoryImportFinding {
+  id           String   @id @default(cuid())
+  repositoryId String?
+  /// AnalysisJob that observed the finding (publicId is stored by writers).
+  jobId        String?
+  /// "symlink" | "zip_rejected_entry" | "unsafe_path" | "oversized"
+  kind         String
+  /// Repo-relative path or zip entry name the finding refers to.
+  detailPath   String
+  note         String?
+  createdAt    DateTime @default(now())
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@index([repositoryId, kind])
+  @@index([jobId])
+  @@map("repository_import_findings")
+}

@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { INGESTION_CONFIG } from "./config";
 import { IngestionError } from "./errors";
+import { MAX_SUSPICIOUS_ENTRIES, type SuspiciousEntry } from "./index-metadata";
 
 /**
  * CodeMind X V2 — repository file discovery (Phase 4, spec §2/§3/§4/§6).
@@ -183,6 +184,13 @@ export interface DiscoveryResult {
   totalBytes: number;
   skipped: DiscoverySkipped;
   truncated: boolean;
+  /**
+   * PHASE 5: honest observations about entries that were refused during the
+   * walk (skipped symlinks, unsafe relative paths). Capped at
+   * MAX_SUSPICIOUS_ENTRIES — the skipped counters remain the authoritative
+   * totals; this list is a bounded sample for findings/UX.
+   */
+  suspicious: SuspiciousEntry[];
 }
 
 export interface DiscoveryOptions {
@@ -208,9 +216,15 @@ export async function discoverWorkspaceFiles(
 ): Promise<DiscoveryResult> {
   const files: DiscoveredFile[] = [];
   const skipped: DiscoverySkipped = { symlinks: 0, oversized: 0, binary: 0, ignored: 0 };
+  const suspicious: SuspiciousEntry[] = [];
   let totalBytes = 0;
   let truncated = false;
   const quota = options.quotaBytes ?? INGESTION_CONFIG.diskQuotaBytes;
+
+  /** Bounded observations — counters stay authoritative, the list is a sample. */
+  const noteSuspicious = (entry: SuspiciousEntry): void => {
+    if (suspicious.length < MAX_SUSPICIOUS_ENTRIES) suspicious.push(entry);
+  };
 
   const defaultIgnores = DEFAULT_IGNORES as readonly string[];
   const extraIgnores = options.ignorePatterns ?? [];
@@ -241,6 +255,7 @@ export async function discoverWorkspaceFiles(
       if (isUnsafeRelativePath(childRel)) {
         // Cannot exist under a real workspace, but never trust the tree.
         skipped.ignored += 1;
+        noteSuspicious({ path: childRel, reason: "unsafe relative path" });
         continue;
       }
 
@@ -261,6 +276,7 @@ export async function discoverWorkspaceFiles(
       // Symlinks are never followed out of the workspace (spec §6).
       if (dirent.isSymbolicLink()) {
         skipped.symlinks += 1;
+        noteSuspicious({ path: childRel, reason: "symlink not followed" });
         continue;
       }
 
@@ -315,7 +331,7 @@ export async function discoverWorkspaceFiles(
   };
 
   await walk(rootDir, "", 1);
-  return { files, totalBytes, skipped, truncated };
+  return { files, totalBytes, skipped, truncated, suspicious };
 }
 
 /** ≤64KB NUL-byte sniff — the only file content ever read (spec §3/§6). */

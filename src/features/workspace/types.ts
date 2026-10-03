@@ -30,8 +30,11 @@ import type { ActivityKind } from "@/types/contracts";
  *      (never below 11%). Persisted v3 layouts reset to the canonical
  *      11% | 11% | 39% | 39%; conversations remain preserved. The explorer
  *      open/closed (focus) state is also part of the persisted layout.
+ * v5 — adds persisted `intelligenceOpen` (file-intelligence panel). Persisted
+ *      v4 layouts reset to the canonical panel defaults; conversations, tabs
+ *      and section are preserved via the migrate→merge bridge (spec §31).
  */
-export const WORKSPACE_LAYOUT_VERSION = 4;
+export const WORKSPACE_LAYOUT_VERSION = 5;
 
 /** Default desktop composition: 11% | 11% | 39% | 39%. */
 export const PANEL_DEFAULTS = {
@@ -192,6 +195,10 @@ export interface RepoTreeNode {
   name: string;
   type: "file" | "dir";
   children?: RepoTreeNode[];
+  /** Phase 5 — informational language hint (e.g. "typescript"); omitted when unknown. */
+  language?: string;
+  /** Phase 5 — true when the file content was cut off by a read limit. */
+  truncated?: boolean;
 }
 
 export interface RepoMeta {
@@ -227,6 +234,61 @@ export interface OpenTab {
   content?: string;
   status?: OpenTabStatus;
   error?: string;
+  /**
+   * Phase 5 — working-tree status (git status --porcelain). Null = clean or
+   * unknown. Session-only/derived: never persisted, arrives via a separate
+   * status map (applyGitStatus), never embedded in the tree.
+   */
+  gitStatus?: TreeGitStatus | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* File provenance & intelligence metadata (Phase 5)                   */
+/* ------------------------------------------------------------------ */
+
+/** Working-tree status for a path (git status --porcelain mapping). */
+export type TreeGitStatus =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "untracked"
+  | "renamed";
+
+/**
+ * Security-oriented, informational content classification (V2.1 §A).
+ * Null = ordinary source, unclassified.
+ */
+export type ContentClassification =
+  | "repository_data"
+  | "repository_documentation"
+  | "repository_comment"
+  | "repository_fixture"
+  | "repository_generated_output";
+
+/**
+ * Provenance + status metadata for a file (V2.1 §B/§D).
+ * All fields honest — null when the value is unknown, never fabricated.
+ */
+export interface FileProvenanceMeta {
+  path: string;
+  language: string;
+  size: number;
+  truncated: boolean;
+  binary: boolean;
+  mimeType: string | null;
+  gitStatus: TreeGitStatus | null;
+  branch: string | null;
+  commitSha: string | null;
+  lastModifiedAt: string | null;
+  classification: ContentClassification | null;
+}
+
+/** One commit in a file's history (real `git log --follow`). */
+export interface FileHistoryCommit {
+  sha: string;
+  author: string;
+  date: string; // ISO
+  message: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -242,6 +304,7 @@ export type EditorNavigationSource =
   | "git"
   | "terminal"
   | "palette"
+  | "intelligence"
   | "manual";
 
 /**

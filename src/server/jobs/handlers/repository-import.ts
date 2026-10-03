@@ -24,7 +24,8 @@ import {
   writeMarker,
   type ImportMarker,
 } from "../../ingestion/workspace";
-import { extractZipArchive } from "../../ingestion/zip-extract";
+import { extractZipArchive, type ZipHardRejectError } from "../../ingestion/zip-extract";
+import { recordImportFindings } from "../../ingestion/index-metadata";
 import {
   validateGitHubUrl,
   validateGitUrl,
@@ -331,9 +332,26 @@ export const repositoryImportJob: JobHandler = async (ctx) => {
         await writeMarker(workspacePath, marker);
 
         const zipBytes = await fs.readFile(zipPath!);
-        const result = await extractZipArchive(zipBytes, workspacePath, {
-          quotaBytes: INGESTION_CONFIG.diskQuotaBytes,
-        });
+        let result;
+        try {
+          result = await extractZipArchive(zipBytes, workspacePath, {
+            quotaBytes: INGESTION_CONFIG.diskQuotaBytes,
+          });
+        } catch (error) {
+          /* PHASE 5: refused archive entries are recorded as honest findings
+           * before the failure propagates. repositoryId is null on first
+           * imports (no repository row exists yet) — the jobId scope keeps
+           * them queryable. Recording can never change the outcome. */
+          const suspicious = (error as Partial<ZipHardRejectError>).suspicious;
+          if (Array.isArray(suspicious) && suspicious.length > 0) {
+            await recordImportFindings({
+              jobId: publicId,
+              repositoryId: null,
+              findings: [{ kind: "zip_rejected_entry", entries: suspicious }],
+            });
+          }
+          throw error;
+        }
         zipBytes.fill(0); // release the archive buffer promptly
         await fs.rm(zipPath!, { force: true }).catch(() => undefined);
 

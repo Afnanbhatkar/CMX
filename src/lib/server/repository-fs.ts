@@ -125,6 +125,9 @@ export function resolveAllowedPath(input: string): PathCheckResult {
 
 let treeCache: { at: number; tree: RepoTreeNode[] } | null = null;
 
+/** Per-directory subtree cache (Phase 5 lazy loading) — same 30s TTL. */
+const subtreeCache = new Map<string, { at: number; children: RepoTreeNode[] }>();
+
 function compareEntries(a: RepoTreeNode, b: RepoTreeNode): number {
   if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
   return a.name.localeCompare(b.name);
@@ -139,8 +142,19 @@ export function languageForPath(p: string): string {
   return LANGUAGE_BY_EXT[extOf(p)] ?? "text";
 }
 
-function isTextFile(name: string): boolean {
+/** True when the extension is a known text language (route-level policy uses this). */
+export function isTextFile(name: string): boolean {
   return extOf(name) in LANGUAGE_BY_EXT;
+}
+
+/**
+ * Walk result: the sorted children plus whether the listing was CUT by the
+ * depth/entry caps. `cut` lets the caller mark the owning dir node
+ * `truncated: true` so the UI can lazy-load the remainder (Phase 5).
+ */
+interface WalkResult {
+  nodes: RepoTreeNode[];
+  cut: boolean;
 }
 
 async function walkDir(
@@ -148,19 +162,25 @@ async function walkDir(
   relDir: string,
   depth: number,
   budget: { count: number },
-): Promise<RepoTreeNode[]> {
-  if (depth > MAX_TREE_DEPTH || budget.count > MAX_TREE_ENTRIES) return [];
+): Promise<WalkResult> {
+  if (depth > MAX_TREE_DEPTH || budget.count > MAX_TREE_ENTRIES) {
+    return { nodes: [], cut: true }; // children exist but were not listed
+  }
   let dirents;
   try {
     dirents = await fs.readdir(absDir, { withFileTypes: true });
   } catch {
-    return [];
+    return { nodes: [], cut: false }; // unreadable dir — honestly empty, not cut
   }
   const dirs: RepoTreeNode[] = [];
   const files: RepoTreeNode[] = [];
+  let cut = false;
 
   for (const dirent of dirents) {
-    if (budget.count >= MAX_TREE_ENTRIES) break;
+    if (budget.count >= MAX_TREE_ENTRIES) {
+      cut = true; // entry cap reached mid-listing — remaining children cut
+      break;
+    }
     if (dirent.name.startsWith(".") || EXCLUDED_DIRS.has(dirent.name) || EXCLUDED_FILES.has(dirent.name)) {
       continue;
     }
@@ -168,20 +188,28 @@ async function walkDir(
     const childAbs = path.join(absDir, dirent.name);
     const childRel = relDir ? `${relDir}/${dirent.name}` : dirent.name;
     if (dirent.isDirectory()) {
-      dirs.push({
+      const sub = await walkDir(childAbs, childRel, depth + 1, budget);
+      const node: RepoTreeNode = {
         path: childRel,
         name: dirent.name,
         type: "dir",
-        children: await walkDir(childAbs, childRel, depth + 1, budget),
-      });
+        children: sub.nodes,
+      };
+      if (sub.cut) node.truncated = true; // per-dir flag: children were cut
+      dirs.push(node);
     } else if (dirent.isFile()) {
-      files.push({ path: childRel, name: dirent.name, type: "file" });
+      files.push({
+        path: childRel,
+        name: dirent.name,
+        type: "file",
+        language: languageForPath(dirent.name),
+      });
     }
   }
 
   dirs.sort(compareEntries);
   files.sort(compareEntries);
-  return [...dirs, ...files];
+  return { nodes: [...dirs, ...files], cut };
 }
 
 /** Build the real workspace tree (allowlisted roots only). Cached 30s. */
@@ -197,14 +225,17 @@ export async function buildWorkspaceTree(): Promise<RepoTreeNode[]> {
     try {
       const stat = await fs.stat(abs);
       if (stat.isDirectory()) {
-        roots.push({
+        const sub = await walkDir(abs, root, 1, budget);
+        const node: RepoTreeNode = {
           path: root,
           name: root,
           type: "dir",
-          children: await walkDir(abs, root, 1, budget),
-        });
+          children: sub.nodes,
+        };
+        if (sub.cut) node.truncated = true;
+        roots.push(node);
       } else if (stat.isFile()) {
-        roots.push({ path: root, name: root, type: "file" });
+        roots.push({ path: root, name: root, type: "file", language: languageForPath(root) });
       }
     } catch {
       // root not present in this project — skip it silently
@@ -212,7 +243,42 @@ export async function buildWorkspaceTree(): Promise<RepoTreeNode[]> {
   }
 
   treeCache = { at: Date.now(), tree: roots };
+  // Subtree caches share the whole-tree schedule: rebuilt listings invalidate them.
+  subtreeCache.clear();
   return roots;
+}
+
+/* ------------------------------------------------------------------ */
+/* Subtree (Phase 5 lazy loading)                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Children of ONE allowlisted directory (Phase 5 lazy loading of truncated
+ * dirs). Same depth/entry caps and dirs-first sort as buildWorkspaceTree;
+ * cached per resolved path for 30s. Returns null when the path is outside
+ * the allowlist or is not an existing directory — the route maps that to
+ * 403/404. Never throws for filesystem reasons (unreadable dir → empty list).
+ */
+export async function buildWorkspaceSubtree(relativeDir: string): Promise<RepoTreeNode[] | null> {
+  const check = resolveAllowedPath(relativeDir);
+  if (!check.ok) return null;
+
+  try {
+    const stat = await fs.stat(check.absolute);
+    if (!stat.isDirectory()) return null;
+  } catch {
+    return null; // not an existing directory under an allowed root
+  }
+
+  const cached = subtreeCache.get(check.relative);
+  if (cached && Date.now() - cached.at < TREE_CACHE_MS) {
+    return cached.children;
+  }
+
+  const budget = { count: 0 };
+  const sub = await walkDir(check.absolute, check.relative, 1, budget);
+  subtreeCache.set(check.relative, { at: Date.now(), children: sub.nodes });
+  return sub.nodes;
 }
 
 /* ------------------------------------------------------------------ */

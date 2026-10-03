@@ -9,6 +9,8 @@
  * - Versioned schema; invalid/outdated state is clamped or reset on rehydrate.
  * - NEVER persisted: API keys, tokens, passwords, private keys, credentials,
  *   raw repository contents. File contents are transient and stripped.
+ * - Session-only tab context (recentTabs, closedTabs, queuedChatFile,
+ *   treeReveal) lives in memory only and is rebuilt fresh every session.
  */
 
 import { create } from "zustand";
@@ -27,6 +29,7 @@ import {
   type OpenTabStatus,
   type PanelCollapseState,
   type PanelSizes,
+  type TreeGitStatus,
   type WorkspaceSectionId,
 } from "@/features/workspace/types";
 
@@ -37,6 +40,10 @@ import {
 const MAX_CONVERSATIONS = 30;
 const MAX_MESSAGES_PER_CONVERSATION = 200;
 const MAX_TABS = 12;
+/** Max length of the session-only most-recently-used open-path list. */
+const MAX_RECENT_TABS = 12;
+/** Max depth of the session-only closed-tab reopen stack. */
+const MAX_CLOSED_TABS = 10;
 
 export type RepoRailView =
   | "explorer"
@@ -129,6 +136,11 @@ export interface WorkspaceState {
    * Persisted as part of the editor layout (V2.1 §D).
    */
   explorerOpen: boolean;
+  /**
+   * File-intelligence panel visibility (Phase 5). Persisted as part of the
+   * editor layout (schema v5); default open for older persisted layouts.
+   */
+  intelligenceOpen: boolean;
 
   /* conversations (persisted) */
   conversations: Conversation[];
@@ -137,6 +149,19 @@ export interface WorkspaceState {
   /* repository tabs (paths persisted, contents transient) */
   tabs: OpenTab[];
   activeTabPath: string | null;
+
+  /*
+   * Session-only tab/tree context — NEVER persisted (no contents, no
+   * credentials; derived state rebuilt fresh every session, spec §31).
+   */
+  /** Most-recent-first paths of tabs opened this session (max 12). */
+  recentTabs: string[];
+  /** Reopen stack of closed tab paths, most recent first (max 10). */
+  closedTabs: Array<{ path: string }>;
+  /** File path queued for the chat composer ("Explain with AI"); null when empty. */
+  queuedChatFile: string | null;
+  /** Breadcrumbs/tree reveal signal — consumers react to `nonce` changes. */
+  treeReveal: { path: string; nonce: number } | null;
 
   /* transient ui — never persisted */
   runPhase: AIRunPhase;
@@ -156,6 +181,8 @@ export interface WorkspaceState {
   toggleChatSidebar: () => void;
   setSection: (id: WorkspaceSectionId) => void;
   setExplorerOpen: (open: boolean) => void;
+  /** File-intelligence panel visibility (persisted as layout schema v5). */
+  setIntelligenceOpen: (open: boolean) => void;
   resetLayout: () => void;
 
   newConversation: () => string;
@@ -189,11 +216,28 @@ export interface WorkspaceState {
   openTab: (path: string) => void;
   closeTab: (path: string) => void;
   setActiveTab: (path: string) => void;
+  /** Closes every tab except `path`; the closed tabs land on the reopen stack. */
+  closeOtherTabs: (path: string) => void;
+  /** Closes every tab; all of them land on the reopen stack in tab order. */
+  closeAllTabs: () => void;
+  /** Pops the reopen stack and re-opens that path. Returns the path or null. */
+  reopenClosedTab: () => string | null;
   setTabStatus: (
     path: string,
     status: OpenTabStatus,
     patch?: { content?: string; error?: string },
   ) => void;
+  /** Batch working-tree status: paths in `map` get that status, all others null. */
+  applyGitStatus: (map: Record<string, TreeGitStatus>) => void;
+  /** Single-tab working-tree status update. */
+  setTabGitStatus: (path: string, status: TreeGitStatus | null) => void;
+
+  /** Queues a file path for the chat composer and switches to the assistant section. */
+  queueChatFile: (path: string) => void;
+  /** Returns the queued chat file path (or null) and clears the queue. */
+  consumeQueuedChatFile: () => string | null;
+  /** Emits a tree-reveal signal; consumers key off the incremented nonce. */
+  revealInTree: (path: string) => void;
 }
 
 function newId(): string {
@@ -218,7 +262,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       tabs: [],
       activeTabPath: null,
 
+      /* session-only tab/tree context — never persisted (spec §31) */
+      recentTabs: [],
+      closedTabs: [],
+      queuedChatFile: null,
+      treeReveal: null,
+
       explorerOpen: true,
+      intelligenceOpen: true,
 
       runPhase: "idle",
       paletteOpen: false,
@@ -256,6 +307,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           navSheetOpen: false,
         })),
       setExplorerOpen: (open) => set({ explorerOpen: open }),
+      setIntelligenceOpen: (open) => set({ intelligenceOpen: open }),
       resetLayout: () =>
         set((s) => ({
           sizes: { ...PANEL_DEFAULTS },
@@ -395,10 +447,43 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       openTab: (path) =>
         set((s) => {
           const exists = s.tabs.some((t) => t.path === path);
-          const tabs = exists
-            ? s.tabs
-            : [...s.tabs, { path, status: "loading" as const }].slice(-MAX_TABS);
-          return { tabs, activeTabPath: path };
+          let nextTabs = s.tabs;
+          let nextClosedTabs = s.closedTabs;
+          if (!exists) {
+            const candidate = [...s.tabs, { path, status: "loading" as const }];
+            if (candidate.length > MAX_TABS) {
+              /*
+               * Honest LRU eviction: at capacity, the OLDEST NON-ACTIVE tab
+               * moves onto the reopen stack so `reopenClosedTab` can restore
+               * it — it is never silently dropped.
+               */
+              const evictIdx = candidate.findIndex(
+                (t) => t.path !== s.activeTabPath,
+              );
+              const evicted = evictIdx >= 0 ? candidate[evictIdx] : undefined;
+              if (evicted) {
+                candidate.splice(evictIdx, 1);
+                nextClosedTabs = [
+                  { path: evicted.path },
+                  ...nextClosedTabs.filter((c) => c.path !== evicted.path),
+                ].slice(0, MAX_CLOSED_TABS);
+              }
+            }
+            nextTabs = candidate.slice(-MAX_TABS);
+          }
+          // Re-opening a path removes it from the reopen stack.
+          nextClosedTabs = nextClosedTabs.filter((c) => c.path !== path);
+          // MRU: most-recent-first, deduped, capped.
+          const recentTabs = [
+            path,
+            ...s.recentTabs.filter((p) => p !== path),
+          ].slice(0, MAX_RECENT_TABS);
+          return {
+            tabs: nextTabs,
+            activeTabPath: path,
+            recentTabs,
+            closedTabs: nextClosedTabs,
+          };
         }),
       closeTab: (path) =>
         set((s) => {
@@ -409,14 +494,113 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             const next = tabs[Math.min(Math.max(idx - 1, 0), tabs.length - 1)];
             activeTabPath = next ? next.path : null;
           }
-          return { tabs, activeTabPath };
+          // A really-closed tab lands on the reopen stack (most recent first).
+          const closedTabs =
+            idx !== -1
+              ? [
+                  { path },
+                  ...s.closedTabs.filter((c) => c.path !== path),
+                ].slice(0, MAX_CLOSED_TABS)
+              : s.closedTabs;
+          // …and leaves the MRU list.
+          const recentTabs = s.recentTabs.filter((p) => p !== path);
+          return { tabs, activeTabPath, closedTabs, recentTabs };
         }),
-      setActiveTab: (path) => set({ activeTabPath: path }),
+      setActiveTab: (path) =>
+        set((s) => ({
+          activeTabPath: path,
+          // MRU: move an existing tab to the front (ignore phantom paths).
+          recentTabs: s.tabs.some((t) => t.path === path)
+            ? [path, ...s.recentTabs.filter((p) => p !== path)].slice(
+                0,
+                MAX_RECENT_TABS,
+              )
+            : s.recentTabs,
+        })),
+      closeOtherTabs: (keepPath) =>
+        set((s) => {
+          const keepExists = s.tabs.some((t) => t.path === keepPath);
+          const closing = s.tabs.filter((t) => t.path !== keepPath);
+          const closingPaths = new Set(closing.map((t) => t.path));
+          // Push the closed tabs in CURRENT tab order (most-recently-active
+          // first), then the older reopen-stack entries, capped.
+          const closedTabs = [
+            ...closing.map((t) => ({ path: t.path })),
+            ...s.closedTabs.filter((c) => !closingPaths.has(c.path)),
+          ].slice(0, MAX_CLOSED_TABS);
+          return {
+            tabs: s.tabs.filter((t) => t.path === keepPath),
+            activeTabPath: keepExists ? keepPath : null,
+            closedTabs,
+            // MRU stays consistent with the surviving tabs.
+            recentTabs: [
+              ...(keepExists ? [keepPath] : []),
+              ...s.recentTabs.filter(
+                (p) => p !== keepPath && !closingPaths.has(p),
+              ),
+            ].slice(0, MAX_RECENT_TABS),
+          };
+        }),
+      closeAllTabs: () =>
+        set((s) => {
+          const closingPaths = new Set(s.tabs.map((t) => t.path));
+          // Push ALL closed tabs in current tab order, then older stack entries.
+          const closedTabs = [
+            ...s.tabs.map((t) => ({ path: t.path })),
+            ...s.closedTabs.filter((c) => !closingPaths.has(c.path)),
+          ].slice(0, MAX_CLOSED_TABS);
+          return {
+            tabs: [],
+            activeTabPath: null,
+            closedTabs,
+            recentTabs: s.recentTabs.filter((p) => !closingPaths.has(p)),
+          };
+        }),
+      reopenClosedTab: () => {
+        const entry = get().closedTabs[0];
+        if (!entry) return null;
+        // Pop first, then reuse openTab() so the re-open gets exactly the same
+        // treatment as a fresh open (loading status, MRU, activation, LRU).
+        set((s) => ({ closedTabs: s.closedTabs.slice(1) }));
+        get().openTab(entry.path);
+        return entry.path;
+      },
       setTabStatus: (path, status, patch) =>
         set((s) => ({
           tabs: s.tabs.map((t) =>
             t.path === path ? { ...t, status, ...patch } : t,
           ),
+        })),
+      applyGitStatus: (map) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            const next = Object.prototype.hasOwnProperty.call(map, t.path)
+              ? map[t.path]
+              : null;
+            // Keep identity for unchanged tabs (cheap memo for tab renderers).
+            return t.gitStatus === next ? t : { ...t, gitStatus: next };
+          }),
+        })),
+      setTabGitStatus: (path, status) =>
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.path === path && t.gitStatus !== status
+              ? { ...t, gitStatus: status }
+              : t,
+          ),
+        })),
+
+      /* ---------------- session-only tab/tree context ---------------- */
+      queueChatFile: (path) =>
+        set({ queuedChatFile: path, section: "assistant" }),
+      consumeQueuedChatFile: () => {
+        const queued = get().queuedChatFile;
+        if (queued !== null) set({ queuedChatFile: null });
+        return queued;
+      },
+      revealInTree: (path) =>
+        set((s) => ({
+          treeReveal: { path, nonce: (s.treeReveal?.nonce ?? 0) + 1 },
         })),
     }),
     {
@@ -425,9 +609,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       storage: createJSONStorage(() => localStorage),
       /*
        * Version bridge (spec §31): when localStorage holds an older schema
-       * version, hand the persisted state to merge() untouched — merge
-       * implements the sanitize/reset policy (outdated layouts reset to
-       * current defaults; conversations, tabs and section preserved after
+       * version (e.g. v4 → v5), hand the persisted state to merge() untouched
+       * — merge implements the sanitize/reset policy (outdated layouts reset
+       * to current defaults; conversations, tabs and section preserved after
        * sanitization). Without this, zustand's persist middleware logs
        * "couldn't be migrated" and discards the stored state entirely.
        * Future breaking schema changes can branch on `version` here to
@@ -445,6 +629,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         // with the workspace.
         repoRailView: s.repoRailView,
         explorerOpen: s.explorerOpen,
+        // v5 — file-intelligence panel visibility restores with the workspace.
+        intelligenceOpen: s.intelligenceOpen,
         conversations: s.conversations,
         activeConversationId: s.activeConversationId,
         // paths only — file contents stay transient (never persisted)
@@ -496,6 +682,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             : "explorer";
         // Explorer focus state: default open for any older persisted layout.
         const explorerOpen = raw.explorerOpen !== false;
+        // v5 — file-intelligence panel: default open for any older persisted layout.
+        const intelligenceOpen =
+          typeof raw.intelligenceOpen === "boolean" ? raw.intelligenceOpen : true;
         /*
          * Layout reset policy (spec §31): a persisted layout from an older
          * schema version is NEVER clamped into the new one — it is reset to
@@ -536,6 +725,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           section,
           repoRailView,
           explorerOpen,
+          intelligenceOpen,
           conversations,
           activeConversationId,
           tabs,

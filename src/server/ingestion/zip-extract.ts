@@ -5,6 +5,7 @@ import { unzipSync, UnzipFileInfo } from "fflate";
 
 import { INGESTION_CONFIG } from "./config";
 import { IngestionError } from "./errors";
+import { MAX_SUSPICIOUS_ENTRIES, type SuspiciousEntry } from "./index-metadata";
 
 /**
  * CodeMind X V2 — hardened ZIP extraction (Phase 4, spec §6).
@@ -34,6 +35,22 @@ export interface ZipExtractResult {
   bytesWritten: number;
   /** Entries refused by the guards (size/ratio/name) — archive fails when > 0 for hard rejects. */
   rejectedEntries: number;
+  /**
+   * PHASE 5: per-entry observations for every refused entry (capped at
+   * MAX_SUSPICIOUS_ENTRIES). Always empty on success (any refusal is a hard
+   * reject — the archive is thrown away), and attached to the thrown error
+   * on failure so the caller can record honest findings.
+   */
+  suspicious: SuspiciousEntry[];
+}
+
+/**
+ * IngestionError thrown on a hard archive reject. ADDITIVE property
+ * `suspicious`: the per-entry observations collected up to the reject — the
+ * error class, code and message are unchanged (no behavior change).
+ */
+export interface ZipHardRejectError extends IngestionError {
+  suspicious: SuspiciousEntry[];
 }
 
 function isUnsafeEntryName(name: string): boolean {
@@ -73,6 +90,12 @@ export async function extractZipArchive(
   let totalUncompressed = 0;
   let rejectedEntries = 0;
   let hardReject: string | null = null;
+  const suspicious: SuspiciousEntry[] = [];
+
+  /** Bounded per-entry observations (counters stay authoritative). */
+  const noteSuspicious = (entry: SuspiciousEntry): void => {
+    if (suspicious.length < MAX_SUSPICIOUS_ENTRIES) suspicious.push(entry);
+  };
 
   const accepted = unzipSync(new Uint8Array(zipBytes), {
     filter: (file: UnzipFileInfo): boolean => {
@@ -84,16 +107,19 @@ export async function extractZipArchive(
       if (isUnsafeEntryName(file.name)) {
         rejectedEntries += 1;
         hardReject = "archive contains an entry with an unsafe path.";
+        noteSuspicious({ path: file.name, reason: "unsafe entry name" });
         return false;
       }
       if (file.originalSize > cfg.maxEntryUncompressedBytes) {
         rejectedEntries += 1;
         hardReject = `archive entry exceeds the ${Math.round(cfg.maxEntryUncompressedBytes / (1024 * 1024))} MB per-entry limit.`;
+        noteSuspicious({ path: file.name, reason: "entry exceeds the per-entry size limit" });
         return false;
       }
       if (file.size > 0 && file.originalSize / file.size > cfg.maxCompressionRatio) {
         rejectedEntries += 1;
         hardReject = "archive entry shows a suspicious compression ratio (>200x).";
+        noteSuspicious({ path: file.name, reason: "suspicious compression ratio (>200x)" });
         return false;
       }
       totalUncompressed += file.originalSize;
@@ -106,7 +132,11 @@ export async function extractZipArchive(
   });
 
   if (hardReject) {
-    throw new IngestionError("INVALID_ARCHIVE", hardReject);
+    // Behavior unchanged (same class/code/message); the per-entry observations
+    // ride along additively so the caller can record honest findings.
+    const error = new IngestionError("INVALID_ARCHIVE", hardReject) as ZipHardRejectError;
+    error.suspicious = suspicious;
+    throw error;
   }
   if (seenEntries === 0 || accepted === undefined) {
     throw new IngestionError("INVALID_ARCHIVE", "archive has no readable entries.");
@@ -141,5 +171,5 @@ export async function extractZipArchive(
     }
   }
 
-  return { filesWritten, bytesWritten, rejectedEntries };
+  return { filesWritten, bytesWritten, rejectedEntries, suspicious };
 }
