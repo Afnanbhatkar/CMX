@@ -122,6 +122,13 @@ export interface WorkspaceState {
   /** Width to restore when a sidebar expands again. */
   expandedWidths: { cmx: number; chatSidebar: number };
   section: WorkspaceSectionId;
+  /**
+   * Explorer column open/closed (Phase 4 session, focus mode). When closed
+   * the code editor takes the full repository panel width; reopening is
+   * available from the editor tab bar and the repository activity rail.
+   * Persisted as part of the editor layout (V2.1 §D).
+   */
+  explorerOpen: boolean;
 
   /* conversations (persisted) */
   conversations: Conversation[];
@@ -148,6 +155,7 @@ export interface WorkspaceState {
   toggleCmx: () => void;
   toggleChatSidebar: () => void;
   setSection: (id: WorkspaceSectionId) => void;
+  setExplorerOpen: (open: boolean) => void;
   resetLayout: () => void;
 
   newConversation: () => string;
@@ -210,6 +218,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       tabs: [],
       activeTabPath: null,
 
+      explorerOpen: true,
+
       runPhase: "idle",
       paletteOpen: false,
       composerFocusNonce: 0,
@@ -245,6 +255,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           // nav Sheet, otherwise the destination change is hidden behind it.
           navSheetOpen: false,
         })),
+      setExplorerOpen: (open) => set({ explorerOpen: open }),
       resetLayout: () =>
         set((s) => ({
           sizes: { ...PANEL_DEFAULTS },
@@ -419,8 +430,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         expandedWidths: s.expandedWidths,
         section: s.section,
         // V2.1 §D — editor layout detail: the active repository rail view
-        // (explorer/search/git/run) restores with the workspace.
+        // (explorer/search/git/run) and the explorer focus state restore
+        // with the workspace.
         repoRailView: s.repoRailView,
+        explorerOpen: s.explorerOpen,
         conversations: s.conversations,
         activeConversationId: s.activeConversationId,
         // paths only — file contents stay transient (never persisted)
@@ -470,6 +483,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           repoRailViewRaw === "extensions"
             ? repoRailViewRaw
             : "explorer";
+        // Explorer focus state: default open for any older persisted layout.
+        const explorerOpen = raw.explorerOpen !== false;
         /*
          * Layout reset policy (spec §31): a persisted layout from an older
          * schema version is NEVER clamped into the new one — it is reset to
@@ -509,6 +524,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               },
           section,
           repoRailView,
+          explorerOpen,
           conversations,
           activeConversationId,
           tabs,

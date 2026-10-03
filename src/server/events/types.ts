@@ -189,6 +189,41 @@ export const streamHeartbeatEventSchema = z
   .strict();
 
 /* ------------------------------------------------------------------ */
+/* Repository import progress events (Phase 4, spec §7)                */
+/* ------------------------------------------------------------------ */
+
+export const repositoryImportEventSchema = z
+  .object({
+    type: z.literal("REPOSITORY_IMPORT"),
+    eventId: eventIdSchema,
+    timestamp: isoTimestampSchema,
+    jobId: z.string().min(1).max(64),
+    /**
+     * Import pipeline stage. "extracting" is the ZIP-upload equivalent of
+     * "cloning"; "indexing" is emitted when an import pipeline runs the
+     * index phase inline (the current flow chains a repository.index job —
+     * its live counts surface as REPOSITORY_INDEXING events).
+     */
+    stage: z.enum([
+      "validating",
+      "authenticating",
+      "cloning",
+      "extracting",
+      "discovering",
+      "parsing",
+      "indexing",
+      "finalizing",
+    ]),
+    /** Short operational label — e.g. "Cloning repository" (privacy §8). */
+    message: z.string().min(1).max(200),
+    filesDiscovered: z.number().int().min(0).optional(),
+    filesParsed: z.number().int().min(0).optional(),
+    /** Workspace-relative path only — operational metadata, never content. */
+    currentPath: z.string().min(1).max(512).optional(),
+  })
+  .strict();
+
+/* ------------------------------------------------------------------ */
 /* Discriminated union                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -203,6 +238,7 @@ export const codeMindEventSchema = z.discriminatedUnion("type", [
   jobCompletedEventSchema,
   jobFailedEventSchema,
   repositoryIndexingEventSchema,
+  repositoryImportEventSchema,
   assistantStartedEventSchema,
   assistantCompletedEventSchema,
   assistantFailedEventSchema,
@@ -219,6 +255,7 @@ export type JobCancelledEvent = z.infer<typeof jobCancelledEventSchema>;
 export type JobCompletedEvent = z.infer<typeof jobCompletedEventSchema>;
 export type JobFailedEvent = z.infer<typeof jobFailedEventSchema>;
 export type RepositoryIndexingEvent = z.infer<typeof repositoryIndexingEventSchema>;
+export type RepositoryImportEvent = z.infer<typeof repositoryImportEventSchema>;
 export type AssistantStartedEvent = z.infer<typeof assistantStartedEventSchema>;
 export type AssistantCompletedEvent = z.infer<typeof assistantCompletedEventSchema>;
 export type AssistantFailedEvent = z.infer<typeof assistantFailedEventSchema>;

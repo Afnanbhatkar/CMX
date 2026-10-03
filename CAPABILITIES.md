@@ -9,14 +9,17 @@
 > substitute available or planned) · **unavailable** (no support; must not be used
 > or claimed).
 >
-> Never hide environmental limitations. Verified: Phase 0 governance addendum; updated Phase 3.
+> Never hide environmental limitations. Verified: Phase 0 governance addendum; updated Phase 3; updated Phase 4.
 
 | Capability | Status | Evidence / Notes |
 | --- | --- | --- |
-| **PostgreSQL** | `unavailable` | No `psql`/server in sandbox. Prisma provider is `sqlite`. `/api/health` reports it `unavailable (planned)` — never healthy. Revisit only if platform provides a host. |
-| **SQLite fallback** | `production` | Active datastore: Prisma 6 + `db/custom.db` — **22 tables** (legacy `User`/`Post` preserved + 20 Phase 3 domain tables: repositories, repository_files, analysis_jobs, chat_sessions, agent_runs, activities, approvals, security_findings, git_commits, …). This is the real database — not a demo. |
+| **PostgreSQL** | `unavailable` | No `psql`/server in sandbox. Prisma provider is `sqlite`. `/api/health` reports it `unavailable (planned)` — never healthy. Revisit only if the platform provides a host. |
+| **SQLite fallback** | `production` | Active datastore: Prisma 6 + `db/custom.db` — **31 tables** (legacy `User`/`Post` preserved + 20 Phase 3 domain tables + 9 V2.1 tables: auth_sessions, repository_members, memory_items, memory_events, user_profiles, glossary, decision_records, usage_records, audit_logs). This is the real database — not a demo. |
 | **Redis** | `unavailable` | No `redis-server`/`redis-cli`, no daemon on :6379. Use in-process memory caching (allowed by platform stack). |
-| **Job queue (Redis-spec semantics)** | `local` | Phase 3: in-process queue + SQLite persistence (`analysis_jobs` + `analysis_checkpoints`), 6 spec states (QUEUED/RUNNING/PAUSED/CANCELLED/COMPLETED/FAILED), pause/resume/cancel, checkpointed resume, restart-survival via recovery requeue (verified). Redis-backed workers remain `unavailable`/[PLANNED] — the DB is the source of truth. |
+| **Job queue (Redis-spec semantics)** | `local` | Phase 3: in-process queue + SQLite persistence (`analysis_jobs` + `analysis_checkpoints`), 6 spec states, pause/resume/cancel, checkpointed resume, restart-survival via recovery requeue (11-min staleness cutoff + conditional atomic requeue as of Phase 4). Redis-backed workers remain `unavailable`/[PLANNED]. |
+| **Repository import (git/ZIP)** | `local` | Phase 4: `repository.import` job — GitHub/Git HTTPS/local/ZIP sources, refs, shallow+sparse clone, incremental fetch, resumable checkpoints (all spec §5 fields), isolated `.ingestion-workspaces/`, static-only (git is the only executed binary), cancel kills the git child. Verified live: local repo import → chained index → real snapshot; ZIP traversal rejected; 409/422/404 envelopes. |
+| **OpenTelemetry tracing** | `local` | Phase 4 (V2.1 §B): `@opentelemetry/api` + `sdk-trace-base`, `http.request` spans on every API route, W3C traceparent propagation verified. In-memory ring buffer only — OTLP export `unavailable`/[PLANNED] (no collector in sandbox). |
+| **Auth / sessions** | `local` | Phase 4 (V2.1 §A): provider abstraction + hash-only session lifecycle + role/repository authorization helpers; **unconfigured by default** — no route requires auth yet. OAuth/NextAuth flows [PLANNED]. |
 | **Qdrant** | `unavailable` | No service/binary. Vector search needs a local fallback (below) until a host exists. |
 | **Local vector fallback** | `fallback` | Feasible in-process (Bun/TS): brute-force cosine index persisted in SQLite. Not yet implemented — owned by a retrieval phase. |
 | **Neo4j** | `unavailable` | No service/binary. |

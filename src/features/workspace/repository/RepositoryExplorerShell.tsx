@@ -4,7 +4,9 @@
  * CodeMind X V2 — repository explorer sidebar (Phase 2).
  *
  * Real tree from GET /api/repository/tree (via useRepositoryTree):
- * - header with view label + reload (spinner while loading)
+ * - header with view label + reload + CLOSE (focus mode, Phase 4 session:
+ *   closing the explorer gives the code editor the full panel width; the
+ *   editor tab strip and the activity rail reopen it)
  * - filter input: case-insensitive substring match over the flattened file
  *   list; while filtering, a flat result list replaces the tree
  * - recursive, memoized file tree; depth-0 directories start open, deeper
@@ -13,7 +15,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, FileCode2, Folder, FolderOpen, RefreshCw } from "lucide-react";
+import { ChevronRight, FileCode2, Folder, FolderOpen, PanelLeftClose, RefreshCw } from "lucide-react";
 
 import { editorNavigation } from "@/features/workspace/editor-navigation";
 import type { RepoTreeNode } from "@/features/workspace/types";
@@ -173,6 +175,7 @@ export function RepositoryExplorerShell({ filterAutoFocus = false }: RepositoryE
   const { tree, loading, error, reload, flattened } = useRepositoryTree();
   const repoRailView = useWorkspaceStore((s) => s.repoRailView);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
+  const setExplorerOpen = useWorkspaceStore((s) => s.setExplorerOpen);
 
   const [filter, setFilter] = useState("");
   // Sparse open/closed overrides; absent = default (depth 0 open).
@@ -208,31 +211,50 @@ export function RepositoryExplorerShell({ filterAutoFocus = false }: RepositoryE
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
       {/* Header */}
       <header className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border-subtle px-2">
-        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+        <span className="min-w-0 truncate text-[11px] uppercase tracking-wider text-muted-foreground">
           {repoRailView === "search" ? "Search" : "Explorer"}
         </span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Reload tree"
-              onClick={reload}
-              disabled={loading}
-              className={cn(
-                "ml-auto flex size-6 items-center justify-center rounded-md text-muted-foreground",
-                "hover:bg-surface-hover hover:text-foreground",
-                "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                "disabled:pointer-events-none disabled:opacity-50",
-              )}
-            >
-              <RefreshCw
-                aria-hidden="true"
-                className={cn("size-3.5", loading && "animate-spin")}
-              />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Reload tree</TooltipContent>
-        </Tooltip>
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Reload tree"
+                onClick={reload}
+                disabled={loading}
+                className={cn(
+                  "flex size-6 items-center justify-center rounded-md text-muted-foreground",
+                  "hover:bg-surface-hover hover:text-foreground",
+                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  "disabled:pointer-events-none disabled:opacity-50",
+                )}
+              >
+                <RefreshCw
+                  aria-hidden="true"
+                  className={cn("size-3.5", loading && "animate-spin")}
+                />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Reload tree</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Close explorer — focus the editor"
+                onClick={() => setExplorerOpen(false)}
+                className={cn(
+                  "flex size-6 items-center justify-center rounded-md text-muted-foreground",
+                  "hover:bg-surface-hover hover:text-foreground",
+                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                )}
+              >
+                <PanelLeftClose aria-hidden="true" className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Close explorer — focus the editor</TooltipContent>
+          </Tooltip>
+        </div>
       </header>
 
       {/* Filter */}

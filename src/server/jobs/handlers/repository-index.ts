@@ -12,6 +12,10 @@ import { createEvent } from "@/server/events/types";
 import { logError, logWarn } from "@/server/security/logger";
 import type { RepoTreeNode } from "@/features/workspace/types";
 
+import { discoverWorkspaceFiles } from "@/server/ingestion/discovery";
+import { readMarker } from "@/server/ingestion/workspace";
+import { runGit } from "@/server/ingestion/git-runner";
+
 import type { JobHandler } from "../types";
 
 /**
@@ -23,6 +27,16 @@ import type { JobHandler } from "../types";
  * persists a resumable checkpoint per chunk, and honors pause/cancel between
  * chunks. Memory stays bounded: file CONTENTS are never read (size via stat),
  * and only one chunk of paths is held at a time.
+ *
+ * Phase 4 — IMPORTED repositories: when the repository row carries an
+ * ABSOLUTE sourcePath (isolated ingestion checkout under
+ * .ingestion-workspaces/, sourceKind != "workspace"), the walk targets that
+ * root via the ingestion discovery walker (same default ignores; the import's
+ * effective ignore/include patterns are re-read from the workspace marker so
+ * rows match exactly what discovery counted), language comes from the local
+ * ingestion map, and the branch/head come from git inside the checkout (git
+ * runner with the sanitized env — workspace branch detection is untouched).
+ * Resume contract is IDENTICAL for both modes: checkpoint { indexed, lastPath }.
  *
  * Privacy contract (ARCHITECTURE.md §8): events carry the operational label
  * "Indexing repository files" and workspace-relative paths only — never file
@@ -111,29 +125,74 @@ export const repositoryIndexJob: JobHandler = async (ctx) => {
     });
   }
 
+  /* Imported repositories (Phase 4): absolute sourcePath = isolated checkout. */
+  const imported =
+    Boolean(repo.sourceKind && repo.sourceKind !== "workspace") &&
+    Boolean(repo.sourcePath) &&
+    path.isAbsolute(repo.sourcePath as string);
+
   try {
     /* 2. Real file tree via the existing walker + ignore rules. */
-    const tree = await buildWorkspaceTree();
     const files: string[] = [];
-    flattenFiles(tree, files);
+    const sizes = new Map<string, number>();
+    const languages = new Map<string, string>();
+
+    if (imported) {
+      const root = repo.sourcePath as string;
+      const marker = await readMarker(root);
+      const discovery = await discoverWorkspaceFiles(root, {
+        ignorePatterns: marker?.ignorePatterns,
+        includePatterns: marker?.includePatterns,
+      });
+      for (const file of discovery.files) {
+        files.push(file.path);
+        sizes.set(file.path, file.size);
+        languages.set(file.path, file.language);
+      }
+    } else {
+      const tree = await buildWorkspaceTree();
+      flattenFiles(tree, files);
+    }
     // Lexicographic order makes the checkpoint boundary deterministic.
     files.sort();
     const total = files.length;
 
     /* 3. Real current branch → RepositoryBranch row (isDefault true). */
-    const branch = await getCurrentBranch();
+    let branch: string | null = null;
+    if (imported) {
+      const root = repo.sourcePath as string;
+      try {
+        const head = await runGit({
+          args: ["rev-parse", "--abbrev-ref", "HEAD"],
+          cwd: root,
+          allowFileProtocol: true,
+        });
+        const value = head.stdout.trim();
+        branch = value && value !== "HEAD" ? value : null; // detached checkout → honest null
+      } catch {
+        branch = null; // honest: git unavailable inside the checkout
+      }
+    } else {
+      branch = await getCurrentBranch();
+    }
     if (branch) {
       await db.repositoryBranch.upsert({
         where: { repositoryId_name: { repositoryId: repo.id, name: branch } },
-        create: { repositoryId: repo.id, name: branch, isDefault: true },
-        update: { isDefault: true },
+        create: {
+          repositoryId: repo.id,
+          name: branch,
+          isDefault: true,
+          ...(imported && repo.clonedSha ? { headSha: repo.clonedSha } : {}),
+        },
+        update: { isDefault: true, ...(imported && repo.clonedSha ? { headSha: repo.clonedSha } : {}) },
       });
       await db.repository.update({
         where: { id: repo.id },
         data: { defaultBranch: branch },
       });
     }
-    // headSha capture arrives with the git-intelligence phase — honest null.
+    // Workspace headSha capture arrives with the git-intelligence phase —
+    // honest null. Imported rows carry the real clonedSha from the import.
 
     /* 4. Resume: skip files at-or-before the checkpointed lastPath. */
     const previous = await db.analysisJob.findUnique({
@@ -200,13 +259,27 @@ export const repositoryIndexJob: JobHandler = async (ctx) => {
 
       for (const relPath of files.slice(i, i + CHUNK_SIZE)) {
         let size = 0;
-        try {
-          size = (await fs.stat(path.resolve(process.cwd(), relPath))).size;
-        } catch {
-          // File vanished between walk and stat — skip it honestly.
-          processed += 1; // keep progress/total consistent
-          lastPath = relPath;
-          continue;
+        let language: string;
+        if (imported) {
+          const known = sizes.get(relPath);
+          if (known === undefined) {
+            // File vanished between walk and write — skip it honestly.
+            processed += 1; // keep progress/total consistent
+            lastPath = relPath;
+            continue;
+          }
+          size = known;
+          language = languages.get(relPath) ?? "text";
+        } else {
+          try {
+            size = (await fs.stat(path.resolve(process.cwd(), relPath))).size;
+          } catch {
+            // File vanished between walk and stat — skip it honestly.
+            processed += 1; // keep progress/total consistent
+            lastPath = relPath;
+            continue;
+          }
+          language = languageForPath(relPath);
         }
         await db.repositoryFile.upsert({
           where: { repositoryId_path: { repositoryId: repo.id, path: relPath } },
@@ -215,12 +288,12 @@ export const repositoryIndexJob: JobHandler = async (ctx) => {
             path: relPath,
             isDir: false,
             size,
-            language: languageForPath(relPath),
+            language,
             lastIndexedAt: new Date(),
           },
           update: {
             size,
-            language: languageForPath(relPath),
+            language,
             lastIndexedAt: new Date(),
           },
         });

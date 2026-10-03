@@ -4,6 +4,101 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 4 — GitHub + Large-Repository Ingestion] — import engine, auth/observability/audit foundations
+
+### Added
+- **Workspace UI directives (user, this session)**: sidebar panels are again
+  user-adjustable — 11% default, **min 11% / max 15%** (never below 11, never
+  above 15; keyboard + drag). Sidebar content now adapts INSIDE its block at
+  narrow widths (e.g. 11% at a 1024px window): AI-context rows stack, the
+  "Start New Chat" label swaps to "New chat", the CodeMind X wordmark swaps
+  to the logo icon — nothing overflows or clips. The repository **explorer
+  column can be closed** (close icon in its header) for full-width code
+  focus; reopening is one click from the editor tab strip or the explorer/
+  search rail icons. Explorer open/closed state persists (workspace layout
+  schema v4 — persisted v3 layouts reset to the canonical 11|11|39|39).
+- **Repository import engine** (`src/server/ingestion/` + `repository.import`
+  job): public GitHub URLs, generic Git HTTPS URLs, local dev directories
+  (cwd-scoped), and ZIP uploads; branch/tag/commit refs (shallow clone for
+  branch/tag, full clone for commits — honest limitation); sparse checkout;
+  incremental fetch reusing a matching isolated workspace; isolated
+  per-import workspaces under `.ingestion-workspaces/<uuid>/` (git-ignored,
+  outside the UI allowlist); default ignore set (node_modules/.git/dist/
+  build/coverage/.cache/logs/temp) with explicit include/override; resumable
+  checkpoints carrying ALL spec §5 fields (repository_id, job_id, stage,
+  current_file, processed_count, total_count, checkpoint_token,
+  last_successful_operation) in `analysis_checkpoints` + the on-disk
+  `.codemind-import.json` marker; pause/resume/cancel via the existing job
+  control API (git child SIGKILLed on cancel); static-only ingestion (the
+  only binary ever executed is `git`, hardened argv + sanitized env, hooks
+  disabled, prompts disabled).
+- **Import security (spec §6)**: path traversal rejection (no `..`,
+  absolute, NUL, drive letters, backslashes), symlink skip + count, ZIP
+  hardening (fflate; 50k entries, 512 MB total, 25 MB/entry, >200× ratio
+  rejection), per-file 10 MB skip+count limit, 1 GB per-workspace disk
+  quota (env-tunable), credential redaction (`redactSecret`) on every log/
+  error/DB field — tokens live only in the process-ephemeral vault for the
+  duration of the import and are never persisted, logged, or echoed.
+- **Typed `REPOSITORY_IMPORT` stream events** (strict zod, privacy
+  contract): validating → authenticating → cloning/extracting → discovering
+  → parsing → indexing → finalizing with real counts; SSE replay + live.
+- **Import API + UI**: `POST /api/repositories/import` (202 + jobId, never
+  blocks on a clone), `POST /api/repositories/import/zip` (multipart, 32 MB
+  cap), `GET /api/repositories/import` (provenance + chain-link follow);
+  Import dialog on the Repository page with the spec §7 stage checklist,
+  real counts (no fake progress), Pause/Cancel, and the real imported-
+  repositories list.
+- **V2.1 §A Auth foundation** (`src/server/security/auth.ts`): AuthProvider
+  abstraction + registry, hash-only session lifecycle (create/validate/
+  revoke; SHA-256 token hashes, raw tokens never stored), `requireAuth`/
+  `requireRole`/`canAccessRepository` (repository-level roles reader<
+  writer<maintainer<owner via `repository_members`), opt-in `requireAuth`
+  in `withApi`; default remains honestly "unconfigured" — no route claims
+  auth. NextAuth [PLANNED].
+- **V2.1 §B OpenTelemetry**: `@opentelemetry/api` + `sdk-trace-base` wired
+  via `src/instrumentation.ts` + `src/server/observability/tracing.ts`;
+  `http.request` spans on every API route, `assistant.completion` spans,
+  W3C traceparent propagation (verified end-to-end), common attributes
+  (request_id, repository_id, run_id, agent_id, tool_id, model, provider,
+  job_id); secrets never attached; OTLP export [PLANNED].
+- **V2.1 §D usage primitives** (`usage_records` + `usage-service`): real
+  provider/model/token counts/latency recorded per assistant turn (shape
+  discovered from the actual SDK response; nulls stay null — never
+  fabricated), ready for Phase 3.5 accounting.
+- **V2.1 §E audit foundation** (`audit_logs` + `audit` service): closed
+  action vocabulary (login, repository.access, repository.import, git
+  mutation, memory change, autonomy change, MCP invocation…); wired today
+  to real events only (file/tree access with path-only metadata, session
+  lifecycle); the rest wire when their features arrive.
+- **V2.1 §C memory schema reservation**: `memory_items`, `memory_events`,
+  `user_profiles`, `glossary`, `decision_records` (+ indexes for scope,
+  type, status, last_used, repository) — tables live, writers arrive in
+  later phases.
+
+### Fixed
+- **`runGit` settlement bug** (found by live import probe): the child
+  `close` handler set `settled` before calling its own `fail()` helper,
+  which early-returned — `reject()` was never invoked for any non-zero git
+  exit, hanging the import job forever (recovery then re-queued it in a
+  loop). Every settle path now resolves/rejects exactly once.
+- **`GIT_ALLOW_PROTOCOL` vs file transport**: with a multi-protocol list in
+  the env, git denies `file://` even with `-c protocol.file.allow=user`;
+  the env var is gone (argv per-protocol override remains).
+- **Import marker timing**: the `.codemind-import.json` marker was written
+  before cloning, making the destination non-empty — git clone refused
+  every fresh import. Marker now written after checkout.
+- **Recovery safety**: interrupted-job recovery now requires an 11-minute
+  stale heartbeat and requeues via a conditional atomic update (Next dev
+  worker processes no longer re-queue each other's live jobs), and the
+  always-pump drain was restored so QUEUED rows from a previous process
+  actually start after a restart.
+- **`withApi` ApiError identity**: dev-mode Turbopack can compile multiple
+  envelope-module copies, so `instanceof` missed real ApiErrors and honest
+  409/404s became 500s (observed on job control). `withApi` now recognises
+  ApiError-shaped errors (code + 4xx/5xx status) as well.
+- Stale in-process PrismaClient after a schema push (dev server restarted
+  once during verification; flagged in the worklog, self-heals on restart).
+
 ## [Phase 3 — Backend, API, Database, Jobs, Streaming] — infrastructure foundation
 
 ### Added

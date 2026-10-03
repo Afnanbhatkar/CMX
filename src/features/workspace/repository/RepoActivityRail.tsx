@@ -80,6 +80,7 @@ function RailButton({
 export function RepoActivityRail({ showDiagnostics, onToggleDiagnostics }: RepoActivityRailProps) {
   const repoRailView = useWorkspaceStore((s) => s.repoRailView);
   const setRepoRailView = useWorkspaceStore((s) => s.setRepoRailView);
+  const setExplorerOpen = useWorkspaceStore((s) => s.setExplorerOpen);
 
   return (
     <nav
@@ -91,7 +92,12 @@ export function RepoActivityRail({ showDiagnostics, onToggleDiagnostics }: RepoA
           key={view}
           label={label}
           active={repoRailView === view}
-          onSelect={() => setRepoRailView(view)}
+          onSelect={() => {
+            setRepoRailView(view);
+            // Focus-mode integration: picking the explorer or search view
+            // also restores the file-tree column if it was closed.
+            if (view === "explorer" || view === "search") setExplorerOpen(true);
+          }}
         >
           <Icon className="size-4" aria-hidden="true" />
         </RailButton>

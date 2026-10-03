@@ -1,7 +1,9 @@
 import ZAI from "z-ai-web-dev-sdk";
 
 import { db } from "@/lib/db";
-import { logError, logWarn } from "@/server/security/logger";
+import { withSpan } from "@/server/observability/tracing";
+import { logError, logInfo, logWarn } from "@/server/security/logger";
+import { recordUsage } from "@/server/services/usage-service";
 import type { ActivityKind } from "@/types/contracts";
 
 /**
@@ -32,6 +34,11 @@ export interface AssistantContext {
 export interface AssistantTurnInput {
   messages: AssistantMessage[];
   context?: AssistantContext;
+  /** Correlation ids — recorded on the usage row when provided (V2.1 §C). */
+  requestId?: string;
+  sessionId?: string;
+  runId?: string;
+  jobId?: string;
 }
 
 export type AssistantFailureReason = "empty" | "failed";
@@ -57,6 +64,17 @@ const SYSTEM_PROMPT = [
 ].join("\n");
 
 const COMPLETION_TIMEOUT_MS = 60_000;
+
+/**
+ * Honest provider/model labels for observability + usage records (V2.1 §B/§C):
+ * - provider "zai-gateway": the real transport IS the local z-ai-web-dev-sdk
+ *   gateway — not OpenAI/Anthropic, so the label says exactly that;
+ * - model "local-assistant": the code below passes NO explicit model name to
+ *   the SDK, so no model name is invented here. If a model name is ever
+ *   passed to the SDK call, this constant must be updated to match it.
+ */
+const ASSISTANT_PROVIDER = "zai-gateway";
+const ASSISTANT_MODEL = "local-assistant";
 
 function buildSdkMessages(input: AssistantTurnInput): AssistantMessage[] {
   const sdkMessages: AssistantMessage[] = [{ role: "assistant", content: SYSTEM_PROMPT }];
@@ -116,21 +134,91 @@ async function recordAssistantActivity(): Promise<void> {
 }
 
 /**
+ * One-time discovery of the SDK response's REAL top-level shape (V2.1 §C):
+ * the response's own enumerable keys are logged ONCE per server process so
+ * usage extraction can be verified against reality. Only fields that
+ * actually exist are extracted — missing fields stay null, never fabricated.
+ */
+let loggedSdkResponseShape = false;
+function logSdkResponseShapeOnce(completion: unknown): void {
+  if (loggedSdkResponseShape || !completion || typeof completion !== "object") return;
+  try {
+    loggedSdkResponseShape = true;
+    logInfo("assistant: sdk response shape (one-time discovery)", {
+      topKeys: Object.keys(completion as Record<string, unknown>),
+    });
+    const usage = (completion as Record<string, unknown>).usage;
+    if (usage && typeof usage === "object") {
+      logInfo("assistant: sdk response usage shape (one-time discovery)", {
+        usageKeys: Object.keys(usage as Record<string, unknown>),
+      });
+    }
+  } catch {
+    // discovery is best-effort; never break the turn over it
+  }
+}
+
+/** Extract token counts that ACTUALLY exist on the response; null otherwise. */
+function extractUsageFields(completion: unknown): {
+  inputTokens: number | null;
+  outputTokens: number | null;
+} {
+  const asNumber = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const usage = (completion as Record<string, unknown> | null | undefined)?.usage as
+    | Record<string, unknown>
+    | undefined;
+  const inputTokens = asNumber(usage?.prompt_tokens) ?? asNumber(usage?.input_tokens);
+  const outputTokens = asNumber(usage?.completion_tokens) ?? asNumber(usage?.output_tokens);
+  return { inputTokens, outputTokens };
+}
+
+/**
  * Run one real assistant completion.
  * Returns `{ content }` on success; throws AssistantError("empty" | "failed")
  * on an empty completion or an SDK/transport failure (real error is logged
  * server-side only).
+ *
+ * Observability (V2.1 §B/§C): the SDK call runs inside an
+ * "assistant.completion" span (provider/model attrs; nested under the
+ * withApi "http.request" span when the caller route uses withApi), and one
+ * honest usage_records row is written per successful turn (real latency;
+ * token counts only when the response actually carries them; cost stays
+ * null — no pricing source exists; cacheStatus "unknown").
  */
 export async function runAssistantTurn(input: AssistantTurnInput): Promise<{ content: string }> {
   const sdkMessages = buildSdkMessages(input);
 
+  const startedAt = Date.now();
   let completion: Awaited<ReturnType<typeof createCompletion>>;
   try {
-    completion = await createCompletion(sdkMessages);
+    completion = await withSpan(
+      "assistant.completion",
+      { provider: ASSISTANT_PROVIDER, model: ASSISTANT_MODEL },
+      () => createCompletion(sdkMessages),
+    );
   } catch (error) {
     logError("assistant: completion failed", { error: describeError(error) });
     throw new AssistantError("failed", "The assistant request failed. You can retry.");
   }
+  const latencyMs = Date.now() - startedAt;
+
+  logSdkResponseShapeOnce(completion);
+  const { inputTokens, outputTokens } = extractUsageFields(completion);
+  // Fire-and-forget: usage logging must never break or slow the response.
+  void recordUsage({
+    requestId: input.requestId,
+    sessionId: input.sessionId,
+    runId: input.runId,
+    jobId: input.jobId,
+    provider: ASSISTANT_PROVIDER,
+    model: ASSISTANT_MODEL,
+    inputTokens,
+    outputTokens,
+    estimatedCost: null,
+    latencyMs,
+    cacheStatus: "unknown",
+  });
 
   const content = completion.choices[0]?.message?.content ?? "";
   if (!content.trim()) {

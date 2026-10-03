@@ -140,6 +140,14 @@ function titleCasePhase(phase: AIRunPhase): string {
     .join(" ");
 }
 
+/* ------------------------------------------------------------------
+ * Narrow-container adaptation (Phase 4 session directive): sidebar content
+ * must always stay INSIDE the panel block. The root is an @container; below
+ * ~220px container width (e.g. an 11% sidebar at a 1024px window) rows
+ * stack vertically, padding tightens and long labels swap for short ones —
+ * nothing overflows or clips outside the block.
+ * ------------------------------------------------------------------ */
+
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <p className="px-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">
@@ -591,8 +599,8 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
 
   return (
     <div className="@container flex h-full flex-col bg-surface">
-      <header className="flex h-11 shrink-0 items-center justify-between border-b border-border-subtle px-3">
-        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+      <header className="flex h-11 shrink-0 items-center justify-between gap-1 border-b border-border-subtle px-2.5">
+        <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           AI Chats
         </span>
         {!embedded && (
@@ -619,10 +627,10 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
           type="button"
           size="default"
           onClick={startNewChat}
-          className="w-full justify-start gap-2 text-xs"
+          className="w-full justify-start gap-2 text-xs @max-[200px]:gap-1.5 @max-[200px]:px-2"
         >
-          <Plus aria-hidden="true" className="size-4" />
-          New Chat
+          <Plus aria-hidden="true" className="size-4 shrink-0" />
+          <span className="min-w-0 truncate">New Chat</span>
         </Button>
 
         {/* Conversation search — labels + message text only (distinct from code search). */}
@@ -657,7 +665,7 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
             <SectionLabel>Current</SectionLabel>
             {activeConversation ? (
               <div className="rounded-md border border-border-subtle bg-surface-elevated p-2">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span
                     className="min-w-0 truncate text-[13px] font-medium"
                     title={activeConversation.title ?? "Untitled conversation"}
@@ -699,9 +707,14 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
                   size="sm"
                   variant="outline"
                   onClick={startNewChat}
-                  className="mt-2 h-6 px-2 text-[11px]"
+                  className="mt-2 h-6 max-w-full px-2 text-[11px]"
                 >
-                  Start New Chat
+                  {/* Long label only when the container is wide enough —
+                      the button must never spill outside its card. */}
+                  <span className="truncate">
+                    <span className="hidden @min-[180px]:inline">Start New Chat</span>
+                    <span className="@min-[180px]:hidden">New chat</span>
+                  </span>
                 </Button>
               </div>
             )}
@@ -787,19 +800,19 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
           <section className="space-y-1">
             <SectionLabel>AI Context</SectionLabel>
             <dl className="space-y-1 rounded-md border border-border-subtle bg-surface-elevated p-2 text-[11px]">
-              <div className="flex items-baseline justify-between gap-2">
+              <div className="flex flex-col gap-0.5 @min-[220px]:flex-row @min-[220px]:items-baseline @min-[220px]:justify-between @min-[220px]:gap-2">
                 <dt className="shrink-0 text-muted-foreground">Repository</dt>
                 <dd className="min-w-0 truncate text-right" title={meta?.repository.name ?? undefined}>
                   {meta?.repository.name ?? "Not connected"}
                 </dd>
               </div>
-              <div className="flex items-baseline justify-between gap-2">
+              <div className="flex flex-col gap-0.5 @min-[220px]:flex-row @min-[220px]:items-baseline @min-[220px]:justify-between @min-[220px]:gap-2">
                 <dt className="shrink-0 text-muted-foreground">Branch</dt>
                 <dd className="min-w-0 truncate text-right" title={meta?.repository.branch ?? undefined}>
                   {meta?.repository.branch ?? "Not connected"}
                 </dd>
               </div>
-              <div className="flex items-baseline justify-between gap-2">
+              <div className="flex flex-col gap-0.5 @min-[220px]:flex-row @min-[220px]:items-baseline @min-[220px]:justify-between @min-[220px]:gap-2">
                 <dt className="shrink-0 text-muted-foreground">Active file</dt>
                 <dd className="flex min-w-0 flex-wrap items-center justify-end gap-1 text-right">
                   {contextActiveFile ? (
@@ -828,14 +841,14 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
                   )}
                 </dd>
               </div>
-              <div className="flex items-baseline justify-between gap-2">
+              <div className="flex flex-col gap-0.5 @min-[220px]:flex-row @min-[220px]:items-baseline @min-[220px]:justify-between @min-[220px]:gap-2">
                 <dt className="shrink-0 text-muted-foreground">Selected code</dt>
                 <dd className="text-right text-muted-foreground/70">
                   {/* Phase 2 has no selection tracking — honest placeholder. */}
                   —
                 </dd>
               </div>
-              <div className="flex items-baseline justify-between gap-2">
+              <div className="flex flex-col gap-0.5 @min-[220px]:flex-row @min-[220px]:items-baseline @min-[220px]:justify-between @min-[220px]:gap-2">
                 <dt className="shrink-0 text-muted-foreground">Attachments</dt>
                 <dd className="text-right">
                   {contextAttachmentCount > 0 ? contextAttachmentCount : "None"}
@@ -847,7 +860,7 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
           {/* Current AI run — shared run-phase contract */}
           <section className="space-y-1">
             <SectionLabel>Current Run</SectionLabel>
-            <div className="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-elevated p-2 text-[11px]">
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-border-subtle bg-surface-elevated p-2 text-[11px]">
               {runPhase === "thinking" ? (
                 <>
                   <ThinkingOrb size={18} state="thinking" label="AI run thinking" />

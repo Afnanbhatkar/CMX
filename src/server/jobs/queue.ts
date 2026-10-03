@@ -42,6 +42,16 @@ function describeError(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
+/** Parse the persisted AnalysisJob.input JSON (Phase 4); corrupt → undefined. */
+function parseJobInput(raw: string | null): unknown {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Single-line, length-capped, stack-free message for the error column. */
 function sanitizeError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -56,8 +66,18 @@ class JobQueue {
   /* Public queue operations (route-facing; envelope-honest errors)    */
   /* ---------------------------------------------------------------- */
 
-  /** Create a QUEUED job row, publish JOB_QUEUED, kick the pump, return the row. */
-  async enqueueJob(input: { type: string; repositoryId?: string | null }): Promise<AnalysisJobRow> {
+  /** Create a QUEUED job row, publish JOB_QUEUED, kick the pump, return the row.
+   *
+   * Phase 4: `input` (optional JSON payload) is persisted verbatim on
+   * AnalysisJob.input and handed to the handler as ctx.input. Callers MUST
+   * strip credentials first — Phase 4 import tokens ride the ephemeral
+   * token vault, never this column.
+   */
+  async enqueueJob(input: {
+    type: string;
+    repositoryId?: string | null;
+    input?: Record<string, unknown> | null;
+  }): Promise<AnalysisJobRow> {
     return this.withStorage("enqueue", async () => {
       if (!getJobHandler(input.type)) {
         throw new ApiError(
@@ -71,6 +91,7 @@ class JobQueue {
         data: {
           type: input.type,
           repositoryId: input.repositoryId ?? null,
+          input: input.input ? JSON.stringify(input.input) : null,
           status: "QUEUED",
         },
       });
@@ -288,6 +309,7 @@ class JobQueue {
         jobId: row.id,
         publicId: row.publicId,
         repositoryId: row.repositoryId,
+        input: parseJobInput(row.input),
         control,
         publish,
       });
@@ -455,6 +477,7 @@ export function getJobQueue(): JobQueue {
 export async function enqueueJob(input: {
   type: string;
   repositoryId?: string | null;
+  input?: Record<string, unknown> | null;
 }): Promise<AnalysisJobRow> {
   return getJobQueue().enqueueJob(input);
 }

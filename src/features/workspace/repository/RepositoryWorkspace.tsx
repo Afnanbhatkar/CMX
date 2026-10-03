@@ -6,6 +6,11 @@
  * Shown for the "explorer" and "search" rail views: explorer sidebar on the
  * left, editor tabs + a vertical resizable editor/output split on the right.
  *
+ * FOCUS MODE (Phase 4 session directive): the explorer column can be closed
+ * from its own header icon; when `explorerOpen` is false the editor takes
+ * the FULL repository-panel width. Reopening is available from the editor
+ * tab strip and the repository activity rail (explorer/search icons).
+ *
  * FILE LOADER: for every tab with status "loading" it fetches
  * GET /api/repository/file?path=… (one in-flight request at a time; the
  * ACTIVE tab is served first, the rest queue via store re-renders) and maps
@@ -53,6 +58,7 @@ export function RepositoryWorkspace({
   const tabs = useWorkspaceStore((s) => s.tabs);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
   const setTabStatus = useWorkspaceStore((s) => s.setTabStatus);
+  const explorerOpen = useWorkspaceStore((s) => s.explorerOpen);
 
   /* path → AbortController for the request currently in flight. */
   const inflightRef = useRef(new Map<string, AbortController>());
@@ -140,10 +146,13 @@ export function RepositoryWorkspace({
 
   return (
     <div className="flex min-h-0 flex-1">
-      {/* Left column — fixed width in v1: NOT user-resizable yet (planned). */}
-      <div className="flex w-[42%] min-w-[180px] max-w-[320px] flex-col border-r border-border-subtle">
-        <RepositoryExplorerShell filterAutoFocus={filterAutoFocus} />
-      </div>
+      {/* Left column — fixed width in v1: NOT user-resizable yet (planned).
+          Hidden entirely in focus mode (explorerOpen = false). */}
+      {explorerOpen ? (
+        <div className="flex w-[42%] min-w-[180px] max-w-[320px] flex-col border-r border-border-subtle">
+          <RepositoryExplorerShell filterAutoFocus={filterAutoFocus} />
+        </div>
+      ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <EditorTabs />

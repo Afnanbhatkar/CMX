@@ -64,3 +64,7 @@ server.log
 # Phase 1: transient workspace artifacts (user uploads, tool outputs)
 /upload/
 /tool-results/
+
+# Phase 4 (CodeMind X V2): isolated ingestion workspaces + local import probe repos
+.ingestion-workspaces/
+.ingestion-probe/

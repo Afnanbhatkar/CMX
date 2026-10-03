@@ -202,11 +202,21 @@ function PanelPresentation() {
     : (meta?.repository.name ?? "Not connected");
 
   return (
-    <div className="flex h-full w-full flex-col bg-surface">
-      <header className="flex h-11 shrink-0 items-center justify-between px-3">
-        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+    <div className="@container flex h-full w-full flex-col bg-surface">
+      {/**
+       * Narrow-container adaptation (Phase 4 session directive): at ~11% of
+       * a 1024px window the header wordmark cannot fit next to the collapse
+       * control — the brand mark swaps to the logo icon and every text row
+       * truncates INSIDE the block instead of spilling out of it.
+       */}
+      <header className="flex h-11 shrink-0 items-center justify-between gap-1.5 px-2.5">
+        <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider text-muted-foreground @max-[190px]:hidden">
           CodeMind X
         </span>
+        <LogoMark
+          withWordmark={false}
+          className="shrink-0 @min-[191px]:hidden"
+        />
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -272,13 +282,15 @@ function PanelPresentation() {
       {/* Footer — compact REAL workspace info only (no fabricated data). */}
       <footer className="mt-auto shrink-0 space-y-1.5 border-t border-border-subtle p-2 text-[11px]">
         <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/80">
+          <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground/80">
             Active repository
           </div>
-          <div className="truncate text-foreground/90">{repositoryLabel}</div>
+          <div className="truncate text-foreground/90" title={repositoryLabel === "Loading…" ? undefined : repositoryLabel}>
+            {repositoryLabel}
+          </div>
         </div>
         <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/80">
+          <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground/80">
             Current run
           </div>
           <div className="flex items-center gap-1.5 text-foreground/90">
@@ -290,7 +302,7 @@ function PanelPresentation() {
           </div>
         </div>
         <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground/80">
+          <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground/80">
             Recent
           </div>
           {recentConversations.length === 0 ? (

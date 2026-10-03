@@ -7,14 +7,20 @@
  * basename (full path as title), activates on click / Enter / Space, and has
  * a close button (stopPropagation so closing never activates the tab).
  *
+ * FOCUS MODE (Phase 4 session): while the explorer column is closed, a
+ * reopen control sits at the left edge of the strip (both in the empty and
+ * populated states) so full-width code focus is always one click away from
+ * restoring the file tree.
+ *
  * Note: tabs are div[role="tab"] (not <button>) because they contain a real
  * nested <button> for close — nested interactive elements are invalid HTML.
  */
 
 import { memo } from "react";
-import { FileCode2, X } from "lucide-react";
+import { FileCode2, PanelLeftOpen, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
 function basename(path: string): string {
@@ -74,15 +80,43 @@ const EditorTab = memo(function EditorTab({ path, active, onSelect, onClose }: E
   );
 });
 
+/**
+ * Reopen affordance rendered only while the explorer column is closed.
+ */
+function ExplorerReopenButton() {
+  const setExplorerOpen = useWorkspaceStore((s) => s.setExplorerOpen);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label="Open explorer"
+          onClick={() => setExplorerOpen(true)}
+          className={cn(
+            "mr-0.5 flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+            "hover:bg-surface-hover hover:text-foreground",
+            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          )}
+        >
+          <PanelLeftOpen aria-hidden="true" className="size-4" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">Open explorer</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function EditorTabs() {
   const tabs = useWorkspaceStore((s) => s.tabs);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
   const setActiveTab = useWorkspaceStore((s) => s.setActiveTab);
   const closeTab = useWorkspaceStore((s) => s.closeTab);
+  const explorerOpen = useWorkspaceStore((s) => s.explorerOpen);
 
   if (tabs.length === 0) {
     return (
       <div className="flex h-9 shrink-0 items-center border-b border-border-subtle bg-surface">
+        {!explorerOpen ? <ExplorerReopenButton /> : null}
         <span className="px-3 text-[11px] text-muted-foreground">No files open</span>
       </div>
     );
@@ -94,6 +128,11 @@ export function EditorTabs() {
       aria-label="Open files"
       className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-border-subtle bg-surface [scrollbar-width:thin]"
     >
+      {!explorerOpen ? (
+        <div className="flex shrink-0 items-center border-r border-border-subtle pl-1 pr-0.5">
+          <ExplorerReopenButton />
+        </div>
+      ) : null}
       {tabs.map((tab) => (
         <EditorTab
           key={tab.path}

@@ -51,6 +51,12 @@ export interface JobHandlerContext {
   publicId: string;
   /** Repository the job is scoped to, when the request named one. */
   repositoryId: string | null;
+  /**
+   * Job input payload (Phase 4): the JSON persisted on AnalysisJob.input,
+   * parsed for the handler. Callers MUST strip credentials before enqueue
+   * (Phase 4 import tokens live in the ephemeral vault, never in `input`).
+   */
+  input: unknown;
   control: JobControl;
   /** Typed event publisher (process-wide bus; labels only — spec §7). */
   publish: (event: CodeMindEvent) => void;

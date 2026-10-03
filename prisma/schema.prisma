@@ -62,8 +62,18 @@ model Repository {
   defaultBranch String?
   /// "connected" | "indexing" | "unavailable"
   status        String
-  /// Workspace-relative root of the checked-out repository, when present.
+  /// Workspace-relative root for the canonical workspace ("."). For IMPORTED
+  /// repositories (Phase 4): the absolute path of the isolated checkout under
+  /// the ingestion workspace root. Never contains credentials.
   sourcePath    String?
+  /// PHASE 4 import provenance. "workspace" | "github" | "git" | "zip" | "local"
+  sourceKind    String   @default("workspace")
+  /// Sanitized source URL (credentials stripped) — null for workspace/zip.
+  sourceUrl     String?
+  /// Branch/tag/commit the import checked out.
+  sourceRef     String?
+  /// HEAD sha captured at import time (honest null when unavailable).
+  clonedSha     String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -82,6 +92,11 @@ model Repository {
   evaluations      Evaluation[]
   codeChanges      CodeChange[]
   changeSets       ChangeSet[]
+  members          RepositoryMember[]
+  memoryItems      MemoryItem[]
+  glossaryEntries  GlossaryEntry[]
+  decisionRecords  DecisionRecord[]
+  auditLogs        AuditLog[]
 
   @@index([status])
   @@map("repositories")
@@ -184,6 +199,9 @@ model AnalysisJob {
   progress     Float     @default(0)
   /// Opaque JSON checkpoint text written by the job runner.
   checkpoint   String?
+  /// JSON request payload the job was created from — credentials/tokens are
+  /// stripped before persistence (Phase 4 import jobs).
+  input        String?
   attempts     Int       @default(0)
   error        String?
   startedAt    DateTime?
@@ -232,9 +250,10 @@ model ChatSession {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  repository Repository?   @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
-  messages   ChatMessage[]
-  agentRuns  AgentRun[]
+  repository   Repository?   @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  messages     ChatMessage[]
+  agentRuns    AgentRun[]
+  usageRecords UsageRecord[]
 
   @@index([repositoryId])
   @@index([status])
@@ -279,13 +298,15 @@ model AgentRun {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  session     ChatSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  repository  Repository?  @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
-  activities  Activity[]
-  approvals   Approval[]
-  evaluations Evaluation[]
-  codeChanges CodeChange[]
-  changeSets  ChangeSet[]
+  session         ChatSession?     @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  repository      Repository?      @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  activities      Activity[]
+  approvals       Approval[]
+  evaluations     Evaluation[]
+  codeChanges     CodeChange[]
+  changeSets      ChangeSet[]
+  decisionRecords DecisionRecord[]
+  usageRecords    UsageRecord[]
 
   @@index([status])
   @@index([sessionId])
@@ -508,3 +529,234 @@ model ChangeSet {
   @@index([runId])
   @@map("change_sets")
 }
+
+// ============================================================================
+// V2.1 ADDITIONS (Phase 4 session) — AUTH, MEMORY, USAGE, AUDIT
+//
+// Same conventions as the Phase 3 block above: SQLite String "enums" are
+// documented vocabularies validated by writers, uuid PKs, createdAt/updatedAt
+// everywhere, Cascade for owned children, SetNull for optional refs.
+// Still NO foreign keys to the legacy User model — auth identity linkage
+// happens through `subject` strings (provider identity ids), so the legacy
+// baseline remains untouched.
+// ============================================================================
+
+/// A provider-backed authentication session (V2.1 §A — auth foundation).
+/// `tokenHash` stores a SHA-256 hash of the session token — never the token.
+model AuthSession {
+  id         String    @id @default(uuid())
+  publicId   String    @unique @default(uuid())
+  /// Opaque session token hash (hex). The raw token NEVER reaches the DB.
+  tokenHash  String    @unique
+  /// "local" | "github" | "google" | … (provider abstraction registry)
+  provider   String
+  /// Provider-stable subject id (e.g. GitHub user id as string).
+  subject    String
+  /// Application-level user id (legacy User linkage deferred — plain string).
+  userId     String?
+  /// "active" | "expired" | "revoked"
+  status     String    @default("active")
+  expiresAt  DateTime
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([subject])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+}
+
+/// Repository-level authorization grant (V2.1 §A). Role vocabulary:
+/// "owner" | "maintainer" | "writer" | "reader". Backend checks are the
+/// source of truth — frontend checks are never trusted.
+model RepositoryMember {
+  id           String   @id @default(uuid())
+  repositoryId String
+  /// Provider-stable subject id of the member.
+  subject      String
+  /// "owner" | "maintainer" | "writer" | "reader"
+  role         String   @default("reader")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, subject])
+  @@index([subject])
+  @@map("repository_members")
+}
+
+/// A durable memory entry (V2.1 §C — memory schema reservation).
+model MemoryItem {
+  id           String    @id @default(uuid())
+  /// "global" | "repository" | "user" | "session"
+  scope        String
+  /// Subject reference within the scope (repo id / subject id / session id).
+  scopeRef     String?
+  repositoryId String?
+  /// "fact" | "preference" | "summary" | "decision" | "other"
+  type         String
+  /// "active" | "superseded" | "archived" | "deleted"
+  status       String    @default("active")
+  title        String
+  content      String
+  importance   Float     @default(0.5)
+  useCount     Int       @default(0)
+  lastUsedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  repository Repository?   @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  events     MemoryEvent[]
+
+  @@index([scope])
+  @@index([type])
+  @@index([status])
+  @@index([lastUsedAt])
+  @@index([repositoryId])
+  @@map("memory_items")
+}
+
+/// Append-only lifecycle event for a memory item.
+model MemoryEvent {
+  id        String   @id @default(uuid())
+  itemId    String
+  /// "created" | "updated" | "recalled" | "superseded" | "archived" | "deleted"
+  eventType String
+  detail    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  item MemoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, createdAt])
+  @@map("memory_events")
+}
+
+/// A user profile reserved for personalization (V2.1 §C).
+model UserProfile {
+  id          String   @id @default(uuid())
+  /// Provider-stable subject id — the profile's stable external key.
+  subject     String   @unique
+  displayName String?
+  timezone    String?
+  locale      String?
+  /// JSON preferences text (never credentials).
+  prefsJson   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([subject])
+  @@map("user_profiles")
+}
+
+/// A project glossary entry (V2.1 §C).
+model GlossaryEntry {
+  id           String   @id @default(uuid())
+  repositoryId String?
+  term         String
+  definition   String
+  /// JSON array-of-strings text (SQLite has no list primitive).
+  aliasesJson  String?
+  /// "active" | "deprecated"
+  status       String   @default("active")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+
+  @@unique([repositoryId, term])
+  @@index([repositoryId])
+  @@index([status])
+  @@map("glossary")
+}
+
+/// An architecture/implementation decision record (V2.1 §C).
+model DecisionRecord {
+  id               String    @id @default(uuid())
+  repositoryId     String?
+  runId            String?
+  title            String
+  decision         String
+  rationale        String?
+  /// JSON array-of-strings text (alternatives considered).
+  alternativesJson String?
+  /// "proposed" | "accepted" | "superseded" | "rejected"
+  status           String    @default("proposed")
+  decidedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  run        AgentRun?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([repositoryId])
+  @@index([status])
+  @@map("decision_records")
+}
+
+/// Generic provider cost/usage accounting row (V2.1 §D) — Phase 3.5 fills
+/// these from real gateway calls. `estimatedCost` is provider-native units
+/// unless a pricing table exists later; never fabricated.
+model UsageRecord {
+  id            String   @id @default(uuid())
+  requestId     String?
+  sessionId     String?
+  runId         String?
+  jobId         String?
+  /// e.g. "zai" | "openai" | "anthropic" (gateway vocabulary)
+  provider      String
+  model         String
+  inputTokens   Int?
+  outputTokens  Int?
+  estimatedCost Float?
+  latencyMs     Int?
+  /// "none" | "hit" | "miss" | "write" | "unknown"
+  cacheStatus   String   @default("unknown")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  session ChatSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  run     AgentRun?    @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([provider, model])
+  @@index([sessionId])
+  @@index([createdAt])
+  @@map("usage_records")
+}
+
+/// Append-only audit trail for consequential events (V2.1 §E).
+/// `metadata` is JSON text and must NEVER contain secrets or credentials.
+model AuditLog {
+  id           String   @id @default(uuid())
+  /// "user" | "system" | "agent" | "service"
+  actorType    String   @default("system")
+  actorId      String?
+  /// Closed vocabulary: "login" | "repository.access" | "repository.import" |
+  /// "approval.granted" | "approval.rejected" | "git.mutation" |
+  /// "memory.change" | "agent.autonomy.change" | "mcp.tool.invocation" | "other"
+  action       String
+  targetType   String?
+  targetId     String?
+  repositoryId String?
+  requestId    String?
+  metadata     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+
+  @@index([action])
+  @@index([actorId])
+  @@index([repositoryId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// PHASE 4 — REPOSITORY IMPORT (additive columns on existing tables)
+// ============================================================================
+
+/// Resumable import job input. JSON text; NEVER contains credentials/tokens.
+// (AnalysisJob.input — added to the model above.)

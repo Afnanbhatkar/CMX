@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import { useRepositoryMeta } from "../use-repository-meta";
 import type { RepoFile, RepoTreeNode } from "../types";
 import { useRepositoryTree } from "../repository/use-repository-tree";
+import { ImportRepositoryButton } from "../repository/ImportDialog";
 
 /* ------------------------------------------------------------------ */
 /* File preview                                                        */
@@ -242,6 +243,9 @@ export function RepositoryOverviewPanel() {
         )}
         <span className="text-[11px] text-muted-foreground/70">
           Indexing unavailable — arrives in a later phase.
+        </span>
+        <span className="ml-auto">
+          <ImportRepositoryButton />
         </span>
       </header>
 

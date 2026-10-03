@@ -8,6 +8,11 @@
 export const SECURITY_CONFIG = {
   /** Hard cap for request bodies enforced by withApi (POST/PUT/PATCH). */
   maxBodyBytes: 1_000_000,
+  /**
+   * Absolute ceiling for per-route overrides (withApi `maxBodyBytes` option,
+   * e.g. the repository ZIP import upload). No route can exceed this.
+   */
+  absoluteMaxBodyBytes: 64_000_000,
   cors: {
     strategy: "same-origin",
     allowOrigins: [] as string[],

@@ -1,3 +1,4 @@
+import { repositoryImportJob } from "./handlers/repository-import";
 import { repositoryIndexJob } from "./handlers/repository-index";
 import type { JobHandler } from "./types";
 
@@ -42,3 +43,4 @@ export function listRegisteredJobTypes(): string[] {
 
 /* Built-in real handlers. */
 registerJob("repository.index", repositoryIndexJob);
+registerJob("repository.import", repositoryImportJob);

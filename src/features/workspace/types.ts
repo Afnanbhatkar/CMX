@@ -25,8 +25,13 @@ import type { ActivityKind } from "@/types/contracts";
  *      NO LONGER user-adjustable. Only the chat|repo split remains
  *      draggable. Persisted v2 layouts reset to 11% | 11% | 39% | 39%.
  *      Conversations are preserved.
+ * v4 — ADJUSTABLE sidebar widths (user directive, Phase 4 session): the two
+ *      sidebars may grow from their 11% default up to a MAXIMUM of 15%
+ *      (never below 11%). Persisted v3 layouts reset to the canonical
+ *      11% | 11% | 39% | 39%; conversations remain preserved. The explorer
+ *      open/closed (focus) state is also part of the persisted layout.
  */
-export const WORKSPACE_LAYOUT_VERSION = 3;
+export const WORKSPACE_LAYOUT_VERSION = 4;
 
 /** Default desktop composition: 11% | 11% | 39% | 39%. */
 export const PANEL_DEFAULTS = {
@@ -39,14 +44,15 @@ export const PANEL_DEFAULTS = {
 /**
  * Panel size boundaries (percent of workspace width).
  *
- * Sidebar panels are FIXED at exactly 11% (min === max) per the V2.1
- * canonical-shell directive: the user cannot resize them; the collapse
- * toggle is the only width change (11% ⇄ exact 48px rail). The chat|repo
- * split remains user-adjustable and always absorbs the remaining 78%.
+ * Sidebar panels default to 11% and are user-adjustable ONLY upward —
+ * between 11% (min) and 15% (max) per the Phase 4 session directive
+ * ("increase karne ka, 11% se neeche nhi, max 15%"). The collapse toggle
+ * remains the only other width change (11–15% ⇄ exact 48px rail). The
+ * chat|repo split remains user-adjustable and always absorbs the remainder.
  */
 export const PANEL_LIMITS = {
-  cmx: { min: 11, max: 11 },
-  chatSidebar: { min: 11, max: 11 },
+  cmx: { min: 11, max: 15 },
+  chatSidebar: { min: 11, max: 15 },
   chat: { min: 20, max: 60 },
   repo: { min: 20, max: 60 },
 } as const;

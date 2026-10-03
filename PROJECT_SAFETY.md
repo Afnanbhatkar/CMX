@@ -186,3 +186,34 @@ to inspect, and restore individual paths from that commit — never `reset --har
   environment) — compensated with live curl/browser probes; `bun run
   build` not run (platform constraint) — lint + tsc + runtime verification
   used instead.
+- **Phase 4 — GitHub + large-repository ingestion (+ V2.1 auth/observability/
+  memory/audit additions):** delivered entirely on the retained Next.js +
+  Prisma architecture (same escape-clause decision as Phase 3). Ingestion is
+  STATIC — the only external binary executed is `git` through a hardened
+  runner (argv arrays, sanitized env, hooks disabled, prompts disabled,
+  cancel = SIGKILL); repository code is never executed. Credentials (import
+  tokens) live only in a process-ephemeral vault for the duration of an
+  import — never persisted, never logged, redacted from every error; tokens
+  reach the DB nowhere (AnalysisJob.input and Repository.sourceUrl are
+  credential-free by construction). Imported bytes land only inside
+  `.ingestion-workspaces/<uuid>/` (git-ignored, outside the UI file
+  allowlist); traversal/symlink/oversize/zip-bomb guards verified live
+  (traversal zip rejected, no file escaped). Schema grew additively 22 → 31
+  tables (auth_sessions, repository_members, memory_items, memory_events,
+  user_profiles, glossary, decision_records, usage_records, audit_logs +
+  import provenance columns on repositories/analysis_jobs); legacy
+  User/Post data untouched; no destructive migration (`prisma db push`,
+  no flags). Auth is a foundation, not a claim: every route stays honestly
+  "unconfigured" — nothing requires auth yet. Deviations/verification gaps
+  reported honestly: restart-resume of a mid-clone import and a real
+  oversized-archive upload were verified at the code level (checkpoint
+  fields + marker logic + ZIP guards) but not exercised with a real
+  restart/oversized payload; no test files (platform policy) — live curl +
+  browser probes used instead; dev server restarted twice during
+  verification (stale PrismaClient after schema push + hung-pump cleanup;
+  flagged in worklog).
+- **User UI directives (Phase 4 session):** sidebar panels adjustable again
+  within 11–15% (min 11 / max 15 — supersedes the Phase 3 fixed-11% lock);
+  sidebar content must adapt inside its block (container-query based; no
+  overflow at 1024px — verified); repository explorer gained a close icon
+  for full-width code focus (state persisted; layout schema v4).

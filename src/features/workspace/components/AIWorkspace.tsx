@@ -7,11 +7,11 @@
  * - TopNavigation (h-12) on every breakpoint.
  * - DESKTOP (≥1024px):
  *   - Assistant destination: four panels — CodeMind X sidebar | AI chat
- *     sidebar | AI chat area | Repository (VSCode-style). Both sidebars are
- *     FIXED at exactly 11% (V2.1 §F canonical layout — not user-adjustable;
- *     only the chat|repo split is draggable, and it always absorbs the
- *     remaining 78%). Sizes + collapsed state persist via the workspace
- *     store.
+ *     sidebar | AI chat area | Repository (VSCode-style). Both sidebars
+ *     default to 11% and are user-adjustable ONLY upward, between 11% and
+ *     15% (Phase 4 session directive — never below 11%, never above 15%).
+ *     Only the chat|repo split absorbs the remaining width. Sizes +
+ *     collapsed state persist via the workspace store.
  *   - Every other destination: two panels — CodeMind X sidebar | destination
  *     main area. The VSCode-style repository panel and the AI chat sidebar
  *     are Assistant-scoped chrome and render ONLY on the Assistant page.
@@ -24,9 +24,10 @@
  * LOCKED to the exact rail width — `minSize` and `maxSize` both become the
  * rail percentage, so the rail is always exactly RAIL_PX (48px) wide at
  * every viewport size (no dead space around the rail icons on large or full
- * screen windows). When it expands again the panel returns to its FIXED 11%
- * width. The sidebar boundaries render a non-interactive 1px separator —
- * no resize affordance, per the fixed-width directive.
+ * screen windows). When it expands again the panel returns to its persisted
+ * 11–15% width. Sidebar boundaries expose disabled handles ONLY while the
+ * corresponding sidebar is collapsed; expanded sidebars are resizable
+ * within the 11–15% window (drag + arrow keys via react-resizable-panels).
  *
  * Panel focus contract: ⌘1–4 focuses the panel wrappers. Other code can
  * dispatch the window CustomEvent "cmx-focus-panel" with `detail: {index}`
@@ -270,8 +271,8 @@ export function AIWorkspace() {
   /**
    * Layout reset (command palette "Reset workspace layout"): the store reset
    * alone does not move the already-mounted panels — imperatively re-sync
-   * them to the canonical composition (fixed 11% sidebars or exact 48px
-   * rails, 39% | 39% split). Nonce stays transient (never persisted).
+   * them to the canonical composition (11% sidebars or exact 48px rails,
+   * 39% | 39% split). Nonce stays transient (never persisted).
    */
   const layoutResetNonce = useWorkspaceStore((s) => s.layoutResetNonce);
   useEffect(() => {
@@ -410,14 +411,11 @@ export function AIWorkspace() {
             className="min-h-0 flex-1"
             onLayout={handleLayout}
           >
-            {/*
-             * CodeMind X sidebar — present on every destination. FIXED at
-             * 11% when expanded (PANEL_LIMITS min === max); locked to the
-             * exact rail width while collapsed. The boundary handle is
-             * PERMANENTLY disabled: react-resizable-panels requires a
-             * handle element between adjacent panels, but a disabled one
-             * registers no drag/keyboard handler — so the sidebar is
-             * honestly fixed at 11% with zero resize affordance.
+            {/**
+             * CodeMind X sidebar — present on every destination. Defaults to
+             * 11%, adjustable between 11% and 15% while expanded
+             * (PANEL_LIMITS); locked to the exact rail width while collapsed
+             * (min === max === rail percentage disables the handle).
              */}
             <ResizablePanel
               ref={cmxPanelRef}
@@ -437,8 +435,8 @@ export function AIWorkspace() {
               </div>
             </ResizablePanel>
 
-            {/* Fixed sidebar boundary — permanently disabled handle (see above). */}
-            <PanelResizer disabled />
+            {/* Sidebar boundary — resizable 11–15% while expanded, inert while collapsed. */}
+            <PanelResizer disabled={collapsed.cmx} />
 
             {isAssistantSection ? (
               <>
@@ -463,8 +461,8 @@ export function AIWorkspace() {
                   </div>
                 </ResizablePanel>
 
-                {/* Fixed sidebar boundary — permanently disabled handle. */}
-                <PanelResizer disabled />
+                {/* Sidebar boundary — resizable 11–15% while expanded, inert while collapsed. */}
+                <PanelResizer disabled={collapsed.chatSidebar} />
 
                 <ResizablePanel
                   ref={chatPanelRef}

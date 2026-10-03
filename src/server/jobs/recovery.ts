@@ -27,6 +27,21 @@ import { pumpJobs } from "./queue";
 
 const RECOVERY_STAGE = "recovered-after-restart";
 
+/**
+ * Staleness cutoff before a RUNNING row counts as orphaned.
+ *
+ * Next.js dev can serve route modules from more than one worker process;
+ * this process' once-per-process guard does not protect across workers, so
+ * recovery must NEVER requeue a row another worker may legitimately be
+ * executing. The heartbeat is refreshed by control.progress on every stage
+ * change / percent move / ~5 s idle window; the longest legitimate silent
+ * stretch is one full git invocation (INGESTION command timeout, 10 min), so
+ * the cutoff is that plus a 60 s margin. The requeue itself is a CONDITIONAL
+ * updateMany (status still RUNNING AND heartbeat older than the cutoff) so
+ * two workers racing on the same row cannot both requeue it.
+ */
+const RECOVERY_STALE_MS = 11 * 60 * 1000;
+
 const globalForRecovery = globalThis as unknown as { __cmxJobsRecovered?: boolean };
 
 function describeError(error: unknown): string {
@@ -38,10 +53,31 @@ export async function recoverInterruptedJobs(): Promise<void> {
   globalForRecovery.__cmxJobsRecovered = true;
 
   try {
-    const stale = await db.analysisJob.findMany({ where: { status: "RUNNING" } });
+    const cutoff = new Date(Date.now() - RECOVERY_STALE_MS);
+    const stale = await db.analysisJob.findMany({
+      where: {
+        status: "RUNNING",
+        OR: [
+          { heartbeatAt: { lt: cutoff } },
+          { heartbeatAt: null, startedAt: { lt: cutoff } },
+          { heartbeatAt: null, startedAt: null, createdAt: { lt: cutoff } },
+        ],
+      },
+    });
+
     for (const job of stale) {
-      await db.analysisJob.update({
-        where: { id: job.id },
+      // Conditional claim: only requeue when the row is STILL RUNNING and
+      // STILL stale (another worker may have finished it in between).
+      const requeued = await db.analysisJob.updateMany({
+        where: {
+          id: job.id,
+          status: "RUNNING",
+          OR: [
+            { heartbeatAt: { lt: cutoff } },
+            { heartbeatAt: null, startedAt: { lt: cutoff } },
+            { heartbeatAt: null, startedAt: null, createdAt: { lt: cutoff } },
+          ],
+        },
         data: {
           status: "QUEUED",
           attempts: { increment: 1 },
@@ -49,6 +85,7 @@ export async function recoverInterruptedJobs(): Promise<void> {
           // progress / checkpoint / error / timestamps preserved untouched.
         },
       });
+      if (requeued.count === 0) continue;
       publish(
         createEvent({
           type: "JOB_QUEUED",
@@ -59,12 +96,14 @@ export async function recoverInterruptedJobs(): Promise<void> {
         }),
       );
     }
-    if (stale.length > 0) {
-      logInfo("jobs: recovered interrupted jobs", { count: stale.length });
-    }
+    logInfo("jobs: recovery check complete", {
+      found: stale.length,
+      note: "always pumps afterwards — queued rows from a previous process must drain even when nothing was orphaned",
+    });
     // Drain: recovered rows whose handler is registered now run; rows whose
     // handler is missing fail honestly in the pump ("handler not registered
-    // in this runtime").
+    // in this runtime"). QUEUED rows from before a restart also drain here —
+    // this is the ONLY post-restart pump trigger, so it must run unconditionally.
     pumpJobs();
   } catch (error) {
     logError("jobs: recovery failed", { error: describeError(error) });
