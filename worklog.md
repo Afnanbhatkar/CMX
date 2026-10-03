@@ -458,3 +458,20 @@ Stage Summary:
 - Preview verified end-to-end on desktop + mobile with zero console errors; all Phase 4 surfaces (import engine UI, honest planned states) visible
 - Rollback path: upload/pre-phase4-baseline-backup.bundle (git clone from bundle restores Phase 2 lineage)
 - Dev server persistence quirk documented: use node detached-spawn pattern for background restarts in this sandbox
+
+---
+Task ID: 6
+Agent: Z.ai (orchestrator)
+Task: Fix console error "State loaded from storage couldn't be migrated since no migrate function was provided" (workspace-store persist)
+
+Work Log:
+- Root cause: src/stores/workspace-store.ts persist config had a robust merge() (spec §31 sanitize/reset policy) but NO migrate function; user's localStorage held an older persisted schema (Phase 2-era v1/v2) while the store schema is WORKSPACE_LAYOUT_VERSION=4 — zustand persist middleware logged the migration error at module evaluation and discarded the stored state before merge could preserve conversations/tabs
+- Fix: added `migrate: (persisted) => (persisted ?? {}) as WorkspaceState` bridging older persisted state into the existing merge() pipeline; documented that future breaking schema changes can branch on version inside migrate
+- Bonus fix discovered during lint: .ingestion-workspaces/ (live Phase 4 import artifact, repo 09a01381… present on disk) polluted `eslint .` with 11 errors/4 warnings from imported third-party code — added `.ingestion-workspaces/**` and `.ingestion-probe/**` (matching .gitignore lines 68-70) to eslint.config.mjs ignores
+- Browser reproduction test (agent-browser): seeded localStorage `codemind-workspace` with version-1 payload (legacy sizes 12|12|38|38 + "Migration probe" conversation) → reloaded /app → NO migration console error; storage rewritten to version 4; conversation preserved and visible in RECENT sidebar; sizes reset to current defaults 11|11|39|39 per spec §31 layout-reset policy; probe data cleaned after test
+- lint exit 0 after both fixes; dev server unaffected (Fast Refresh applied store change)
+
+Stage Summary:
+- Persist version-mismatch now upgrades silently v_old → 4: layout resets to current defaults, conversations/tabs/section survive sanitization, zero console noise
+- ESLint scope now excludes Phase 4 runtime ingestion workspaces (gitignore parity)
+- Single persisted store in codebase (workspace-store) — no other migrate gaps exist

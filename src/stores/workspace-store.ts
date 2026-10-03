@@ -423,6 +423,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       name: "codemind-workspace",
       version: WORKSPACE_LAYOUT_VERSION,
       storage: createJSONStorage(() => localStorage),
+      /*
+       * Version bridge (spec §31): when localStorage holds an older schema
+       * version, hand the persisted state to merge() untouched — merge
+       * implements the sanitize/reset policy (outdated layouts reset to
+       * current defaults; conversations, tabs and section preserved after
+       * sanitization). Without this, zustand's persist middleware logs
+       * "couldn't be migrated" and discards the stored state entirely.
+       * Future breaking schema changes can branch on `version` here to
+       * transform fields explicitly before merge.
+       */
+      migrate: (persisted) => (persisted ?? {}) as WorkspaceState,
       partialize: (s) => ({
         layoutVersion: s.layoutVersion,
         sizes: s.sizes,
