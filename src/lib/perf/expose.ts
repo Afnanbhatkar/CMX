@@ -10,10 +10,12 @@
 
 import {
   getPerfStats,
-  runLargeFileBenchmark,
-  type LargeFileBenchmarkResult,
   type PerfMetric,
   type PerfStats,
+} from "./records";
+import {
+  runLargeFileBenchmark,
+  type LargeFileBenchmarkResult,
 } from "./budgets";
 
 declare global {

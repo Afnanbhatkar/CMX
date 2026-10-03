@@ -4,6 +4,86 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 7 — Hybrid Search + Hindi/Hinglish] — a real search engine for the workspace
+
+### Added
+- **Hybrid retrieval engine** (`src/server/search/`): BM25 lexical (k1=1.4,
+  b=0.72, idf-weighted inverted index over file + symbol-name units) +
+  **local dense vectors** (feature-hashed unigram/bigram embeddings, 384-dim,
+  L2-normalized, cosine — the platform SDK exposes no embedding endpoint and
+  the UI labels this honestly) + symbol table + path relevance + import-graph
+  relationships (resolved relative/`@/` edges → callers/callees) + git context
+  (branch, porcelain status, recent commit paths) + metadata filters.
+- **Fusion**: Reciprocal Rank Fusion (k=60, per-method priors) followed by
+  Maximal Marginal Relevance diversification (λ=0.72). Never a single method.
+- **Result model (spec §5)**: file, symbol, line start/end, real snippet,
+  language, display-normalized score, `retrievalMethod[]` and `whyMatched[]`
+  — computed explanations ("symbol name contains 'editor'", "semantic
+  similarity 0.14 (local hashed n-gram vectors)", "imports X (line 18)").
+- **Hindi/Hinglish normalization (spec §9)**: curated stopword + marker
+  lexicon, intent rules (flow / location / call-sites / files / definition /
+  tests / configuration), domain phrasing (backend→server/api…), technical
+  identifiers preserved verbatim, honest interpretation notes surfaced in the
+  UI. English queries pass through untouched.
+- **Contextual search (spec §10)**: "iske callers dikhao" resolves the
+  anaphora to the ACTIVE file/symbol (context toggle in the panel), traverses
+  the real import graph and boosts explicit callers/callees results.
+- **Search modes (spec §2)**: hybrid (auto), natural-language, semantic,
+  keyword, exact, symbol, filename, regex, api, dependency, git, security,
+  documentation — the backend understands when hybrid retrieval applies.
+- **Code-aware index (spec §4)**: functions, classes, methods, components,
+  hooks, imports, exports, routes, API calls, database queries, environment
+  references, configuration keys, tests, documentation blocks — from the
+  shared deterministic structure scanner (same engine as the client parse
+  worker). In-memory cache invalidated by a (path, mtime, size) tree
+  signature; index stats API reports honest build numbers.
+- **Search UI (spec §6/§7)**: mode selector, filters (language, path, scope,
+  current-file context), activity strip ("Searching repository — …", "N
+  relevant results", top files — safe summary only), results grouped by file
+  in compact rows with why-matched chips and relevance bars; clicking a hit
+  opens the actual file, activates the tab, jumps to the line and highlights
+  the match via the EditorNavigationService; the query is preserved across
+  navigation (session store).
+- **Evaluation hooks (spec §11)**: `POST /api/search/evaluate` runs a real
+  judgments dataset against the live engine and computes Precision@5,
+  Recall@5, MRR, NDCG@10 and per-query latency; results persist as
+  `Evaluation` rows (kind `search-quality`). Before any run the API answers
+  exactly **"Evaluation not run."** Measured baseline: NDCG@10 0.349, MRR
+  0.617, mean latency ≈ 3 ms.
+- **Search activity** persists real `Activity` rows (kind `search`) — the
+  user-visible execution summary, never model reasoning.
+
+## [V2.1 ADDITIONS — AI-native editor foundations] — model manager, tree-sitter worker, navigation history, perf budgets
+
+### Added
+- **§A EditorModelManager**: Monaco model reuse via URI, LRU disposal (never
+  dirty/attached buffers), memory stats, large-file policy (>512 KB flag, 6 MB
+  ceiling), dirty-buffer persistence to sessionStorage and honest restore
+  after reload; dirty edits now survive tab switches (fixed the @monaco-editor
+  model-dispose/clobber gap).
+- **§B Parse worker**: REAL tree-sitter (web-tree-sitter@0.25.10 +
+  tree-sitter-wasms, ABI-verified) running in a module worker — symbols,
+  structure and outline parses off the main thread; deterministic structural
+  scanner fallback with the actual engine labeled in every response. Large
+  files are NEVER parsed on the main thread (>32 KB goes to the worker).
+- **§C Navigation history**: back/forward stacks over real navigation
+  payloads (Alt+←/→), recent locations, localStorage bookmarks, go-to-test
+  that verifies candidate test files against the real tree first.
+- **§D Capability honesty**: `language-capabilities` model + CapabilityBadge
+  (Definitions/References: LSP unavailable; Symbols: tree-sitter|structural
+  scan by the engine that actually ran; Diagnostics: editor-native analysis
+  for TS/JS). Nothing shows as verified when only a placeholder exists.
+- **§E Performance budgets (measured)**: ring-buffer metrics + PerfHUD.
+  Measured in Chromium: keystroke p50 1.6 ms / p95 9.3 ms (budget 16 ms);
+  5 MB file through the real large-file path in 92–123 ms (budget 1000 ms).
+- **§F Terminal foundation**: xterm.js dock panel behind a TerminalAdapter
+  contract; the reserved SandboxTerminalAdapter states the truth (no exec
+  backend yet). Stack traces resolve REAL file:line references through the
+  EditorNavigationService (sourceContext "terminal") — works today.
+- **§G Debug adapter foundation**: DAP-shaped contracts, factory registry
+  anchor, honest capability probe. Debugging is explicitly deferred to the
+  editor-overlay phase; nothing is simulated.
+
 ## [Phase 6 — Monaco Code Intelligence Workspace] — real editor, navigation, diagnostics, AI code actions
 
 ### Added

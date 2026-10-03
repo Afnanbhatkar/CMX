@@ -57,7 +57,7 @@ export const WORKSPACE_DESTINATIONS: DestinationEntry[] = [
     id: "search",
     label: "Code Search",
     availability: "available",
-    note: "Filename filtering over the real workspace tree. Hybrid search arrives in a later phase.",
+    note: "Hybrid retrieval over the real workspace — BM25 + local dense vectors + symbols + paths + import graph + git. English, Hindi and Hinglish queries.",
     icon: Search,
   },
   {

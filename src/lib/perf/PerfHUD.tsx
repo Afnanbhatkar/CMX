@@ -18,7 +18,7 @@ import {
   getMeasuredMetrics,
   getPerfStats,
   type PerfMetric,
-} from "@/lib/perf/budgets";
+} from "@/lib/perf/records";
 
 const METRIC_LABELS: Record<PerfMetric, string> = {
   "editor.keystroke": "Keystroke interaction",
