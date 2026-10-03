@@ -568,3 +568,19 @@ Work Log:
 Stage Summary:
 - Phase 5 UI complete and honest: three resizable regions, VS Code-style tree (virtualized/fuzzy/icons/git status/context menu/lazy dirs), upgraded tabs, breadcrumbs, metadata header, binary view, real-data intelligence panel with explicit planned slots
 - Root-cause learning documented: radix asChild requires the child to forward props — never asChild onto memo components without prop spreading
+
+---
+Task ID: 5-5 (checkpoint)
+Agent: Z.ai (orchestrator)
+Task: Phase 5 checkpoint — commit, tag, git-integrity repair, data-loss guarantee
+
+Work Log:
+- CHANGELOG.md Phase 5 section written (V2.1 §A-§D, explorer, verification record)
+- Committed 3e679db (43 files) + annotated tag codemind-v2/phase-05-repository-explorer (local only, not pushed, no destructive git)
+- COMMIT-TIME FINDING + REPAIR: git fsck reported missing blob db4c6e69 (Phase 4-era content of src/server/jobs/handlers/repository-import.ts; referenced by ancestor commits 9e84424/a3d404e/d8dbbdf — object store corruption, cause unknown, likely rsync-era). Restored the exact blob (hash-object match verified) from the retained /tmp/codemind-p4 tar extraction; fsck now clean (only a harmless dangling tag); full history readable again
+- Data-loss guarantee upheld: all Phase 0-4 commits/tags/rows intact, DB push was purely additive (row counts verified), working tree clean at 3e679db, prior backup bundle upload/pre-phase4-baseline-backup.bundle still present
+- Phase boundary honored: STOP here per spec — Phase 6 NOT started
+
+Stage Summary:
+- Phase 5 complete: V2.1 trust metadata live (classification on 228 files, snapshot rows, findings model, provenance chain) + VS Code-style explorer (virtualized/fuzzy/icons/context menu/lazy dirs), upgraded tabs, breadcrumbs, metadata header, binary view, real-data intelligence panel
+- HEAD 3e679db = tag codemind-v2/phase-05-repository-explorer; lint 0 errors; tsc clean (src); Playwright + agent-browser verification green; dev server healthy
