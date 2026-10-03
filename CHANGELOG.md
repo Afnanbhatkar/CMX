@@ -4,6 +4,36 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 2 — Shell UX Fixes] — Assistant-scoped chrome & exact rail collapse
+
+### Fixed
+- **AI sidebar collapse at fullscreen** (`AIWorkspace.tsx`): collapsed panels
+  are now LOCKED to the exact 48px rail width (`minSize = maxSize = railPct`,
+  viewport-tracked via rAF) instead of being clamped up to the 4% panel
+  minimum — previously the rail kept ~29px of dead space around its icons on
+  large/fullscreen windows while closing tightly only in the narrow preview.
+- **AI sidebar content wrapping** (`AIChatSidebar.tsx`): replaced the Radix
+  ScrollArea viewport (`display: table` sizing that clipped cards/buttons at
+  narrow widths) with a plain block scroll container; container-query adaptive
+  quick actions (2 columns only ≥240px), wrapping active-file context row,
+  truncation-hardened labels. Sidebar content now wraps cleanly at the 11%
+  default width (e.g. 140px at 1280).
+- **Layout drift**: `onLayout` no longer writes collapsed rail widths or
+  two-panel destination layouts into the persisted four-panel sizes.
+
+### Changed
+- **Assistant-scoped chrome**: the AI chat sidebar and the VSCode-style
+  repository panel render ONLY on the Assistant destination (desktop four-panel
+  layout + compact sheet shortcuts). Every other destination is a focused
+  two-panel view; the Repository destination now has a dedicated page
+  (`RepositoryOverviewPanel`): real repo meta, filterable real file tree,
+  read-only file preview with honest error states — no IDE chrome.
+- **Persisted layout schema v1 → v2** (`types.ts`, `workspace-store.ts`):
+  older persisted layouts reset to the intended 11% | 11% | 39% | 39%
+  defaults (conversations/tabs preserved); 11% remains the open default and
+  user resizing (4%–22%) still persists.
+- Compact nav Sheet now closes on destination change.
+
 ## [Phase 2 — Workspace Shell] — Advanced Application Shell & Four-Panel AI IDE
 
 ### Added

@@ -1,27 +1,34 @@
 "use client";
 
 /**
- * CodeMind X V2 — root component of the four-panel AI workspace shell.
+ * CodeMind X V2 — root component of the AI workspace shell.
  *
- * Composition (spec §29):
+ * Composition (spec §29, assistant-scoped chrome update):
  * - TopNavigation (h-12) on every breakpoint.
- * - DESKTOP (≥1024px): ResizablePanelGroup "cmx-workspace-v1" with four
- *   panels — CodeMind X sidebar | AI chat sidebar | AI chat area | Repository
- *   — persisted via the workspace store (sizes + collapsed + expand widths).
- * - COMPACT (<1024px): persistent icon rail on tablets (≥768px), main chat
- *   area, and Sheets for navigation / chat sidebar / repository.
+ * - DESKTOP (≥1024px):
+ *   - Assistant destination: four panels — CodeMind X sidebar | AI chat
+ *     sidebar | AI chat area | Repository (VSCode-style) — persisted via the
+ *     workspace store (sizes + collapsed + expand widths).
+ *   - Every other destination: two panels — CodeMind X sidebar | destination
+ *     main area. The VSCode-style repository panel and the AI chat sidebar
+ *     are Assistant-scoped chrome and render ONLY on the Assistant page.
+ * - COMPACT (<1024px): persistent icon rail on tablets (≥768px), main area,
+ *   and Sheets for navigation / chat sidebar / repository.
  * - CommandPalette mounted once, driven by store.paletteOpen plus a small
  *   `paletteFilesMode` React state (⌘K commands / ⌘P files).
  *
  * Sidebar collapse logic: when a sidebar flips to collapsed, its current
- * width is saved (`setExpandedWidth`) and the panel is resized to the rail
- * percentage; when it expands again the saved width is restored. The handle
- * before a collapsed sidebar is disabled.
+ * width is saved (`setExpandedWidth`) and the panel is LOCKED to the exact
+ * rail width — `minSize` and `maxSize` both become the rail percentage for
+ * the collapsed panel, so the rail is always exactly RAIL_PX (48px) wide at
+ * every viewport size (no dead space around the rail icons on large or full
+ * screen windows). When it expands again the saved width is restored and the
+ * normal limits return. The handle before a collapsed sidebar is disabled.
  *
- * Panel focus contract: ⌘1–4 focuses the four panel wrappers. Other code can
+ * Panel focus contract: ⌘1–4 focuses the panel wrappers. Other code can
  * dispatch the window CustomEvent "cmx-focus-panel" with `detail: {index}`
- * (1..4) — used by the command palette. "cmx-open-palette" with
- * `detail: {filesMode}` opens the palette in that mode (see OverviewPanel).
+ * (1..4, assistant layout) — used by the command palette. "cmx-open-palette"
+ * with `detail: {filesMode}` opens the palette in that mode.
  */
 
 import {
@@ -77,13 +84,18 @@ function useMediaQuery(query: string): boolean {
   );
 }
 
-/** Collapsed rail width as a percentage of the viewport, clamped to limits. */
+/**
+ * Collapsed rail width as an EXACT percentage of the viewport.
+ *
+ * Deliberately NOT clamped to the expanded panel limits: while a sidebar is
+ * collapsed, the panel's min/max are locked to this value, so the rail is
+ * exactly RAIL_PX wide — on a 1024px screen and on a 3840px full screen
+ * alike. The outer clamp only guards degenerate viewports.
+ */
 function computeRailPct(): number {
+  if (typeof window === "undefined") return 3;
   const raw = (RAIL_PX / window.innerWidth) * 100;
-  return Math.min(
-    PANEL_LIMITS.cmx.max,
-    Math.max(PANEL_LIMITS.cmx.min, raw),
-  );
+  return Math.min(25, Math.max(1.25, raw));
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -110,6 +122,7 @@ export function AIWorkspace() {
 
   const sizes = useWorkspaceStore((s) => s.sizes);
   const collapsed = useWorkspaceStore((s) => s.collapsed);
+  const section = useWorkspaceStore((s) => s.section);
   const navSheetOpen = useWorkspaceStore((s) => s.navSheetOpen);
   const chatSidebarSheetOpen = useWorkspaceStore((s) => s.chatSidebarSheetOpen);
   const repoSheetOpen = useWorkspaceStore((s) => s.repoSheetOpen);
@@ -117,8 +130,34 @@ export function AIWorkspace() {
   const setChatSidebarSheetOpen = useWorkspaceStore((s) => s.setChatSidebarSheetOpen);
   const setRepoSheetOpen = useWorkspaceStore((s) => s.setRepoSheetOpen);
 
+  /**
+   * Assistant-scoped chrome: the AI chat sidebar and the VSCode-style
+   * repository panel belong to the Assistant destination only. Every other
+   * destination renders as a focused two-panel layout (nav + main area).
+   */
+  const isAssistantSection = section === "assistant";
+
   /* Command palette mode (⌘K commands / ⌘P files). */
   const [paletteFilesMode, setPaletteFilesMode] = useState(false);
+
+  /**
+   * Re-render on viewport resize so the locked rail percentage tracks the
+   * window (rAF-throttled). Without this, a collapsed rail could keep a
+   * stale percentage after the window is resized.
+   */
+  const [, setViewportTick] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const onResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setViewportTick((t) => t + 1));
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   /* Panel imperative handles + focus targets. */
   const cmxPanelRef = useRef<ImperativePanelHandle | null>(null);
@@ -131,21 +170,36 @@ export function AIWorkspace() {
   /* Latest layout from onLayout — the "current panel size" for collapse. */
   const latestLayoutRef = useRef<PanelSizes>({ ...PANEL_DEFAULTS });
 
+  /**
+   * Layout writer. Mode-aware:
+   * - Four-panel (Assistant) layout reports [cmx, chatSidebar, chat, repo].
+   * - Two-panel layout reports [cmx, main] — only cmx may be written, the
+   *   Assistant-only sizes must stay untouched.
+   * A collapsed sidebar re-reports the rail width on every layout event —
+   * the stored EXPANDED size is preserved instead of being corrupted.
+   */
   const handleLayout = useCallback((layout: number[]) => {
+    const s = useWorkspaceStore.getState();
+    const fourPanel = layout.length >= 4;
     const next: PanelSizes = {
-      cmx: layout[0] ?? 0,
-      chatSidebar: layout[1] ?? 0,
-      chat: layout[2] ?? 0,
-      repo: layout[3] ?? 0,
+      cmx: s.collapsed.cmx ? s.sizes.cmx : (layout[0] ?? s.sizes.cmx),
+      chatSidebar: fourPanel
+        ? s.collapsed.chatSidebar
+          ? s.sizes.chatSidebar
+          : (layout[1] ?? s.sizes.chatSidebar)
+        : s.sizes.chatSidebar,
+      chat: fourPanel ? (layout[2] ?? s.sizes.chat) : s.sizes.chat,
+      repo: fourPanel ? (layout[3] ?? s.sizes.repo) : s.sizes.repo,
     };
     latestLayoutRef.current = next;
-    useWorkspaceStore.getState().setSizes(next);
+    s.setSizes(next);
   }, []);
 
   /**
    * Collapse/expand flips. `defaultSize` covers the initial mount (including
    * a persisted collapsed state); only actual flips need imperative resizes,
-   * so the first run on desktop is observed but skipped.
+   * so the first run on desktop is observed but skipped. The min/max lock
+   * (collapsed → rail percentage) does the deterministic clamping.
    */
   const prevCollapsedCmxRef = useRef<boolean | null>(null);
   const prevCollapsedChatSidebarRef = useRef<boolean | null>(null);
@@ -270,7 +324,7 @@ export function AIWorkspace() {
       // Alt+B — e.key is a dead-key glyph on some layouts, so accept KeyB too.
       const isB = key === "b" || event.code === "KeyB";
       if (isB && event.altKey) {
-        if (!isDesktop) return;
+        if (!isDesktop || !isAssistantSection) return;
         event.preventDefault();
         useWorkspaceStore.getState().toggleChatSidebar();
         return;
@@ -293,7 +347,7 @@ export function AIWorkspace() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [focusPanel, isDesktop]);
+  }, [focusPanel, isAssistantSection, isDesktop]);
 
   /* ---------------------------------------------------------------- */
   /* Render                                                            */
@@ -311,7 +365,7 @@ export function AIWorkspace() {
   }
 
   /** Render-time rail percentage for persisted collapsed sidebars. */
-  const railPctSize =
+  const railPct =
     typeof window !== "undefined" ? computeRailPct() : PANEL_DEFAULTS.cmx;
 
   const focusWrapperClass =
@@ -326,17 +380,21 @@ export function AIWorkspace() {
         <FadeIn className="min-h-0 flex-1">
           <ResizablePanelGroup
             direction="horizontal"
-            id="cmx-workspace-v1"
+            id="cmx-workspace-v2"
             className="min-h-0 flex-1"
             onLayout={handleLayout}
           >
+            {/*
+             * CodeMind X sidebar — present on every destination. While
+             * collapsed, min/max lock the panel to the exact rail width.
+             */}
             <ResizablePanel
               ref={cmxPanelRef}
               id="cmx"
               order={1}
-              minSize={PANEL_LIMITS.cmx.min}
-              maxSize={PANEL_LIMITS.cmx.max}
-              defaultSize={collapsed.cmx ? railPctSize : sizes.cmx}
+              minSize={collapsed.cmx ? railPct : PANEL_LIMITS.cmx.min}
+              maxSize={collapsed.cmx ? railPct : PANEL_LIMITS.cmx.max}
+              defaultSize={collapsed.cmx ? railPct : sizes.cmx}
             >
               <div
                 ref={cmxFocusRef}
@@ -350,61 +408,86 @@ export function AIWorkspace() {
 
             <PanelResizer disabled={collapsed.cmx} />
 
-            <ResizablePanel
-              ref={chatSidebarPanelRef}
-              id="chat-sidebar"
-              order={2}
-              minSize={PANEL_LIMITS.chatSidebar.min}
-              maxSize={PANEL_LIMITS.chatSidebar.max}
-              defaultSize={collapsed.chatSidebar ? railPctSize : sizes.chatSidebar}
-            >
-              <div
-                ref={chatSidebarFocusRef}
-                tabIndex={-1}
-                data-workspace-panel="chat-sidebar"
-                className={focusWrapperClass}
-              >
-                <AIChatSidebar />
-              </div>
-            </ResizablePanel>
+            {isAssistantSection ? (
+              <>
+                {/*
+                 * AI chat sidebar — Assistant-scoped chrome.
+                 */}
+                <ResizablePanel
+                  ref={chatSidebarPanelRef}
+                  id="chat-sidebar"
+                  order={2}
+                  minSize={collapsed.chatSidebar ? railPct : PANEL_LIMITS.chatSidebar.min}
+                  maxSize={collapsed.chatSidebar ? railPct : PANEL_LIMITS.chatSidebar.max}
+                  defaultSize={collapsed.chatSidebar ? railPct : sizes.chatSidebar}
+                >
+                  <div
+                    ref={chatSidebarFocusRef}
+                    tabIndex={-1}
+                    data-workspace-panel="chat-sidebar"
+                    className={focusWrapperClass}
+                  >
+                    <AIChatSidebar />
+                  </div>
+                </ResizablePanel>
 
-            <PanelResizer disabled={collapsed.chatSidebar} />
+                <PanelResizer disabled={collapsed.chatSidebar} />
 
-            <ResizablePanel
-              id="chat"
-              order={3}
-              minSize={PANEL_LIMITS.chat.min}
-              maxSize={PANEL_LIMITS.chat.max}
-              defaultSize={sizes.chat}
-            >
-              <div
-                ref={chatFocusRef}
-                tabIndex={-1}
-                data-workspace-panel="chat"
-                className={focusWrapperClass}
-              >
-                <ChatAreaRouter />
-              </div>
-            </ResizablePanel>
+                <ResizablePanel
+                  id="chat"
+                  order={3}
+                  minSize={PANEL_LIMITS.chat.min}
+                  maxSize={PANEL_LIMITS.chat.max}
+                  defaultSize={sizes.chat}
+                >
+                  <div
+                    ref={chatFocusRef}
+                    tabIndex={-1}
+                    data-workspace-panel="chat"
+                    className={focusWrapperClass}
+                  >
+                    <ChatAreaRouter />
+                  </div>
+                </ResizablePanel>
 
-            <PanelResizer />
+                <PanelResizer />
 
-            <ResizablePanel
-              id="repo"
-              order={4}
-              minSize={PANEL_LIMITS.repo.min}
-              maxSize={PANEL_LIMITS.repo.max}
-              defaultSize={sizes.repo}
-            >
-              <div
-                ref={repoFocusRef}
-                tabIndex={-1}
-                data-workspace-panel="repo"
-                className={focusWrapperClass}
-              >
-                <RepositoryWorkspaceShell />
-              </div>
-            </ResizablePanel>
+                {/*
+                 * VSCode-style repository workspace — Assistant-scoped chrome.
+                 */}
+                <ResizablePanel
+                  id="repo"
+                  order={4}
+                  minSize={PANEL_LIMITS.repo.min}
+                  maxSize={PANEL_LIMITS.repo.max}
+                  defaultSize={sizes.repo}
+                >
+                  <div
+                    ref={repoFocusRef}
+                    tabIndex={-1}
+                    data-workspace-panel="repo"
+                    className={focusWrapperClass}
+                  >
+                    <RepositoryWorkspaceShell />
+                  </div>
+                </ResizablePanel>
+              </>
+            ) : (
+              /*
+               * Focused destination layout — the main area is the destination
+               * (overview / repository page / search / settings / planned).
+               */
+              <ResizablePanel id="destination-main" order={2}>
+                <div
+                  ref={chatFocusRef}
+                  tabIndex={-1}
+                  data-workspace-panel="main"
+                  className={focusWrapperClass}
+                >
+                  <ChatAreaRouter />
+                </div>
+              </ResizablePanel>
+            )}
           </ResizablePanelGroup>
         </FadeIn>
       ) : (
@@ -417,7 +500,9 @@ export function AIWorkspace() {
         </div>
       )}
 
-      {/* COMPACT sheets — closed (render nothing) until opened on <1024px */}
+      {/* COMPACT sheets — closed (render nothing) until opened on <1024px.
+          The AI chats + repository sheets are Assistant-scoped: their open
+          triggers only exist on the Assistant destination. */}
       <Sheet open={!isDesktop && navSheetOpen} onOpenChange={setNavSheetOpen}>
         <SheetContent side="left" className="w-3/4 gap-0 sm:max-w-sm">
           <SheetTitle className="sr-only">Navigation</SheetTitle>
@@ -431,7 +516,7 @@ export function AIWorkspace() {
       </Sheet>
 
       <Sheet
-        open={!isDesktop && chatSidebarSheetOpen}
+        open={!isDesktop && isAssistantSection && chatSidebarSheetOpen}
         onOpenChange={setChatSidebarSheetOpen}
       >
         <SheetContent
@@ -449,7 +534,7 @@ export function AIWorkspace() {
       </Sheet>
 
       <Sheet
-        open={!isDesktop && repoSheetOpen}
+        open={!isDesktop && isAssistantSection && repoSheetOpen}
         onOpenChange={setRepoSheetOpen}
       >
         <SheetContent

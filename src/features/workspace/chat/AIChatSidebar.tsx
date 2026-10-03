@@ -78,7 +78,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
@@ -591,7 +590,7 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
   };
 
   return (
-    <div className="flex h-full flex-col bg-surface">
+    <div className="@container flex h-full flex-col bg-surface">
       <header className="flex h-11 shrink-0 items-center justify-between border-b border-border-subtle px-3">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           AI Chats
@@ -644,7 +643,14 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
         </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
+      {/*
+       * Plain overflow container — NOT a Radix ScrollArea. The Radix
+       * viewport wraps content in `display: table; min-width: 100%`, which
+       * sizes children to their content width instead of the panel width:
+       * at narrow (11%) sidebar widths cards and buttons overflowed and
+       * got clipped instead of wrapping. Block layout wraps correctly.
+       */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="space-y-3 px-2 pb-2">
           {/* Current conversation */}
           <section className="space-y-1">
@@ -795,7 +801,7 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
               </div>
               <div className="flex items-baseline justify-between gap-2">
                 <dt className="shrink-0 text-muted-foreground">Active file</dt>
-                <dd className="flex min-w-0 items-center justify-end gap-1">
+                <dd className="flex min-w-0 flex-wrap items-center justify-end gap-1 text-right">
                   {contextActiveFile ? (
                     <>
                       <button
@@ -873,15 +879,15 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
           {/* Quick actions */}
           <section className="space-y-1">
             <SectionLabel>Quick Actions</SectionLabel>
-            <div className="grid grid-cols-2 gap-1.5">
+            <div className="grid grid-cols-1 gap-1.5 @min-[240px]:grid-cols-2">
               <Button
                 type="button"
                 variant="outline"
                 onClick={requestComposerFocus}
-                className="h-7 justify-start gap-1.5 px-2 text-[11px]"
+                className="h-7 min-w-0 justify-start gap-1.5 px-2 text-[11px]"
               >
-                <Sparkles aria-hidden="true" className="size-3" />
-                Ask AI
+                <Sparkles aria-hidden="true" className="size-3 shrink-0" />
+                <span className="min-w-0 truncate">Ask AI</span>
               </Button>
 
               {contextActiveFile ? (
@@ -890,10 +896,10 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
                   variant="outline"
                   onClick={askAboutCurrentFile}
                   title="Ask about current file"
-                  className="h-7 justify-start gap-1.5 px-2 text-[11px]"
+                  className="h-7 w-full min-w-0 justify-start gap-1.5 px-2 text-[11px]"
                 >
-                  <FileCode2 aria-hidden="true" className="size-3" />
-                  Ask about file
+                  <FileCode2 aria-hidden="true" className="size-3 shrink-0" />
+                  <span className="min-w-0 truncate">Ask about file</span>
                 </Button>
               ) : (
                 <Tooltip>
@@ -904,10 +910,10 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
                         variant="outline"
                         disabled
                         title="Ask about current file"
-                        className="h-7 w-full justify-start gap-1.5 px-2 text-[11px]"
+                        className="h-7 w-full min-w-0 justify-start gap-1.5 px-2 text-[11px]"
                       >
-                        <FileCode2 aria-hidden="true" className="size-3" />
-                        Ask about file
+                        <FileCode2 aria-hidden="true" className="size-3 shrink-0" />
+                        <span className="min-w-0 truncate">Ask about file</span>
                       </Button>
                     </span>
                   </TooltipTrigger>
@@ -919,20 +925,20 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
                 type="button"
                 variant="outline"
                 onClick={summarizeContext}
-                className="h-7 justify-start gap-1.5 px-2 text-[11px]"
+                className="h-7 min-w-0 justify-start gap-1.5 px-2 text-[11px]"
               >
-                <ListTree aria-hidden="true" className="size-3" />
-                Summarize
+                <ListTree aria-hidden="true" className="size-3 shrink-0" />
+                <span className="min-w-0 truncate">Summarize</span>
               </Button>
 
               <Button
                 type="button"
                 variant="outline"
                 onClick={() => setSection("search")}
-                className="h-7 justify-start gap-1.5 px-2 text-[11px]"
+                className="h-7 min-w-0 justify-start gap-1.5 px-2 text-[11px]"
               >
-                <Search aria-hidden="true" className="size-3" />
-                Search code
+                <Search aria-hidden="true" className="size-3 shrink-0" />
+                <span className="min-w-0 truncate">Search code</span>
               </Button>
             </div>
 
@@ -944,7 +950,7 @@ function ChatSidebarContent({ embedded = false }: AIChatSidebarProps) {
             </div>
           </section>
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Rename dialog (Escape closes via Radix default) */}
       <Dialog

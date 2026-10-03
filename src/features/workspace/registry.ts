@@ -131,7 +131,10 @@ export const DESTINATION_MAP: Record<WorkspaceSectionId, DestinationEntry> =
 
 /**
  * Chat-area routing for CodeMind X sidebar destinations:
- * - "assistant" | "repository" → the live conversation (AIChatPanel)
+ * - "assistant"               → the live conversation (AIChatPanel)
+ * - "repository"              → focused repository page (real meta + real
+ *                               file browser + read-only preview) — NOT the
+ *                               VSCode-style panel, which is Assistant-scoped
  * - "overview"                → real workspace capability overview
  * - "search"                  → real filename filter over the workspace tree
  * - "settings"                → real workspace settings (layout reset, shortcuts)
@@ -139,5 +142,4 @@ export const DESTINATION_MAP: Record<WorkspaceSectionId, DestinationEntry> =
  */
 export const CONVERSATION_SECTIONS: ReadonlySet<WorkspaceSectionId> = new Set([
   "assistant",
-  "repository",
 ] satisfies WorkspaceSectionId[]);

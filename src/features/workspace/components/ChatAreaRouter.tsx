@@ -1,15 +1,20 @@
 "use client";
 
 /**
- * CodeMind X V2 — routes the chat area by the active workspace section.
+ * CodeMind X V2 — routes the MAIN area by the active workspace section.
  *
  * - "overview"              → real capability overview
- * - assistant / repository  → the live conversation (AIChatPanel)
+ * - "assistant"             → the live conversation (AIChatPanel); on desktop
+ *                             the AI chat sidebar + VSCode-style repository
+ *                             panel render alongside it (Assistant-scoped
+ *                             chrome owned by AIWorkspace)
+ * - "repository"            → focused repository page (real meta, real file
+ *                             browser, read-only preview — NOT the IDE)
  * - "search"                → real filename filter over the workspace tree
  * - "settings"              → real workspace settings
  * - everything else         → honest planned-destination placeholder
  *
- * The same router serves the desktop chat panel and the compact main area,
+ * The same router serves the desktop main panel and the compact main area,
  * so destinations behave identically on every screen size.
  */
 
@@ -20,6 +25,7 @@ import { AIChatPanel } from "@/features/workspace/chat";
 import { CONVERSATION_SECTIONS } from "../registry";
 import { DestinationPlaceholderPanel } from "./DestinationPlaceholderPanel";
 import { OverviewPanel } from "./OverviewPanel";
+import { RepositoryOverviewPanel } from "./RepositoryOverviewPanel";
 import { SearchFilesPanel } from "./SearchFilesPanel";
 import { SettingsPanel } from "./SettingsPanel";
 
@@ -31,6 +37,8 @@ export function ChatAreaRouter() {
     content = <OverviewPanel />;
   } else if (CONVERSATION_SECTIONS.has(section)) {
     content = <AIChatPanel />;
+  } else if (section === "repository") {
+    content = <RepositoryOverviewPanel />;
   } else if (section === "search") {
     content = <SearchFilesPanel />;
   } else if (section === "settings") {

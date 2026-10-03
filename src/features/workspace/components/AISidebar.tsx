@@ -61,7 +61,16 @@ const railButtonClass =
 /* Rail presentation (collapsed desktop panel OR persistent tablet rail) */
 /* ------------------------------------------------------------------ */
 
-function RailPresentation({ showExpand }: { showExpand: boolean }) {
+/**
+ * Rail presentation (collapsed desktop panel OR persistent tablet rail).
+ *
+ * `fill`: when the rail lives inside the collapsed desktop panel, the panel
+ * is locked to exactly RAIL_PX (48px) — the rail fills it (`w-full`) so the
+ * border sits flush at the panel edge with zero dead space around the icons
+ * at any viewport size. The persistent tablet rail keeps its own fixed 48px
+ * width (`w-12 shrink-0`).
+ */
+function RailPresentation({ showExpand, fill = false }: { showExpand: boolean; fill?: boolean }) {
   const section = useWorkspaceStore((s) => s.section);
   const setSection = useWorkspaceStore((s) => s.setSection);
   const toggleCmx = useWorkspaceStore((s) => s.toggleCmx);
@@ -74,7 +83,12 @@ function RailPresentation({ showExpand }: { showExpand: boolean }) {
   );
 
   return (
-    <div className="flex h-full w-[48px] shrink-0 flex-col items-center gap-1 border-r border-border-subtle bg-surface py-2">
+    <div
+      className={cn(
+        "flex h-full flex-col items-center gap-1 border-r border-border-subtle bg-surface py-2",
+        fill ? "w-full" : "w-12 shrink-0",
+      )}
+    >
       {showExpand ? (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -304,13 +318,14 @@ function PanelPresentation() {
 export function AISidebar({ variant }: AISidebarProps) {
   // While the desktop CodeMind X panel is collapsed, the panel-sized instance
   // switches to the rail presentation (with an expand control at the top).
+  // The panel is locked to the exact rail width, so the rail FILLS it.
   const cmxCollapsed = useWorkspaceStore((s) => s.collapsed.cmx);
 
   if (variant === "rail") {
     return <RailPresentation showExpand={false} />;
   }
   if (cmxCollapsed) {
-    return <RailPresentation showExpand />;
+    return <RailPresentation showExpand fill />;
   }
   return <PanelPresentation />;
 }

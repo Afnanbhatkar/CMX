@@ -92,10 +92,16 @@ function RunIndicator() {
 
 export function TopNavigation({ onOpenPalette }: TopNavigationProps) {
   const { meta, loading: metaLoading } = useRepositoryMeta();
+  const section = useWorkspaceStore((s) => s.section);
   const setSection = useWorkspaceStore((s) => s.setSection);
   const setNavSheetOpen = useWorkspaceStore((s) => s.setNavSheetOpen);
   const setChatSidebarSheetOpen = useWorkspaceStore((s) => s.setChatSidebarSheetOpen);
   const setRepoSheetOpen = useWorkspaceStore((s) => s.setRepoSheetOpen);
+
+  /* Assistant-scoped chrome: the AI chats + repository shortcuts (and their
+     Sheets) only exist on the Assistant destination — same rule as the
+     desktop four-panel layout. */
+  const isAssistantSection = section === "assistant";
 
   const branch = meta?.repository.branch ?? null;
   const indexingNote =
@@ -245,34 +251,38 @@ export function TopNavigation({ onOpenPalette }: TopNavigationProps) {
             </TooltipTrigger>
             <TooltipContent>Navigation</TooltipContent>
           </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Open AI chats"
-                className={iconButtonClass}
-                onClick={() => setChatSidebarSheetOpen(true)}
-              >
-                <MessageSquare className="size-4" aria-hidden="true" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>AI chats</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Open repository"
-                className={iconButtonClass}
-                onClick={() => setRepoSheetOpen(true)}
-              >
-                <FolderGit2 className="size-4" aria-hidden="true" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Repository</TooltipContent>
-          </Tooltip>
+          {isAssistantSection && (
+            <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Open AI chats"
+                    className={iconButtonClass}
+                    onClick={() => setChatSidebarSheetOpen(true)}
+                  >
+                    <MessageSquare className="size-4" aria-hidden="true" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>AI chats</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Open repository"
+                    className={iconButtonClass}
+                    onClick={() => setRepoSheetOpen(true)}
+                  >
+                    <FolderGit2 className="size-4" aria-hidden="true" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Repository</TooltipContent>
+              </Tooltip>
+            </>
+          )}
         </div>
       </div>
     </header>

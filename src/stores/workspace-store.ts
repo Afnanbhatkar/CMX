@@ -235,7 +235,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         set((s) => ({
           collapsed: { ...s.collapsed, chatSidebar: !s.collapsed.chatSidebar },
         })),
-      setSection: (id) => set({ section: id }),
+      setSection: (id) =>
+        set((s) => ({
+          section: id,
+          // Navigating to another destination always dismisses the compact
+          // nav Sheet, otherwise the destination change is hidden behind it.
+          navSheetOpen: false,
+        })),
       resetLayout: () =>
         set({
           sizes: { ...PANEL_DEFAULTS },
@@ -448,26 +454,43 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           cmx: number;
           chatSidebar: number;
         }>;
+        /*
+         * Layout reset policy (spec §31): a persisted layout from an older
+         * schema version is NEVER clamped into the new one — it is reset to
+         * the current defaults so users get the intended composition (11% |
+         * 11% | 39% | 39%). Conversations, tabs and section are preserved.
+         */
+        const isCurrentLayoutVersion =
+          raw.layoutVersion === WORKSPACE_LAYOUT_VERSION;
         return {
           ...current,
           layoutVersion: WORKSPACE_LAYOUT_VERSION,
-          sizes: validSizes(raw.sizes),
-          collapsed: {
-            cmx: collapsedRaw.cmx === true,
-            chatSidebar: collapsedRaw.chatSidebar === true,
-          },
-          expandedWidths: {
-            cmx: clampPercent(
-              expandedRaw.cmx,
-              PANEL_LIMITS.cmx.min,
-              PANEL_LIMITS.cmx.max,
-            ),
-            chatSidebar: clampPercent(
-              expandedRaw.chatSidebar,
-              PANEL_LIMITS.chatSidebar.min,
-              PANEL_LIMITS.chatSidebar.max,
-            ),
-          },
+          sizes: isCurrentLayoutVersion
+            ? validSizes(raw.sizes)
+            : { ...PANEL_DEFAULTS },
+          collapsed: isCurrentLayoutVersion
+            ? {
+                cmx: collapsedRaw.cmx === true,
+                chatSidebar: collapsedRaw.chatSidebar === true,
+              }
+            : { cmx: false, chatSidebar: false },
+          expandedWidths: isCurrentLayoutVersion
+            ? {
+                cmx: clampPercent(
+                  expandedRaw.cmx,
+                  PANEL_LIMITS.cmx.min,
+                  PANEL_LIMITS.cmx.max,
+                ),
+                chatSidebar: clampPercent(
+                  expandedRaw.chatSidebar,
+                  PANEL_LIMITS.chatSidebar.min,
+                  PANEL_LIMITS.chatSidebar.max,
+                ),
+              }
+            : {
+                cmx: PANEL_DEFAULTS.cmx,
+                chatSidebar: PANEL_DEFAULTS.chatSidebar,
+              },
           section,
           conversations,
           activeConversationId,

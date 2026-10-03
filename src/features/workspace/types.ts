@@ -16,8 +16,14 @@ import type { ActivityKind } from "@/types/contracts";
 /* Layout                                                              */
 /* ------------------------------------------------------------------ */
 
-/** Versioned persistence schema (spec §31). Bump when the shape changes. */
-export const WORKSPACE_LAYOUT_VERSION = 1;
+/**
+ * Versioned persistence schema (spec §31). Bump when the shape changes.
+ *
+ * v2 — assistant-scoped chrome + exact rail collapse: persisted v1 sizes are
+ * intentionally reset to the defaults (11% | 11% | 39% | 39%) so every user
+ * starts from the intended composition again. Conversations are preserved.
+ */
+export const WORKSPACE_LAYOUT_VERSION = 2;
 
 /** Default desktop composition: 11% | 11% | 39% | 39%. */
 export const PANEL_DEFAULTS = {
