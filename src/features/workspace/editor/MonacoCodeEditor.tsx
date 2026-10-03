@@ -196,6 +196,8 @@ export function MonacoCodeEditor({
 }: MonacoCodeEditorProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
+  /** The model adopted from the model manager — released on pane unmount. */
+  const modelRef = useRef<MonacoEditorNS.ITextModel | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const decorationsRef = useRef<string[]>([]);
   const gitDecorationsRef = useRef<string[]>([]);
@@ -216,6 +218,21 @@ export function MonacoCodeEditor({
     : content;
 
   useDirtySync(path, content);
+
+  /* Model-manager contract (V2.1 §A): detach the adopted model when this
+     pane unmounts (tab closed / file switched). The model survives (the
+     wrapper keeps it alive via keepCurrentModel and dirty buffers are never
+     disposed), but the release lets the LRU/memory policy actually reclaim
+     detached, clean models beyond the tracking cap. Our cleanup runs AFTER
+     the wrapper has disposed the editor — the model itself stays valid. */
+  useEffect(() => {
+    return () => {
+      const model = modelRef.current;
+      if (model && !model.isDisposed()) editorModelManager.release(model);
+      modelRef.current = null;
+      editorRef.current = null;
+    };
+  }, []);
 
   /* Focus routing: the app dispatches commands to the active pane. */
   const focusPane = useCallback(() => {
@@ -434,13 +451,24 @@ export function MonacoCodeEditor({
       /* Model manager (V2.1 §A): adopt the model Editor resolved (created or
          reused via keepCurrentModel) so reuse / LRU / memory stats apply. */
       const model = editor.getModel();
+      modelRef.current = model ?? null;
       const adopt = editorModelManager.adopt(monaco, model, {
         path,
         languageId: language,
         baseline: content,
       });
       baselineRef.current = getEditorBaseline(path) ?? content;
-      editorModelManager.setBaseline(model, baselineRef.current);
+      if (model) {
+        editorModelManager.setBaseline(model, baselineRef.current);
+        /* Badge truth: the model manager is the single dirty source. When a
+           pane remounts (diff toggle, tab re-open) the live model may still
+           be dirty — useDirtySync has already cleared the store flag, so
+           restore it from the manager instead of silently hiding unsaved
+           state. */
+        useWorkspaceStore
+          .getState()
+          .setTabDirty(path, editorModelManager.isDirty(model));
+      }
 
       /* Dirty-buffer restore (V2.1 §A): a buffer saved earlier THIS SESSION
          (before a reload) is restored into the freshly created model —

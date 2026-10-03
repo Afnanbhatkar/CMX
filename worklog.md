@@ -662,3 +662,19 @@ Stage Summary:
 - Semantic capability is honestly labeled: local hashed n-gram vectors (no external embedding model; swap-in point is dense.ts only).
 - No fabricated metrics anywhere: "Evaluation not run." until a real run persists real numbers.
 - Committed + tagged codemind-v2/phase-07-search. STOP per spec (Phase 8 not started).
+
+---
+Task ID: fix/monaco-diff-dispose
+Agent: Z.ai Code (orchestrator)
+Task: Runtime error fix — "TextModel got disposed before DiffEditorWidget model got reset" (user-reported Monaco crash after Phase 7)
+
+Work Log:
+- Root cause: @monaco-editor/react v4.7 DiffEditor unmount disposes original/modified text models BEFORE the DiffEditorWidget (decoded dist `I()`: `i?.original?.dispose(), i?.modified?.dispose(), u.current?.dispose()`), violating Monaco 0.57's contract (diffEditorWidget.js registers onWillDispose → onUnexpectedError "TextModel got disposed before DiffEditorWidget model got reset"). Triggered every DiffViewer unmount: closing the AI Review-diff dialog (Radix unmounts content) and toggling git-diff off in the viewport.
+- DiffViewer.tsx fix — took model-lifecycle ownership: `keepCurrentOriginalModel` + `keepCurrentModifiedModel` stop the wrapper from touching model disposal; component captures the diff editor + both models in onMount and its own unmount cleanup (which runs AFTER the wrapper's unmount work — React unwinds child effects first) disposes in the safe order: `setModel(null)` on the widget (guarded), then dispose each model with isDisposed guards. No behavior change for rendering; models are per-mount anonymous models exactly as before.
+- MonacoCodeEditor.tsx hardening (same V2.1 §A lifecycle contract): added the missing `editorModelManager.release(model)` on pane unmount (adopt() incremented `attached` but nothing ever decremented → LRU/memory policy was inert and attached counts grew unboundedly). Cleanup runs after the wrapper disposed the editor; the model survives (keepCurrentModel) so dirty-buffer continuity is untouched. Also fixed the pre-existing `setBaseline(model | null)` type hole in the touched function with a null guard.
+- Honest-badge fix exposed during verification: `useDirtySync` cleared `setTabDirty(path,false)` on every remount, silently hiding a still-dirty buffer (content survived via peekDirtyContent but the unsaved dot vanished). handleMount now syncs the store badge from the model manager truth after setBaseline (`setTabDirty(path, isDirty(model))`) — the manager remains the single dirty source; real reloads still clear honestly (fresh model == new baseline).
+- Verification (.zscripts/verify-dispose-fix.py + focused reruns, Chromium): git-diff toggle 3 mount/unmount cycles clean with real diff content rendered (1493 chars); typed dirty buffer survives editor unmount/remount AND the unsaved badge now survives too; real /api/ai/chat roundtrip → code block with `// file:` reference → Review-diff dialog renders real diff and Escape-close is clean twice; zero "TextModel got disposed"/DiffEditorWidget errors and zero console errors in all runs; nextjs dev overlay never appears. bun run lint → 0 errors (1 pre-existing benign warning); bunx tsc --noEmit → no NEW errors vs HEAD (pre-existing Phase-7 typing drift in code-intelligence/FileIntelligencePanel/parse-worker examples noted, untouched).
+
+Stage Summary:
+- The reported runtime error is fixed at the root (disposal order), not masked: diff dialogs and git-diff toggling are stable, dirty buffers keep both their content and their honest badge across remounts, and the model manager LRU contract is actually live now.
+- No Prisma/schema/data changes; no API contract changes; Phase 7 tag untouched. .zscripts/verify-dispose-fix.py added as the regression harness; result JSON alongside.

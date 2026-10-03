@@ -11,6 +11,7 @@
 
 import { DiffEditor, type Monaco } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
+import { useEffect, useRef } from "react";
 import { FileDiff } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -40,14 +41,59 @@ function languageFor(change: FileChange): string {
   return monacoLanguageForLabel(change.language ?? null) || monacoLanguageForPath(change.path);
 }
 
-function handleMount(_editor: unknown, monaco: Monaco): void {
-  defineCodeMindThemes(monaco);
-  monaco.editor.setTheme("codemind-dark");
-}
-
 export function DiffViewer({ change, height = 380, className }: DiffViewerProps) {
   const language = languageFor(change);
   const hasBoth = change.original !== undefined && change.proposed !== undefined;
+
+  /* Model lifecycle ownership (Monaco ≥0.5x contract).
+   *
+   * @monaco-editor/react v4.7 disposes the diff's original/modified models
+   * BEFORE resetting the DiffEditorWidget on unmount. Disposing a text model
+   * while the widget still holds it trips Monaco's guard — "TextModel got
+   * disposed before DiffEditorWidget model got reset" — which surfaces as a
+   * runtime error overlay (e.g. closing the Review-diff dialog, toggling the
+   * git diff view). So this component takes ownership of the models:
+   * - `keepCurrentOriginalModel` / `keepCurrentModifiedModel` stop the
+   *   wrapper from disposing them;
+   * - our cleanup runs AFTER the wrapper's own unmount work (React unwinds
+   *   child effects first) and disposes in the safe order: reset the widget
+   *   model, then dispose the models.
+   */
+  const diffEditorRef = useRef<MonacoEditorNS.IStandaloneDiffEditor | null>(null);
+  const diffModelsRef = useRef<{
+    original: MonacoEditorNS.ITextModel | null;
+    modified: MonacoEditorNS.ITextModel | null;
+  }>({ original: null, modified: null });
+
+  useEffect(() => {
+    return () => {
+      try {
+        diffEditorRef.current?.setModel(null);
+      } catch {
+        // The widget may already be disposed — its models are then detached.
+      }
+      for (const model of [diffModelsRef.current.original, diffModelsRef.current.modified]) {
+        try {
+          if (model && !model.isDisposed()) model.dispose();
+        } catch {
+          // Already disposed elsewhere — nothing left to free.
+        }
+      }
+      diffEditorRef.current = null;
+      diffModelsRef.current = { original: null, modified: null };
+    };
+  }, []);
+
+  const handleMount = (editor: MonacoEditorNS.IStandaloneDiffEditor, monaco: Monaco): void => {
+    diffEditorRef.current = editor;
+    const model = editor.getModel();
+    diffModelsRef.current = {
+      original: model?.original ?? null,
+      modified: model?.modified ?? null,
+    };
+    defineCodeMindThemes(monaco);
+    monaco.editor.setTheme("codemind-dark");
+  };
 
   return (
     <div
@@ -87,6 +133,8 @@ export function DiffViewer({ change, height = 380, className }: DiffViewerProps)
           language={language}
           original={change.original ?? ""}
           modified={change.proposed ?? ""}
+          keepCurrentOriginalModel
+          keepCurrentModifiedModel
           onMount={handleMount}
           options={{
             readOnly: true,
