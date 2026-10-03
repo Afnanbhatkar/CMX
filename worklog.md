@@ -436,3 +436,25 @@ Stage Summary:
 - Verification gaps (honest): restart-resume of a mid-clone import and a real oversized-archive upload verified at code level only; GitHub token/private-repo path probed via vault/redaction code paths, not a live private clone (no network token available in sandbox)
 - Artifacts: src/server/ingestion/* (9 files), repository-import handler, import+zip routes, ImportDialog.tsx, observability/tracing.ts, instrumentation.ts, security/audit.ts, services/usage-service.ts, schema 22→31 tables, docs (CHANGELOG/CAPABILITIES/PROJECT_SAFETY)
 - No commit made by agents; orchestrator commits + tags codemind-v2/phase-04-repository-import next. STOP after checkpoint.
+
+---
+Task ID: 5
+Agent: Z.ai (orchestrator)
+Task: Adopt uploaded "Codemindx phase 4.tar" as project baseline + fast preview verification
+
+Work Log:
+- User uploaded Codemindx phase 4.tar (git repo snapshot); tar history contains Phase 3 (8a2d0e7) + Phase 4 (9e84424, tag codemind-v2/phase-04-repository-import) — 2 phases ahead of the then-current working tree (Phase 2, 5b622ca)
+- Diffed .env (identical) and package.json (Phase 4 adds @opentelemetry/api, context-async-hooks, core, sdk-trace-base, fflate)
+- Safety: created git bundle backup of the pre-swap repo at upload/pre-phase4-baseline-backup.bundle (preserves orphaned Phase 2 lineage 5b622ca)
+- Stopped old dev server (platform-started processes; sudo unavailable for root parents, killed user-owned PIDs as z); port 3000 freed
+- rsync --delete swap of tar contents over /home/z/my-project excluding runtime dirs (node_modules, .next, dev.log, upload, tool-results, agent-ctx, .zscripts, db) — db/custom.db preserved; .git replaced by tar's full Phase 0-4 history; working tree clean at 9e84424
+- bun install (+5 packages) and bun run db:push — SQLite synced to 31-table Phase 4 schema, Prisma Client regenerated
+- Dev server: first two restart attempts (nohup&, setsid) were reaped between tool calls; stable via node detached spawn (spawn detached:true + unref) — survives across calls
+- Browser verification (agent-browser): initial /app hit Runtime ChunkLoadError from stale Phase 2 .next cache → purged .next, restarted, resolved. Landing "/" renders (nav, hero, CTAs, capability chips, zero console errors); /app workspace renders (top bar with real repo/branch/indexing status, 13-destination rail, overview with honest Available/Planned states); Repository panel shows real file tree incl. Phase 4 ingestion modules; Import dialog fully functional (GitHub/ref/token with never-stored note, honest "Nothing here is simulated"); /api/health healthy (db 3ms, job system ok, SSE ok, postgres honest planned); /api/repositories returns workspace connected (main); mobile 390px: nav drawer + zero horizontal overflow; page footer honors mt-auto contract, gapBelow 0 at page end
+- lint exit 0; dev.log clean after cache purge
+
+Stage Summary:
+- Tar snapshot is now the live baseline: HEAD 9e84424 (Phase 4), tags phase-00 → phase-04 present, worklog carries all 20 prior task entries
+- Preview verified end-to-end on desktop + mobile with zero console errors; all Phase 4 surfaces (import engine UI, honest planned states) visible
+- Rollback path: upload/pre-phase4-baseline-backup.bundle (git clone from bundle restores Phase 2 lineage)
+- Dev server persistence quirk documented: use node detached-spawn pattern for background restarts in this sandbox
