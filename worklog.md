@@ -738,3 +738,26 @@ Work Log:
 Stage Summary:
 - Project restored to exact Phase 8 snapshot (f384d4f) as uploaded by user; environment fully operational (deps, DB, dev server, all APIs healthy)
 - Preview handed to user; awaiting next phase instructions. Agent/Loop real execution remains deferred (user decision); Phase 8B not started in this session.
+
+---
+Task ID: phase-08a
+Agent: Z.ai Code (main)
+Task: PHASE 8A — Advanced AI Composer + Mode System (+ V2.1 memory-aware pipeline & intake contract additions). THIS PHASE ONLY; 8B not started.
+
+Work Log:
+- Read RULES.md first; audited Phase 8 baseline (contracts, composer, use-assistant-run, assistant-service, /api/ai/chat, EditorNavigationService, CommandPalette)
+- Measured the provider transport with direct SDK probes: all requested chat model ids are served by glm-4-plus → gateway catalog lists ONE honest effective model instead of a fake multi-model switcher (RULES §9/§10)
+- Created src/server/llm/llm-gateway.ts — the ONLY provider-SDK seam; listModels/resolveModel/complete with servedModel + usage extraction; new GET /api/llm/models
+- Extended assistant/contracts.ts additively (V2.1): PIPELINE_STAGES += task-contract/memory-retrieval/context-inspector/verification; MEMORY_PRECEDENCE + MemoryRecord/MemoryRetrievalOutcome; TaskContract; IntakeQuestionBatch + INTAKE_QUESTIONS_REQUIRED event; UNCERTAINTY_LEVELS + EvidenceBackedClaim; ContextInspectorSnapshot; GatewayModelDescriptor + real ComposerModelSlot
+- Rebuilt AIComposer: 4-mode segmented control INSIDE the input container; attachments BELOW the text field; real workspace file picker (tree API + 60s TTL, ≤80 rows); FileReferenceChip clicks route through EditorNavigationService (verified: chip click opened package.json in the editor); context selection popover (repo/branch/current-file toggles, honest "—" for selection); model picker rendering the gateway catalog; Stop + global Esc cancel; regenerate; 360px verified with scrollWidth===360
+- use-assistant-run: send() now serializes mode/model/context{repository,branch,currentFile,selectedCode}/wire attachments; stores mode + servedModel echo on the message; ConversationView renders them as chips
+- assistant-service: all model access via LLMGateway; mode-aware honest system prompts (Agent/Loop state plainly that autonomous execution/looping is not connected); evidence-precedence + uncertainty-label instructions live; repository-file attachments re-read server-side via allowlisted readWorkspaceFile (≤3 files, 6k chars) with honest unreadable-file notes (verified: correct answer from real package.json; fake path → model reports UNREADABLE)
+- Fixed transport 1214 (invalid messages): merged all pre-conversation material into ONE assistant preamble (transport rejects consecutive assistant messages); also caught a dropped-conversation bug in the rewrite before re-verification
+- /api/ai/chat schema extended additively (mode/model/selectedCode/attachments) + response echoes mode/servedModel; unknown model ids fail honestly
+- CommandPalette: new "Composer" group (4 mode commands, cycle, attach file, cancel run gated on isGenerating, regenerate gated on last-is-assistant)
+- Verification: agent-browser E2E — all 4 modes serialize + echo (curl-verified ×4), Alt+1/Alt+M shortcuts, palette commands, attach→nav contract, stop + Esc cancel (honest stopped state), model picker honesty, 360px no overflow; bun run lint → 0 errors (1 pre-existing warning); bunx tsc → error set identical to baseline; dev.log clean after debugging
+
+Stage Summary:
+- DoD: composer selects and serializes all four modes ✓; attachments work (real files, real navigation) ✓; keyboard works ✓; no provider hardcoded in UI ✓ (UI reads /api/llm/models only)
+- Discovery recorded: transport serves glm-4-plus regardless of requested id → catalog + picker state this honestly; per-model routing arrives when the transport supports it
+- Committed 272d574; tag codemind-v2/phase-08a-composer. Non-goals respected (no 8B/approval/loop/renderer/mutation). STOPPING here per phase instructions.
