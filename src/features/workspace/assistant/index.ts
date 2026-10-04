@@ -23,6 +23,20 @@ export {
   runCompleted,
   runFailed,
   runCancelled,
+  applyWireEvent,
+  recordFirstEventLatency,
+  noteTransportSeq,
+  getLastRunMetrics,
+  type AssistantRunMetrics,
 } from "./run-adapter";
+export {
+  selectRelevantCategories,
+  activitiesToSteps,
+  activityToStep,
+  buildRunSteps,
+  thoughtForLabel,
+  CATEGORY_META,
+  type RunStepSource,
+} from "./category-engine";
 export { useAssistantEngineSnapshot } from "./use-assistant-engine";
 export { exposeAssistantTooling } from "./expose";

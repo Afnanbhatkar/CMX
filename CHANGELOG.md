@@ -4,6 +4,76 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 8B — Activity Engine + Lattice Loader + Thinking Orb + Thought Chain] — 2026-10-04
+
+The user-visible execution activity engine. Privacy boundary enforced by
+construction: only safe execution summaries ("Understanding request",
+"Searching repository", "Reading files", "Composing response") travel on the
+wire and render in the UI — never hidden model reasoning, private
+deliberation, or secret prompts. NON-GOALS respected: no approval logic, no
+autonomous Loop logic, no chain-of-thought exposure.
+
+### Added
+- **Streaming run surface** `POST /api/assistant/runs`: one real assistant
+  turn streamed as the 8B event contract — every wire event carries a
+  monotonic per-run `seq` (RUN_STARTED → ACTIVITY_STARTED/UPDATED/COMPLETED →
+  SEARCH_RESULT → FILE_REFERENCED → RESPONSE_CHUNK → `result` frame →
+  RUN_COMPLETED / RUN_FAILED; RUN_CANCELLED recorded on client disconnect).
+  RUN_STARTED is written synchronously at stream open (measured server-side
+  ~0ms; client-measured first-event latency 54–86ms, target ≈300ms).
+- **Real backend activity** (assistant-service `onStage` emitter, additive —
+  POST /api/ai/chat behavior unchanged): "Understanding request" (mode +
+  message count), "Searching repository" (REAL Phase 7 hybrid retrieval in
+  search mode — SEARCH_RESULT with hits/topFiles; top file paths attached as
+  repository-retrieval preamble facts), "Reading files" (server-side
+  attachment re-reads with FILE_REFERENCED), "Composing response" (served
+  model + measured latency). APPROVAL_REQUIRED/QUESTION_REQUIRED stay
+  defined-but-never-emitted (honest: no approval logic exists yet).
+- **Category engine** (`category-engine.ts`): selects only the categories a
+  run actually used (Steps/Search/Coding/Testing/Security/Git/Architecture/
+  Deployment), maps engine ActivityNodes → Odyssey chain steps, merges real
+  SEARCH_RESULT/FILE_REFERENCED facts as children, and renders the measured
+  "Thought for Xs" completion label. "Deployment" added additively to the
+  category + ActivityKind vocabularies.
+- **LatticeLoader** — reference-exact native reconstruction: 3×3 grid
+  (6px cells, 2px gap), staggered delays 90/180/270/0/90/180/90/180/270ms,
+  `lattice-on` keyframes (idle .15 → peak 1, 648ms cycle), and the reference
+  rAF stopwatch (`<LatticeLoader label="Thinking" startedAt={…} />` shows
+  measured "X.Xs"). Reduced motion → static diagonal, timer keeps counting
+  (text, not motion); role="status"; pauses when hidden; full cleanup.
+- **ThinkingOrb "solving"** — canvas reconstruction of the supplied
+  `createThinkingOrb` reference: 74px dark pill, 56px visible orb (64px
+  canvas), theme dark, variant classic, speed 1, non-interactive, rendered
+  behind `<ThinkingOrb state="solving" label="Solving…" />`. Self-contained
+  canvas logic (never spreads into chat code), DPR ≤ 1.5, pauses when
+  hidden/offscreen, static frame under reduced motion, full unmount cleanup.
+  Classic idle/thinking/done path unchanged.
+- **ThoughtChain (Odyssey)** — vertical rail + icon + connector, trigger +
+  chevron expand/collapse, active shimmer, "In progress" badge, child
+  detail rows (✓/●/○ safe execution facts like `read_file src/… ✓`). The
+  ACTIVE step starts expanded; completed steps start collapsed unless the
+  user opens them; pending steps stay flat. `collapsible={false}` keeps the
+  flat legacy chain.
+- **Live run view** (ConversationView): the busy message renders the
+  engine-driven chain; LatticeLoader "Thinking" until the first activity
+  completes, then the canvas orb "Solving…". On completion the message
+  persists the real chain + measured chips: "Thought for Xs", "first event
+  Xms", mode, and the gateway-served model.
+- **Run metrics** (run-adapter + `window.__cmxAssistant.lastRunMetrics()`):
+  measured first-event latency, event count, last seq, sequence gaps
+  (transport frame accounted), engine duration, relevant categories, and
+  outcome. Browser-verified run: `{firstEventMs: 53.8, events: 13,
+  lastSeq: 14, seqGaps: 0, durationMs: 5083, categories:
+  ["steps","search"], outcome: "completed"}`.
+
+### Verified (agent-browser, desktop + 360px)
+- Live chain: ✓ Understanding request → ✓ Searching repository (expanded:
+  "14 relevant results" + real top-hit children) → ● Composing response
+  IN PROGRESS → completion chips.
+- Cancel mid-run: message honestly "Stopped"; "Composing response" stays
+  in-progress in the persisted chain (it never completed); Regenerate works.
+- 360px: no horizontal overflow; chips wrap. Console: zero errors.
+
 ## [Phase 7 — Hybrid Search + Hindi/Hinglish] — a real search engine for the workspace
 
 ## [Phase 8A — Advanced AI Composer + Mode System] — 2026-10-04

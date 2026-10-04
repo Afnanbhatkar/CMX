@@ -42,7 +42,8 @@ export type ActivityKind =
   | "security"
   | "git"
   | "architecture"
-  | "finalize";
+  | "finalize"
+  | "deployment";
 
 /** Metadata describing a build-out phase (for status surfaces). */
 export interface PhaseInfo {

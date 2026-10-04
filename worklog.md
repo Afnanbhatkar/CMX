@@ -761,3 +761,28 @@ Stage Summary:
 - DoD: composer selects and serializes all four modes ✓; attachments work (real files, real navigation) ✓; keyboard works ✓; no provider hardcoded in UI ✓ (UI reads /api/llm/models only)
 - Discovery recorded: transport serves glm-4-plus regardless of requested id → catalog + picker state this honestly; per-model routing arrives when the transport supports it
 - Committed 272d574; tag codemind-v2/phase-08a-composer. Non-goals respected (no 8B/approval/loop/renderer/mutation). STOPPING here per phase instructions.
+
+---
+Task ID: phase-8b
+Agent: Z.ai Code (main)
+Task: PHASE 8B — Activity Engine + Lattice Loader + Thinking Orb + Thought Chain (user-visible execution activity; privacy boundary enforced; NON-GOALS respected: no approval logic, no Loop logic, no chain-of-thought).
+
+Work Log:
+- Read RULES.md first; verified git state (8A committed 272d574, tag codemind-v2/phase-08a-composer; clean tree).
+- Explored Phase 8 plumbing: assistant/contracts.ts (AssistantStreamEvent §13), activity-engine.ts (state machine + snapshot), run-adapter.ts, use-assistant-engine.ts, reference components in src/components/ai (placeholder-grade versions), chat run hook + ConversationView.
+- Contracts (additive only): SequencedAssistantEvent (seq on every wire event), SAFE_ACTIVITY_SUMMARIES, ACTIVITY_CATEGORY_LABELS, "deployment" added to ActivityCategory + ActivityKind; ASSISTANT_CONTRACT_VERSION → 2.1.0-phase8b.
+- Backend: assistant-service.runAssistantTurn gained optional onStage emitter (POST /api/ai/chat unchanged): "Understanding request", "Searching repository" (REAL Phase 7 hybrid retrieval in search mode via getSearchIndex + runHybridSearch; SEARCH_RESULT + FILE_REFERENCED; top-5 paths into preamble as retrieval facts), "Reading files" (server-side attachment re-reads), "Composing response" (served model + measured latency), one honest RESPONSE_CHUNK.
+- New route POST /api/assistant/runs (SSE): full 8B event contract with per-run monotonic seq; RUN_STARTED written synchronously at stream open (first-event latency ~0ms server-side); RUN_FAILED/RUN_CANCELLED paths; APPROVAL_REQUIRED/QUESTION_REQUIRED defined but never emitted (no approval logic — honest).
+- Components: LatticeLoader reference-exact rewrite (3×3, 6px cells, 2px gap, staggered delays 90/180/270/0/90/180/90/180/270ms, lattice-on keyframes idle .15→peak 1 cycle 648ms, rAF stopwatch "X.Xs", reduced-motion static diagonal, role=status, hidden-pause, cleanup). ThinkingOrb: added canvas "solving" state (74px pill, 56px visible orb in 64px canvas, classic/dark/speed 1, DPR≤1.5, offscreen/hidden pause, static frame under reduced motion, cleanup; classic path unchanged). ThoughtChain: Odyssey upgrade (children/detail, trigger + chevron expand/collapse, active shimmer, "In progress" badge, ✓/●/○ child rows; active expanded by default, completed collapsed; collapsible=false legacy).
+- Category engine (category-engine.ts): selectRelevantCategories (only what ran), activityToStep/buildRunSteps (merges real SEARCH_RESULT/FILE_REFERENCED into matching rows), thoughtForLabel ("Thought for 8.4s").
+- run-adapter: applyWireEvent + metrics (firstEventMs, events, lastSeq, seqGaps incl. transport-frame accounting, durationMs, categories, outcome) + finalize on local terminal events; expose.ts adds lastRunMetrics + pipelineStages to window.__cmxAssistant.
+- use-assistant-run: switched transport to POST /api/assistant/runs (SSE parse → applyWireEvent), per-message chain synced from engine snapshot (buildRunSteps), first-event latency measured client-side, content from single honest chunk, cancel → RUN_CANCELLED + "stopped", pre-stream failures emit honest local run lifecycle.
+- ConversationView: busy message renders live engine-driven chain + LatticeLoader "Thinking"→canvas orb "Solving…"; completion persists chain + measured chips (Thought for Xs / first event Xms / mode / served model).
+- Fixed during verification: response.results (not .hits) field name; rAF-vs-epoch timer bug (negative stopwatch); stale-metrics ordering at RUN_STARTED; result-frame seq accounting (seqGaps false positive).
+- Verification: bun lint 0 errors (1 pre-existing warning); agent-browser E2E — live chain + solving orb + lattice timer visible, expanded search step shows "14 relevant results" + real top-hit children, cancel mid-run honest "Stopped", 360px no horizontal overflow, zero console/page errors; metrics: firstEventMs 53.8–85, seqGaps 0, outcome completed; /api/ai/chat backward-compat confirmed.
+
+Stage Summary:
+- 8B complete: user-supplied activity references reconstructed natively; live backend activity drives them; first-event latency measured (54–86ms, target ≈300ms met).
+- Files: new src/app/api/assistant/runs/route.ts + src/features/workspace/assistant/category-engine.ts; modified assistant/{contracts,activity-engine(untouched actually—no),run-adapter,expose,index}.ts, chat/{use-assistant-run,ConversationView}.tsx, components/ai/{LatticeLoader,ThinkingOrb,ThoughtChain}.tsx, server/services/assistant-service.ts, features/workspace/types.ts, types/contracts.ts, CHANGELOG.md. ActivityEngine itself unchanged (contract held).
+- Privacy boundary held: only safe summaries on wire/UI; no chain-of-thought, no approval/loop logic (8B non-goals).
+- Next: PHASE 8C (Context Inspector + approval/question UI) — awaiting user go.

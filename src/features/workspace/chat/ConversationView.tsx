@@ -17,8 +17,13 @@ import { Check, Copy, FileCode2, Paperclip, RotateCcw } from "lucide-react";
 
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Attachment, ChatMessage } from "@/features/workspace/types";
+import {
+  buildRunSteps,
+  thoughtForLabel,
+  useAssistantEngineSnapshot,
+} from "@/features/workspace/assistant";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
-import { LatticeLoader, ThoughtChain, ThinkingOrb } from "@/components/ai";
+import { LatticeLoader, ThinkingOrb, ThoughtChain } from "@/components/ai";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -148,6 +153,39 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Live run activity (Phase 8B)                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The current run's backend-driven activity: Thought Chain from the engine
+ * snapshot, with the reference LatticeLoader ("Thinking" + stopwatch) before
+ * the first activity completes and the canvas ThinkingOrb pill ("Solving…")
+ * once real work is running.
+ */
+function RunActivityLive({ startedAt }: { startedAt: number | null }) {
+  const snapshot = useAssistantEngineSnapshot();
+
+  // Only the LIVE run drives this view; history renders from the message's
+  // persisted activity chain.
+  if (snapshot.status !== "running") return null;
+
+  const steps = buildRunSteps(snapshot);
+  const anyCompleted = snapshot.activities.some((a) => a.status === "completed");
+  const stopwatchOrigin = snapshot.startedAt ?? startedAt;
+
+  return (
+    <div className="mb-2 space-y-2" data-testid="run-activity-live">
+      {steps.length > 0 ? <ThoughtChain steps={steps} dense /> : null}
+      {anyCompleted ? (
+        <ThinkingOrb state="solving" label="Solving…" />
+      ) : (
+        <LatticeLoader cellSize={5} label="Thinking" startedAt={stopwatchOrigin} />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Messages                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -207,16 +245,13 @@ function AssistantMessage({
         </time>
       </div>
 
-      {/* Privacy-safe activity steps only (never model reasoning). */}
-      {message.activity && message.activity.length > 0 && (
-        <ThoughtChain steps={message.activity} dense className="mb-2" />
-      )}
+      {/* Phase 8B live run: backend-driven chain + reference indicators
+          (LatticeLoader while thinking, canvas orb once work is running). */}
+      {busy && <RunActivityLive startedAt={Date.parse(message.createdAt) || null} />}
 
-      {busy && (
-        <div className="flex items-center gap-2 py-0.5">
-          <LatticeLoader cellSize={4} label="Composing response" />
-          <span className="text-[13px] text-muted-foreground">Composing response…</span>
-        </div>
+      {/* Persisted activity chain for history (engine-derived, safe only). */}
+      {!busy && message.activity && message.activity.length > 0 && (
+        <ThoughtChain steps={message.activity} dense className="mb-2" />
       )}
 
       {message.state === "complete" && <ChatMarkdown content={message.content} />}
@@ -251,16 +286,36 @@ function AssistantMessage({
       )}
 
       {message.state === "complete" && (
-        <div className="mt-0.5 flex items-center gap-0.5">
+        <div className="mt-0.5 flex flex-wrap items-center gap-0.5">
           <CopyButton text={message.content} />
           {isLast && (
             <RegenerateButton disabled={isGenerating} onRegenerate={onRegenerate} />
           )}
+          {/* Phase 8B measured-run meta — honest numbers only. */}
+          {(() => {
+            const thoughtFor = thoughtForLabel(message.thoughtForMs ?? null);
+            return thoughtFor ? (
+              <span
+                className="ml-1 rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/80"
+                title="Measured total run duration"
+              >
+                {thoughtFor}
+              </span>
+            ) : null;
+          })()}
+          {typeof message.firstEventMs === "number" ? (
+            <span
+              className="rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/80"
+              title="Measured latency to the first visible activity event"
+            >
+              first event {message.firstEventMs}ms
+            </span>
+          ) : null}
           {/* Phase 8A run meta — measured truth only (mode issued, model the
               gateway actually served). Rendered only when present. */}
           {message.mode ? (
             <span
-              className="ml-1 rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/80"
+              className="rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/80"
               title={`Run mode: ${message.mode}`}
             >
               {message.mode}

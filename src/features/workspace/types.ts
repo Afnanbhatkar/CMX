@@ -130,13 +130,26 @@ export interface Attachment {
  * Privacy-safe activity step (ARCHITECTURE.md §8). Structurally identical to
  * `ThoughtStep` from the reference activity components, declared here so the
  * store never depends on component modules.
+ *
+ * Phase 8B: steps can carry a one-line safe outcome and safe execution-fact
+ * children (Odyssey progressive disclosure) — never model reasoning.
  */
+export interface ChatActivityStepChild {
+  id: string;
+  label: string;
+  status: "pending" | "active" | "done" | "error";
+}
+
 export interface ChatActivityStep {
   id: string;
   kind: ActivityKind;
   /** Short system-activity message — never private model reasoning. */
   label: string;
   status: "pending" | "active" | "done" | "error";
+  /** One-line safe outcome ("14 relevant results"). */
+  detail?: string | null;
+  /** Safe tool-summary children (execution facts only). */
+  children?: ChatActivityStepChild[];
 }
 
 export interface ChatMessage {
@@ -154,6 +167,10 @@ export interface ChatMessage {
   mode?: "search" | "code" | "agent" | "loop";
   /** The model the gateway ACTUALLY served for this message (measured). */
   servedModel?: string | null;
+  /** Client-measured ms from send to the first visible activity event (8B). */
+  firstEventMs?: number | null;
+  /** Engine-measured total run duration behind "Thought for Xs" (8B). */
+  thoughtForMs?: number | null;
 }
 
 export interface Conversation {

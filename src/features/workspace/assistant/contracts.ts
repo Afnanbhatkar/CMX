@@ -23,7 +23,7 @@
 /* ------------------------------------------------------------------ */
 
 /** Bumped when a sub-phase extends the contract in a breaking way. */
-export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8";
+export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8b";
 
 /* ------------------------------------------------------------------ */
 /* §1 — Run pipeline (the contract, not the executor)                  */
@@ -221,7 +221,20 @@ export type ActivityCategory =
   | "testing"
   | "security"
   | "git"
-  | "architecture";
+  | "architecture"
+  | "deployment";
+
+/** Display metadata for one activity category (category engine, Phase 8B). */
+export const ACTIVITY_CATEGORY_LABELS: Record<ActivityCategory, string> = {
+  steps: "Steps",
+  search: "Search",
+  coding: "Coding",
+  testing: "Testing",
+  security: "Security",
+  git: "Git",
+  architecture: "Architecture",
+  deployment: "Deployment",
+};
 
 /**
  * Safe tool summaries — the ONLY tool facts allowed inside activity
@@ -397,3 +410,31 @@ export type AssistantStreamEvent =
   | { type: "RUN_COMPLETED"; runId: string; completedAt: number }
   | { type: "RUN_FAILED"; runId: string; error: string; failedAt: number }
   | { type: "RUN_CANCELLED"; runId: string; cancelledAt: number };
+
+/* ------------------------------------------------------------------ */
+/* §13.1 (8B) — Sequenced wire events                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Wire shape of every event emitted by the streaming run surface
+ * (POST /api/assistant/runs, Phase 8B): the contract event PLUS a
+ * monotonic per-run `seq` starting at 1. Every event carries a sequence
+ * number — consumers may rely on ordering and detect gaps defensively.
+ */
+export type SequencedAssistantEvent = AssistantStreamEvent & { seq: number };
+
+/** The safe execution summaries allowed as activity titles (8B §1). */
+export const SAFE_ACTIVITY_SUMMARIES = [
+  "Understanding request",
+  "Searching repository",
+  "Reading files",
+  "Checking dependencies",
+  "Planning implementation",
+  "Writing patch",
+  "Running tests",
+  "Checking security",
+  "Preparing preview",
+  "Composing response",
+] as const;
+
+export type SafeActivitySummary = (typeof SAFE_ACTIVITY_SUMMARIES)[number];

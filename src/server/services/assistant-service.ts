@@ -6,11 +6,17 @@ import {
   LLMGatewayError,
   type GatewayMessage,
 } from "@/server/llm/llm-gateway";
+import { getSearchIndex } from "@/server/search/index/search-index";
+import { runHybridSearch } from "@/server/search/search-service";
 import { withSpan } from "@/server/observability/tracing";
 import { logError, logInfo, logWarn } from "@/server/security/logger";
 import { recordUsage } from "@/server/services/usage-service";
 import type { ActivityKind } from "@/types/contracts";
-import type { ComposerMode } from "@/features/workspace/assistant/contracts";
+import type {
+  ActivityNode,
+  ComposerMode,
+  ResponseSegment,
+} from "@/features/workspace/assistant/contracts";
 
 /**
  * CodeMind X V2 — assistant turn service (Phase 3, spec §4; Phase 8A update).
@@ -75,6 +81,47 @@ export class AssistantError extends Error {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Stage events (Phase 8B) — what the run ACTUALLY does, when it does it */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Safe, real-time stage reports emitted DURING a run when the caller
+ * provides an `onStage` callback (the streaming surface). Every payload is
+ * a privacy-safe execution fact (ARCHITECTURE.md §8) — never model
+ * reasoning. Callers without a callback (POST /api/ai/chat) get the exact
+ * pre-8B behavior.
+ */
+export type AssistantStageEvent =
+  | {
+      type: "ACTIVITY_STARTED";
+      activity: Omit<ActivityNode, "status" | "startedAt" | "completedAt">;
+    }
+  | {
+      type: "ACTIVITY_UPDATED";
+      activityId: string;
+      patch: Partial<Pick<ActivityNode, "title" | "summary" | "metadata">>;
+    }
+  | { type: "ACTIVITY_COMPLETED"; activityId: string; summary: string | null }
+  | { type: "SEARCH_RESULT"; query: string; hits: number; topFiles: string[] }
+  | { type: "FILE_REFERENCED"; path: string; line: number | null }
+  | { type: "RESPONSE_CHUNK"; segment: ResponseSegment };
+
+export type AssistantStageEmitter = (event: AssistantStageEvent) => void;
+
+/** Safest titles allowed for emitted activities (mirrors the 8B contract). */
+const STAGE_TITLES = {
+  understanding: "Understanding request",
+  search: "Searching repository",
+  readingFiles: "Reading files",
+  composing: "Composing response",
+} as const;
+
+/** How many top search hits are attached as repository-retrieval facts. */
+const RETRIEVAL_TOP_FILES = 5;
+/** Minimum query length before retrieval actually runs. */
+const RETRIEVAL_MIN_QUERY = 3;
+
 const COMPLETION_MAX_ATTACHMENTS = 3;
 /** Per-attached-file content cap (chars) — keeps prompts bounded. */
 const ATTACHMENT_CHAR_BUDGET = 6_000;
@@ -119,12 +166,16 @@ const SYSTEM_PROMPT = [
 const DEFAULT_MODE: ComposerMode = "search";
 
 /** async pre-pass that resolves attached file contents (honest failures). */
-async function readAttachedFiles(paths: string[]): Promise<string[]> {
+async function readAttachedFiles(
+  paths: string[],
+  onStage?: AssistantStageEmitter,
+): Promise<string[]> {
   const blocks: string[] = [];
   for (const path of paths) {
     try {
       const result = await readWorkspaceFile(path);
       if (result.ok) {
+        onStage?.({ type: "FILE_REFERENCED", path, line: null });
         const truncated =
           result.file.truncated || result.file.content.length > ATTACHMENT_CHAR_BUDGET;
         const content = truncated
@@ -150,15 +201,102 @@ async function readAttachedFiles(paths: string[]): Promise<string[]> {
 }
 
 /**
+ * Real repository retrieval (Phase 8B): run the Phase 7 hybrid search over
+ * the workspace for the user's latest query. Emits the honest search
+ * activity + SEARCH_RESULT + FILE_REFERENCED events, and returns the top
+ * file paths (PATHS ONLY — content still comes exclusively from explicit
+ * attachments). Any failure degrades gracefully: the run continues without
+ * retrieval, and the failure is reported honestly in the activity.
+ */
+async function runRepositoryRetrieval(
+  query: string,
+  onStage: AssistantStageEmitter,
+): Promise<string[]> {
+  const activityId = "search-repository";
+  onStage?.({
+    type: "ACTIVITY_STARTED",
+    activity: {
+      id: activityId,
+      kind: "search",
+      title: STAGE_TITLES.search,
+      summary: null,
+      metadata: null,
+      children: [],
+    },
+  });
+
+  try {
+    const { index } = await getSearchIndex();
+    const response = await runHybridSearch(index, { query, limit: 14, mode: "auto" });
+    if (!response.ok) {
+      onStage?.({
+        type: "ACTIVITY_COMPLETED",
+        activityId,
+        summary: "Search unavailable this run",
+      });
+      return [];
+    }
+
+    const topFiles = [...new Set(response.results.map((h) => h.file))].slice(0, RETRIEVAL_TOP_FILES);
+    onStage?.({
+      type: "SEARCH_RESULT",
+      query: response.query.normalized || response.query.original,
+      hits: response.results.length,
+      topFiles,
+    });
+    for (const path of topFiles.slice(0, 3)) {
+      onStage?.({ type: "FILE_REFERENCED", path, line: null });
+    }
+    onStage?.({
+      type: "ACTIVITY_COMPLETED",
+      activityId,
+      summary:
+        response.results.length > 0
+          ? `${response.results.length} relevant result${response.results.length === 1 ? "" : "s"}`
+          : "No relevant results",
+    });
+    return topFiles;
+  } catch (error) {
+    logWarn("assistant: repository retrieval failed (run continues)", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    onStage?.({
+      type: "ACTIVITY_COMPLETED",
+      activityId,
+      summary: "Search failed this run — continued without retrieval",
+    });
+    return [];
+  }
+}
+
+/**
  * Build the SDK message list. ALL pre-conversation material (system
  * contract, workspace facts, attached files, selection, mode prompts) is
  * merged into ONE assistant-role preamble: the transport rejects
  * consecutive assistant messages, and one preamble block keeps the wire
  * shape identical to the pre-8A conversation ([assistant, ...history]).
  */
-async function buildSdkMessages(input: AssistantTurnInput): Promise<GatewayMessage[]> {
+async function buildSdkMessages(
+  input: AssistantTurnInput,
+  onStage?: AssistantStageEmitter,
+): Promise<GatewayMessage[]> {
   const mode = input.mode ?? DEFAULT_MODE;
   const preambleParts: string[] = [SYSTEM_PROMPT];
+
+  const activityId = "understand-request";
+  if (onStage) {
+    onStage({
+      type: "ACTIVITY_STARTED",
+      activity: {
+        id: activityId,
+        kind: "steps",
+        title: STAGE_TITLES.understanding,
+        summary: null,
+        metadata: null,
+        children: [],
+      },
+    });
+  }
 
   const facts: string[] = [];
   if (input.context?.repository) {
@@ -178,18 +316,52 @@ async function buildSdkMessages(input: AssistantTurnInput): Promise<GatewayMessa
 
   // Attached repository files are RE-READ server-side from the real,
   // allowlisted workspace — a client-claimed path that cannot be read is
-  // reported honestly, never faked.
+  // reported honestly, never faked. The reads are real work and are
+  // reported as the "Reading files" activity with FILE_REFERENCED events.
   const filePaths =
     input.context?.attachments
       ?.filter((a) => a.kind === "repository-file" && typeof a.path === "string" && a.path.trim().length > 0)
       .map((a) => a.path!.trim())
       .slice(0, COMPLETION_MAX_ATTACHMENTS) ?? [];
   if (filePaths.length > 0) {
-    const blocks = await readAttachedFiles(filePaths);
+    const readingId = "reading-files";
+    onStage?.({
+      type: "ACTIVITY_STARTED",
+      activity: {
+        id: readingId,
+        kind: "coding",
+        title: STAGE_TITLES.readingFiles,
+        summary: null,
+        metadata: null,
+        children: [],
+      },
+    });
+    const blocks = await readAttachedFiles(filePaths, onStage);
+    onStage?.({
+      type: "ACTIVITY_COMPLETED",
+      activityId: readingId,
+      summary: `${blocks.filter((b) => !b.includes("could NOT be read")).length} of ${filePaths.length} file${filePaths.length === 1 ? "" : "s"} read`,
+    });
     if (blocks.length > 0) {
       preambleParts.push(
         `Attached repository context (real file content served by the workspace; evidence precedence tier 2):\n\n${blocks.join("\n\n")}`,
       );
+    }
+  }
+
+  // Real repository retrieval (Phase 8B): the search-mode stage of the
+  // memory-aware pipeline. Top hits are attached as PATHS ONLY — content
+  // still comes exclusively from explicit attachments.
+  if (onStage && mode === "search") {
+    const lastUser = [...input.messages].reverse().find((m) => m.role === "user");
+    const query = lastUser?.content.trim() ?? "";
+    if (query.length >= RETRIEVAL_MIN_QUERY) {
+      const topFiles = await runRepositoryRetrieval(query, onStage);
+      if (topFiles.length > 0) {
+        preambleParts.push(
+          `Repository retrieval (hybrid search top hits for this query — paths only, content not loaded): ${topFiles.join(", ")}. Cite these real paths when relevant; do not invent paths outside them.`,
+        );
+      }
     }
   }
 
@@ -202,6 +374,14 @@ async function buildSdkMessages(input: AssistantTurnInput): Promise<GatewayMessa
 
   // Mode contract — last in the preamble so it frames the whole turn.
   preambleParts.push(MODE_PROMPTS[mode].join("\n"));
+
+  // "Understanding request" genuinely completes here: the request was read,
+  // the mode contract and all context were assembled.
+  onStage?.({
+    type: "ACTIVITY_COMPLETED",
+    activityId: "understand-request",
+    summary: `${mode} mode · ${input.messages.length} message${input.messages.length === 1 ? "" : "s"} in context`,
+  });
 
   return [
     { role: "assistant", content: preambleParts.join("\n\n") },
@@ -224,9 +404,23 @@ async function buildSdkMessages(input: AssistantTurnInput): Promise<GatewayMessa
  */
 export async function runAssistantTurn(
   input: AssistantTurnInput,
+  onStage?: AssistantStageEmitter,
 ): Promise<{ content: string; servedModel: string | null }> {
   const mode = input.mode ?? DEFAULT_MODE;
-  const sdkMessages = await buildSdkMessages(input);
+  const sdkMessages = await buildSdkMessages(input, onStage);
+
+  const composingId = "composing-response";
+  onStage?.({
+    type: "ACTIVITY_STARTED",
+    activity: {
+      id: composingId,
+      kind: "steps",
+      title: STAGE_TITLES.composing,
+      summary: null,
+      metadata: null,
+      children: [],
+    },
+  });
 
   const startedAt = Date.now();
   let result;
@@ -246,6 +440,16 @@ export async function runAssistantTurn(
     throw new AssistantError("failed", "The assistant request failed. You can retry.");
   }
   const latencyMs = Date.now() - startedAt;
+
+  onStage?.({
+    type: "ACTIVITY_COMPLETED",
+    activityId: composingId,
+    summary: `served by ${result.servedModel ?? "gateway"} (${latencyMs}ms)`,
+  });
+  // The complete answer arrives as ONE honest chunk — the gateway has no
+  // token-streaming API yet, so nothing is ever re-dressed as chunked
+  // streaming.
+  onStage?.({ type: "RESPONSE_CHUNK", segment: { kind: "markdown", text: result.content } });
 
   logInfo("assistant: completion ok", {
     mode,
