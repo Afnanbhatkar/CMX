@@ -809,3 +809,33 @@ Stage Summary:
 - Privacy boundary held: snapshot/memory/approval payloads are execution facts only; no chain-of-thought anywhere.
 - Honest limits: approval card appears only when the model emits the protocol block (glm-4-plus compliance is stochastic; fallback parser added; no block → no card, never fabricated); blast radius intentionally empty until Phase 10/15; token numbers are chars÷4 estimates by design; paused runs are memory-resident (server restart fails them honestly).
 - Committed: tag codemind-v2/phase-08c-context-approval. Next: PHASE 8.5 (Response Engine v2) — awaiting user go. STOPPING per phase instructions.
+
+---
+Task ID: baseline-8c-restore
+Agent: Z.ai Code (main)
+Task: Adopt uploaded "Codemindx phase 8.c.tar" as the live project baseline (user instruction: "isse baseline rakho and preview"), verify the restored baseline end-to-end in a real browser, then STOP and await the next phase.
+
+Work Log:
+- Read RULES.md first (governance baseline V2.1); audited pre-restore git state: sandbox repo HEAD 5b622ca ("Phase 2" label, but tree carried 8A/8B content, 198 tracked files, rewritten history, tags only phase-00→02) — confirmed the uploaded tar is the authentic superset baseline.
+- Extracted tar to /tmp/phase8c-inspect for audit: HEAD e287d4f "Phase 8C — Context Inspector + context controls + Memory Used + ApprovalCard + BlastRadiusSlot + question flow", full history 247ec7d→e287d4f, tags phase-00 through codemind-v2/phase-08c-context-approval, clean status; package.json dev script (next dev -p 3000 | tee dev.log) and .env DATABASE_URL verified sandbox-compatible; no node_modules in tar.
+- Non-destructive backups before replace (RULES §1/§2): git bundle upload/pre-phase8c-baseline-backup.bundle (--all, verified complete history) + db/custom.db.bak-pre8c.
+- Replaced project content (preserved upload/), extracted tar in place → HEAD now e287d4f, tag codemind-v2/phase-08c-context-approval present, clean tree.
+- bun install (858 packages, 3.92s); bun run db:push (custom.db recreated, schema in sync, Prisma Client generated); dev server started — Ready in 1165ms, Next.js 16.1.3 Turbopack.
+- Agent Browser end-to-end verification (all fresh, zero fixes needed):
+  - Home page renders; Workspace shell + four-panel IDE (sidebar/chats, composer, explorer, editor dock, terminal) render clean.
+  - Assistant golden path (Search mode): run completed with ThoughtChain (Understanding request → Searching repository → Composing response), "Thought for 4.0s", "first event 103ms", honest chips (SEARCH · glm-4-plus).
+  - Memory Used: "Memory used: 3" chip → reveal dialog "3 of 3 enabled", each memory with tier/confidence/source/evidence anchor (worklog.md#task-*, CHANGELOG.md#-phase-8c-…)/matched terms + per-memory disable switches + tier-3 note.
+  - Context Inspector: "5 files · 10 items ~267 tok · 1% of budget" + budget bar (1,070/96,000 chars est.); per-entry Pin/Replace/Remove/Inspect + retrieval source+reason ("hybrid retrieval hit (rank 1, confidence high) — symbol name contains 'project'").
+  - Approval flow (Code mode): "modify src/lib/safe-exit.ts: add logMode" → model emitted codemind-approval-request fence → ApprovalCard rendered (WHAT/FILES/WHY/PERMISSION/TESTS "none specified by the proposal"/SECURITY) → Review expanded BlastRadiusSlot ("RESERVED · PHASE 10/15", 4 slots "no data yet") → Approve → banner "Approved — decision recorded. ChangeSet application is not connected in this build; no files were modified." Also verified honest no-fabrication: a query without a modification proposal → no card.
+  - Question flow: ambiguous query "improve the search ranking logic in this repository" → run paused ("Paused — the assistant needs a decision", "I found 3 matching implementations for this change. Which one should I work with?" with 3 real candidate-file options + custom answer + Resume disabled until answered) → selected editor-navigation.ts → Resume run → completed and the resumed response used the chosen file, emitting a follow-up ApprovalCard (Medium risk, expectedTests listed). Dev log: "assistant run: intake answers delivered", run completed.
+  - Pin flow: pinned src/features/workspace/editor-navigation.ts → inspector badge "1 pinned" → next run entry shows "PINNED · pinned by you — included every run (first 6000 of 12294 chars (budget-capped))".
+  - Remove flow: removed src/lib/server/git-blame.ts → "Removed (1) — filtered from retrieval" section with explicit Restore; follow-up git-blame query returned 14 results with no hidden-note (removed file genuinely not in top hits — honest reporting, no fake evidence); Restore click verified.
+  - Mobile 360×740: no horizontal overflow (scrollWidth 360 = viewport 360), all panels stack correctly, Context Inspector + composer accessible; desktop screenshot confirms full inspector with pinned/retrieval entries.
+  - Console: zero errors/warnings (only Fast Refresh noise). Dev log: clean — runs complete, usage/activities/audit inserts OK, servedModel glm-4-plus, no runtime errors.
+- bun run lint: 0 errors (1 pre-existing baseline warning, react-hooks/incompatible-library on virtualizer). Working tree clean at e287d4f; no code modifications made in this task.
+
+Stage Summary:
+- Baseline switched: sandbox is now the authentic Phase 8C repo (HEAD e287d4f, all phase tags 00→08c). Previous sandbox state preserved at upload/pre-phase8c-baseline-backup.bundle (+ db/custom.db.bak-pre8c).
+- DoD of Phase 8C re-verified independently on this machine: context inspectable ✓, approval actionable ✓ (honest recorded-decision banner, nothing applied), questions pause execution ✓ (pause→ask→resume browser-verified), pin/remove ledger enforced server-side ✓, mobile 360px clean ✓, zero console errors ✓.
+- Honest notes: "Indexing unavailable" badge shows in the workspace header (ingestion indexing capability reports unavailable in this sandbox — honest degradation per RULES §10; does not affect assistant runs). One cosmetic observation: when the model emits the approval fence, the raw fence can still appear as a code block above the rendered ApprovalCard in some responses (card itself renders and works; baseline behavior left untouched — no code modified in a baseline-adoption task).
+- NO code changes made; nothing to commit (tree clean at e287d4f, tag codemind-v2/phase-08c-context-approval already on HEAD). Screenshots: /tmp/verify-8c-desktop-context-inspector.png, /tmp/verify-8c-desktop-approval.png, /tmp/verify-8c-mobile-360.png. STOPPING — awaiting next phase from user.
