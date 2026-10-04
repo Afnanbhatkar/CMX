@@ -713,3 +713,28 @@ Work Log:
 Stage Summary:
 - Phase 8 parent complete per partition: the typed integration contract (events, activity model + state machine, categories, composer modes, approval/question payloads, response segments, pipeline stages) exists, the ActivityEngine is real and enforced, and the live chat run already flows through it honestly. Sub-phases have clean seams: 8A renders composer controls from ComposerMode/Attachment contracts, 8B renders from useAssistantEngineSnapshot, 8C consumes ApprovalRequest/ClarifyQuestion payloads, 8.5 introduces real RESPONSE_CHUNK streaming into the same engine, 8.75 builds on the editor foundations.
 - No fabricated streaming, no fabricated model selection, no hidden reasoning anywhere. No Prisma/schema/data changes.
+
+---
+Task ID: restore-phase8
+Agent: Z.ai Code (main)
+Task: Restore CodeMind X project from uploaded "Codemindx phase 8.tar" snapshot, run it, and hand over preview to user before next phase.
+
+Work Log:
+- Backed up pre-restore workspace (was at Phase 2 state) to /tmp/phase2-state-backup.bundle
+- Cleaned old Phase 2 working tree; extracted Codemindx phase 8.tar (full working tree + .git) into /home/z/my-project
+- Verified git integrity: HEAD = f384d4f (Phase 8 V2.1 partition), all 12 tags restored (phase-00 … phase-08-ai-assistant + v2.1 foundations)
+- bun install (30 packages synced: monaco-editor, tree-sitter wasms, sucrase)
+- prisma db:push → fresh SQLite db/custom.db created, Prisma Client v6.19.2 generated
+- Restarted dev server (next dev -p 3000), Ready in 1088ms
+- Agent Browser end-to-end verification:
+  - Landing page (/) renders: hero, nav, shader background, footer at bottom
+  - Workspace (/app) loads with Overview panel
+  - Assistant panel: New Chat → message sent → full run completed (activity chain "Reading your request" → "Composing response", streamed answer, Completed badge) via POST /api/ai/chat 200
+  - Code Search: hybrid query "activity engine events" → 30 results in 17.39ms, confidence chips (High confidence/Keyword/Symbol/Semantic), why-matched reasons, query contract chips (lang/repo/scope)
+  - Repository panel: file list + read-only syntax-highlighted file preview (real file API)
+  - Mobile 390x844: sidebar collapses to top bar, content stacks; landing footer OK
+  - Zero browser console errors, zero page errors, dev.log clean
+
+Stage Summary:
+- Project restored to exact Phase 8 snapshot (f384d4f) as uploaded by user; environment fully operational (deps, DB, dev server, all APIs healthy)
+- Preview handed to user; awaiting next phase instructions. Agent/Loop real execution remains deferred (user decision); Phase 8B not started in this session.
