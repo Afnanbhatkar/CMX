@@ -18,7 +18,8 @@
   --cmx-ink-2: var(--muted-foreground, #8b8b88);
   --cmx-line: var(--border-subtle, #333333);
   --cmx-accent: var(--primary, #7b9cff);
-  --cmx-danger: var(--danger, #f87171);
+  --cmx-danger: var(--danger, #ef6b6b);
+  --cmx-warn: var(--warning, #e0b050);
   --cmx-success: var(--success, #4ade80);
 }
 
@@ -189,22 +190,17 @@
 }
 
 /* CSS fallback orb — same 22px footprint; no canvas, no WebGL, no
-   network. Subtle warm core; a soft breathing under motion only. */
+   network. EXACT prototype fallback: ink core over the inset surface
+   with a soft breathing under motion only. */
 .cmx-act-orb-fallback {
   width: 22px;
   height: 22px;
   border-radius: 50%;
   flex: none;
+  display: block;
   background:
-    radial-gradient(
-      circle at 38% 32%,
-      #ffc857 0%,
-      #ffc857 14%,
-      #d98e4a 46%,
-      #8a3413 78%,
-      #4c1d07 100%
-    );
-  box-shadow: inset 0 -2px 4px rgba(0, 0, 0, 0.4);
+    radial-gradient(circle at 36% 32%, var(--cmx-ink-2), transparent 72%),
+    var(--cmx-inset);
 }
 
 .cmx-act-orb-fallback[data-breathing="true"] {
@@ -212,13 +208,8 @@
 }
 
 @keyframes cmx-act-breathe {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
   50% {
-    opacity: 0.72;
+    opacity: 0.55;
   }
 }
 
@@ -305,13 +296,35 @@
   min-height: 0;
 }
 
-/* ~40vh internal scroll while the run is active; newest-follow. */
+/* Timeline scroll — prototype behavior: capped + internally scrollable
+   while the run is ACTIVE (newest-follow); final/history chains render a
+   taller cap so long timelines stay navigable without swallowing the
+   whole chat panel. Overscroll is contained so wheel chains stop here. */
 .cmx-act-timeline-scroll {
-  max-height: 40vh;
+  max-height: 70vh;
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: thin;
   scrollbar-color: var(--cmx-line) transparent;
   overscroll-behavior: contain;
+}
+
+.cmx-act[data-active="true"] .cmx-act-timeline-scroll {
+  max-height: 40vh;
+}
+
+/* WebKit scrollbar — thin, subtle, same palette. */
+.cmx-act-timeline-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.cmx-act-timeline-scroll::-webkit-scrollbar-thumb {
+  background: var(--cmx-line);
+  border-radius: 999px;
+}
+
+.cmx-act-timeline-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .cmx-act-timeline {
@@ -370,9 +383,9 @@
   box-shadow: inset 0 0 0 1.5px var(--cmx-ink-2);
 }
 
+/* Waiting dot — the prototype's amber attention tone. */
 .cmx-act-dot[data-status="waiting"] {
-  background: var(--cmx-inset);
-  box-shadow: inset 0 0 0 1.5px var(--cmx-accent);
+  background: var(--cmx-warn);
 }
 
 .cmx-act-item-title {
@@ -398,6 +411,73 @@
   font-size: 12px;
   color: var(--cmx-ink-2);
   overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ */
+/* Collapsible child list (files under search/read rows)               */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-children {
+  min-width: 0;
+  margin-top: 1px;
+}
+
+.cmx-act-children-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+  padding: 1px 2px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--cmx-ink-2);
+  font: inherit;
+}
+
+.cmx-act-children-toggle:hover {
+  color: var(--cmx-ink);
+  background: color-mix(in srgb, var(--cmx-ink-2) 10%, transparent);
+}
+
+.cmx-act-children-toggle:focus-visible {
+  outline: 1px solid var(--cmx-accent);
+  outline-offset: 1px;
+}
+
+.cmx-act-children-chevron {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  transition: transform 200ms ease;
+}
+
+.cmx-act-children-chevron[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.cmx-act-children-count {
+  margin-left: 2px;
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  opacity: 0.85;
+}
+
+/* grid-rows collapse — same ease family as the chain body. */
+.cmx-act-child-clip {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 250ms ease-out;
+}
+
+.cmx-act-child-clip[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.cmx-act-child-clip > .cmx-act-child-clip-inner {
+  overflow: hidden;
+  min-height: 0;
 }
 
 .cmx-act-child-list {
@@ -519,6 +599,11 @@ button.cmx-act-earlier:focus-visible {
     opacity: var(--idle);
   }
 
+  .cmx-act-children-chevron,
+  .cmx-act-child-clip {
+    transition: none;
+  }
+
   /* A static diagonal of three lit cells reads "active" without motion. */
   .cmx-act-cell:nth-child(1),
   .cmx-act-cell:nth-child(5),
@@ -569,5 +654,10 @@ button.cmx-act-earlier:focus-visible {
 
   .cmx-act-dot {
     forced-color-adjust: none;
+  }
+
+  .cmx-act-orb-fallback {
+    background: Canvas;
+    box-shadow: inset 0 0 0 1.5px CanvasText;
   }
 }

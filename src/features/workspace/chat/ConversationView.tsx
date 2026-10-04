@@ -10,7 +10,7 @@
  * real response arrives, fails, or is stopped.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
 import { format } from "date-fns";
 import { Check, Copy, FileCode2, Paperclip, RotateCcw } from "lucide-react";
@@ -27,7 +27,6 @@ import {
 import { useRunActivity } from "@/features/workspace/chat/activity/use-run-activity";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
   TooltipContent,
@@ -214,8 +213,8 @@ function RunActivityLive({
 
 function UserMessage({ message }: { message: ChatMessage }) {
   return (
-    <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-lg border border-border-subtle bg-surface-elevated p-2.5">
+    <div className="flex min-w-0 justify-end">
+      <div className="max-w-[85%] min-w-0 rounded-lg border border-border-subtle bg-surface-elevated p-2.5">
         <div className="mb-1 flex items-center justify-end gap-2">
           <time dateTime={message.createdAt} className="text-[10px] text-muted-foreground/70">
             {formatTime(message.createdAt)}
@@ -231,7 +230,7 @@ function UserMessage({ message }: { message: ChatMessage }) {
             ))}
           </div>
         )}
-        <div className="whitespace-pre-wrap text-[13px] leading-relaxed">
+        <div className="whitespace-pre-wrap break-words text-[13px] leading-relaxed">
           {message.content}
         </div>
       </div>
@@ -266,7 +265,7 @@ function AssistantMessage({
   };
 
   return (
-    <div className="max-w-[92%]">
+    <div className="max-w-[92%] min-w-0">
       {/* Phase 8D: the real-time activity chain IS the message header — the
           old "Assistant" heading/status presentation is intentionally gone. */}
 
@@ -386,54 +385,236 @@ function AssistantMessage({
 /* Conversation view                                                   */
 /* ------------------------------------------------------------------ */
 
+/** Distance (px) from the bottom inside which auto-follow stays active. */
+const NEAR_BOTTOM_PX = 140;
+/** Padding above a message when it is anchored to the viewport top. */
+const ANCHOR_PAD_PX = 8;
+/** Breathing room added under a just-anchored question while generating. */
+const ANCHOR_SPACER_BUFFER_PX = 32;
+/** How far the user may drift from the anchor before it is left alone. */
+const WANDER_TOLERANCE_PX = 600;
+
+/**
+ * Native scroll host (deliberately NOT Radix ScrollArea): the Radix
+ * viewport wraps content in a `display: table` sizing element which makes
+ * long chat content size to max-content — text/code stopped wrapping and
+ * nested scrollable regions (the activity chain's 40vh timeline) broke.
+ * A plain overflow host keeps wrapping native and lets the chain's own
+ * scroller capture the wheel first, chaining to the chat only at its ends.
+ *
+ * Scroll choreography (ChatGPT/Claude-style):
+ * - sending a message anchors THAT user message to the TOP of the
+ *   viewport — the question is the first thing visible, older chat has
+ *   scrolled up out of view;
+ * - while content grows, the view auto-follows the bottom ONLY when the
+ *   user is already near the bottom (never fights an anchored view);
+ * - switching conversations opens at the bottom, instantly.
+ */
 export function ConversationView({ conversationId }: ConversationViewProps) {
   const conversation = useWorkspaceStore(
     (s) => s.conversations.find((c) => c.id === conversationId) ?? null,
   );
   const { regenerate, isGenerating } = useAssistantRun();
   const prefersReduced = useReducedMotion();
-  const scrollHostRef = useRef<HTMLDivElement | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const nearBottomRef = useRef(true);
+  /** Count already attributed to the current conversation (no anchors for history). */
+  const prevCountRef = useRef<number | null>(null);
+  /** Set by the switch effect; consumed by the anchor effect (same commit). */
+  const resetAnchorContextRef = useRef(false);
+  /** Last anchor target — the re-anchor point when the spacer collapses. */
+  const lastAnchorTargetRef = useRef<number | null>(null);
+  /**
+   * Generation spacer: extra scrollable room BELOW the newest message so a
+   * just-sent question can anchor at the TOP of the viewport even though
+   * the response has not grown yet (the ChatGPT/Claude behavior). Removed
+   * (with scroll compensation) when the run reaches a terminal state.
+   */
+  const [anchorSpacer, setAnchorSpacer] = useState(0);
+  /** Previous spacer height — owned EXCLUSIVELY by the spacer layout effect. */
+  const prevSpacerRef = useRef(0);
+  const pendingAnchorTargetRef = useRef<number | null>(null);
 
   const messages = conversation?.messages ?? [];
   const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
 
-  /* Auto-scroll to the newest content when it actually changes. */
+  /** Keep the near-bottom flag true only while the user really is there. */
+  const handleScroll = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    nearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+  }, []);
+
+  /**
+   * Render-phase adjustment (the sanctioned "derive state from changing
+   * inputs" pattern — STATE only; refs are never touched during render):
+   * when the conversation switches or the run reaches a terminal state,
+   * the generation spacer resets HERE so React re-renders once with
+   * consistent values. The ref-based context resets happen in the effects
+   * below.
+   */
+  const runIsTerminal =
+    lastMessage?.state === "complete" ||
+    lastMessage?.state === "error" ||
+    lastMessage?.state === "stopped";
+  const [spacerGate, setSpacerGate] = useState({
+    conversationId,
+    terminal: runIsTerminal,
+  });
+  const [switchSeq, setSwitchSeq] = useState(0);
+  if (
+    spacerGate.conversationId !== conversationId ||
+    spacerGate.terminal !== runIsTerminal
+  ) {
+    const switched = spacerGate.conversationId !== conversationId;
+    setSpacerGate({ conversationId, terminal: runIsTerminal });
+    if (switched) setSwitchSeq((seq) => seq + 1);
+    if (switched || runIsTerminal) {
+      if (anchorSpacer !== 0) setAnchorSpacer(0);
+    }
+  }
+
+  /** Terminal run → no pending anchor may survive into the next run. */
   useEffect(() => {
-    const viewport = scrollHostRef.current?.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]",
+    if (!runIsTerminal) return;
+    pendingAnchorTargetRef.current = null;
+  }, [runIsTerminal]);
+
+  /**
+   * Conversation switch → reset the anchor context + jump to the bottom.
+   * DOM/ref work only; the anchor effect consumes the context reset flag
+   * in this same commit (declared after this effect).
+   */
+  useEffect(() => {
+    if (switchSeq === 0) return; // mount — history opens via auto-follow
+    nearBottomRef.current = true;
+    resetAnchorContextRef.current = true;
+    lastAnchorTargetRef.current = null;
+    const el = scrollerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [switchSeq]);
+
+  /**
+   * New user message (appended AFTER mount) → anchor it to the top of the
+   * viewport. When the document is too short to scroll that far, a
+   * generation spacer is reserved below so the anchor lands exactly; the
+   * spacer collapses (scroll-compensated) once the run finishes. History
+   * on mount/conversation-switch never anchors.
+   */
+  useEffect(() => {
+    const previous = prevCountRef.current;
+    prevCountRef.current = messages.length;
+    // A conversation switch landed in this commit: rebase the anchor
+    // boundary on the new conversation's history — never anchor it.
+    if (resetAnchorContextRef.current) {
+      resetAnchorContextRef.current = false;
+      return;
+    }
+    if (previous === null || messages.length <= previous) return;
+    const added = messages.slice(previous);
+    const newUserMessage = added.find((m) => m.role === "user");
+    if (!newUserMessage) return;
+    const scroller = scrollerRef.current;
+    const element = scroller?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(newUserMessage.id)}"]`,
     );
-    if (!viewport) return;
-    viewport.scrollTo({
-      top: viewport.scrollHeight,
+    if (!scroller || !element) return;
+    nearBottomRef.current = false;
+    const target = Math.max(0, element.offsetTop - ANCHOR_PAD_PX);
+    lastAnchorTargetRef.current = target;
+    const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+    if (target <= maxScroll) {
+      // Enough room below already — anchor directly, no spacer needed.
+      pendingAnchorTargetRef.current = null;
+      scroller.scrollTo({
+        top: target,
+        behavior: prefersReduced ? "auto" : "smooth",
+      });
+      return;
+    }
+    // Reserve the missing room, then anchor once it exists (layout effect).
+    pendingAnchorTargetRef.current = target;
+    setAnchorSpacer(target - maxScroll + ANCHOR_SPACER_BUFFER_PX);
+  }, [messages, prefersReduced]);
+
+  /**
+   * Spacer transitions — ONE owner: on growth it performs the pending
+   * anchor (pre-paint, no flicker); on shrink (run finished — the answer
+   * now occupies the reserved room) it RE-ANCHORS the question instead of
+   * letting the browser clamp-jump the view downward. If the user has
+   * scrolled far away from the anchor, their position is respected.
+   */
+  useLayoutEffect(() => {
+    const previous = prevSpacerRef.current;
+    prevSpacerRef.current = anchorSpacer;
+    const el = scrollerRef.current;
+    if (!el) return;
+    if (anchorSpacer < previous) {
+      const desired = lastAnchorTargetRef.current;
+      const wandered = desired === null || el.scrollTop < desired - WANDER_TOLERANCE_PX;
+      if (!wandered) {
+        el.scrollTop = Math.min(desired, el.scrollHeight - el.clientHeight);
+      }
+    }
+    const target = pendingAnchorTargetRef.current;
+    if (target === null) return;
+    pendingAnchorTargetRef.current = null;
+    el.scrollTo({
+      top: target,
       behavior: prefersReduced ? "auto" : "smooth",
     });
-  }, [messages.length, lastMessage?.state, lastMessage?.content, prefersReduced]);
+  }, [anchorSpacer, prefersReduced]);
+
+  /**
+   * Auto-follow the newest content — only when the user is near the bottom.
+   * At a TERMINAL state this effect stands down: the final viewport position
+   * belongs to the spacer collapse re-anchor (the layout effect above), so
+   * the two never fight over the scroll position.
+   */
+  useEffect(() => {
+    if (runIsTerminal) return;
+    if (!nearBottomRef.current) return;
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: prefersReduced ? "auto" : "smooth",
+    });
+  }, [messages.length, lastMessage?.state, lastMessage?.content, runIsTerminal, prefersReduced]);
 
   return (
-    <div ref={scrollHostRef} className="min-h-0 flex-1">
-      <ScrollArea className="h-full">
-        <div className="space-y-4 p-3" aria-live="polite">
-          {messages.map((message, index) =>
-            message.role === "user" ? (
-              <UserMessage key={message.id} message={message} />
-            ) : (
+    <div
+      ref={scrollerRef}
+      onScroll={handleScroll}
+      data-testid="chat-scroll-host"
+      className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scrollbar-color:var(--border-subtle)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border-subtle [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-1.5"
+    >
+      <div className="relative w-full min-w-0 space-y-4 p-3" aria-live="polite">
+        {messages.map((message, index) =>
+          message.role === "user" ? (
+            <div key={message.id} data-message-id={message.id} className="min-w-0">
+              <UserMessage message={message} />
+            </div>
+          ) : (
+            <div key={message.id} data-message-id={message.id} className="min-w-0">
               <AssistantMessage
-                key={message.id}
                 message={message}
                 conversationId={conversationId}
                 isLast={index === messages.length - 1}
                 isGenerating={isGenerating}
                 onRegenerate={regenerate}
               />
-            ),
-          )}
-          {messages.length === 0 && (
-            <p className="py-8 text-center text-[12px] text-muted-foreground">
-              No messages yet — ask something to start this conversation.
-            </p>
-          )}
-        </div>
-      </ScrollArea>
+            </div>
+          ),
+        )}
+        {messages.length === 0 && (
+          <p className="py-8 text-center text-[12px] text-muted-foreground">
+            No messages yet — ask something to start this conversation.
+          </p>
+        )}
+        <div aria-hidden="true" style={{ height: anchorSpacer }} />
+      </div>
     </div>
   );
 }

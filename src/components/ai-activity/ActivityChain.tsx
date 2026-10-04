@@ -197,21 +197,77 @@ const ChildRow = memo(function ChildRow({ child }: { child: ActivityViewChild })
   );
 });
 
-const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow }) {
+/**
+ * Collapsible child list — the file rows under a search/read group. Open
+ * by default (live steps stay visible); the chevron closes/opens the list
+ * without touching the timeline rail. Per-row local state: it survives
+ * re-renders while the row streams in and needs no store plumbing.
+ */
+const ChildrenSection = memo(function ChildrenSection({
+  rowId,
+  items,
+}: {
+  rowId: string;
+  items: ActivityViewChild[];
+}) {
+  const [open, setOpen] = useState(true);
+  const clipId = `${rowId}-children`;
+
   return (
-    <div className="cmx-act-item" data-status={row.status}>
-      <span aria-hidden="true" className="cmx-act-dot" data-status={row.status} />
-      <div className="min-w-0">
-        <div className="cmx-act-item-title">{row.title}</div>
-        {row.detail ? <div className="cmx-act-item-detail">{row.detail}</div> : null}
-        {row.children.length > 0 ? (
+    <div className="cmx-act-children">
+      <button
+        type="button"
+        className="cmx-act-children-toggle"
+        aria-expanded={open}
+        aria-controls={clipId}
+        aria-label={open ? "Hide file list" : "Show file list"}
+        title={open ? "Hide file list" : "Show file list"}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.8}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="cmx-act-children-chevron"
+          data-open={open ? "true" : "false"}
+        >
+          <path d="M6 3l5 5-5 5" />
+        </svg>
+        <span className="cmx-act-children-count">{items.length}</span>
+      </button>
+      <div className="cmx-act-child-clip" data-open={open ? "true" : "false"} id={clipId}>
+        <div className="cmx-act-child-clip-inner">
           <ul className="cmx-act-child-list">
-            {row.children.map((child) => (
+            {items.map((child) => (
               <li key={child.id}>
                 <ChildRow child={child} />
               </li>
             ))}
           </ul>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow }) {
+  return (
+    <div className="cmx-act-item" data-status={row.status}>
+      <span aria-hidden="true" className="cmx-act-dot" data-status={row.status} />
+      <div className="min-w-0">
+        <div className="cmx-act-item-title">
+          {row.title}
+          {row.groupCount !== null ? (
+            <span className="cmx-act-group-count">×{row.groupCount}</span>
+          ) : null}
+        </div>
+        {row.detail ? <div className="cmx-act-item-detail">{row.detail}</div> : null}
+        {row.children.length > 0 ? (
+          <ChildrenSection rowId={row.id} items={row.children} />
         ) : null}
       </div>
     </div>
@@ -301,7 +357,7 @@ export function ActivityChainView({ snapshot }: ActivityChainViewProps) {
   };
 
   return (
-    <div className="cmx-act" data-testid="activity-chain">
+    <div className="cmx-act" data-testid="activity-chain" data-active={active ? "true" : "false"}>
       <button
         type="button"
         className="cmx-act-header"

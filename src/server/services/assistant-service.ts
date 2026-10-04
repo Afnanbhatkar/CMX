@@ -595,13 +595,15 @@ async function buildSdkMessages(
   }
 
   // Real repository retrieval (memory-aware pipeline, repository-retrieval
-  // stage): search mode answers from it; code/agent use it for context and
-  // the 8C intake ambiguity check. Top hits are PATHS ONLY — content still
-  // comes exclusively from explicit attachments and pinned files.
+  // stage): search mode answers from it; code/agent/loop use it for context
+  // and the 8C intake ambiguity check. Top hits are PATHS ONLY — content
+  // still comes exclusively from explicit attachments and pinned files.
+  // EVERY mode runs it (loop included) so the activity chain shows the real
+  // search/read work wherever it happens — no mode is a silent void.
   let retrievalHits: RetrievalHit[] = [];
   const lastUser = [...input.messages].reverse().find((m) => m.role === "user");
   const query = lastUser?.content.trim() ?? "";
-  if (onStage && mode !== "loop" && query.length >= RETRIEVAL_MIN_QUERY) {
+  if (onStage && query.length >= RETRIEVAL_MIN_QUERY) {
     retrievalHits = await runRepositoryRetrieval(query, excludedRefs, onStage);
     if (retrievalHits.length > 0) {
       const topFiles = [...new Set(retrievalHits.map((h) => h.file))];
