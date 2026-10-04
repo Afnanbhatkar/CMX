@@ -1,0 +1,573 @@
+/* ------------------------------------------------------------------ */
+/* CodeMind X V2 — Real-time activity chain styles (Phase 8D)          */
+/*                                                                     */
+/* Imported ONCE (bundler-deduped) — never injected per component       */
+/* instance. Every selector/keyframe is prefixed `cmx-act-` to avoid    */
+/* global collisions.                                                   */
+/*                                                                     */
+/* Theming: application tokens first (class/token-based theming — the   */
+/* OS-level prefers-color-scheme NEVER decides this component's theme); */
+/* the supplied reference dark values are FALLBACKS only.               */
+/* ------------------------------------------------------------------ */
+
+.cmx-act {
+  /* App tokens first, reference dark values as fallbacks. */
+  --cmx-surface: var(--surface-elevated, #262626);
+  --cmx-inset: var(--muted, #1c1c1c);
+  --cmx-ink: var(--foreground, #f2f2f0);
+  --cmx-ink-2: var(--muted-foreground, #8b8b88);
+  --cmx-line: var(--border-subtle, #333333);
+  --cmx-accent: var(--primary, #7b9cff);
+  --cmx-danger: var(--danger, #f87171);
+  --cmx-success: var(--success, #4ade80);
+}
+
+/* ------------------------------------------------------------------ */
+/* Indicator shell (Thinking ⇄ Solving cross-fade, no layout jump)     */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-indicator-shell {
+  position: relative;
+  display: inline-grid;
+  align-items: center;
+  min-height: 22px;
+  min-width: 0;
+}
+
+.cmx-act-indicator-layer {
+  display: inline-flex;
+  align-items: center;
+  grid-area: 1 / 1;
+  white-space: nowrap;
+  transition:
+    opacity 150ms ease,
+    visibility 150ms ease,
+    transform 150ms ease;
+  animation: cmx-act-fade 150ms ease;
+}
+
+@keyframes cmx-act-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.cmx-act-indicator-layer[aria-hidden="true"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(1px);
+}
+
+/* ------------------------------------------------------------------ */
+/* Thinking — exact 3×3 lattice reference                              */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-loader {
+  --color: #ffffff;
+  --cell: 6px;
+  --gap: 2px;
+  --idle: 0.15;
+  --peak: 1;
+  --cycle: 648ms;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8.75px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.cmx-act-grid {
+  display: grid;
+  grid-template-columns: repeat(3, var(--cell));
+  gap: var(--gap);
+  flex: none;
+}
+
+.cmx-act-cell {
+  width: var(--cell);
+  height: var(--cell);
+  border-radius: 50%;
+  background: var(--color);
+  opacity: var(--idle);
+  animation: cmx-act-lattice-on var(--cycle) cubic-bezier(0.77, 0, 0.175, 1) infinite;
+}
+
+.cmx-act-cell:nth-child(1) { animation-delay: 90ms; }
+.cmx-act-cell:nth-child(2) { animation-delay: 180ms; }
+.cmx-act-cell:nth-child(3) { animation-delay: 270ms; }
+
+.cmx-act-cell:nth-child(4) { animation-delay: 0ms; }
+.cmx-act-cell:nth-child(5) { animation-delay: 90ms; }
+.cmx-act-cell:nth-child(6) { animation-delay: 180ms; }
+
+.cmx-act-cell:nth-child(7) { animation-delay: 90ms; }
+.cmx-act-cell:nth-child(8) { animation-delay: 180ms; }
+.cmx-act-cell:nth-child(9) { animation-delay: 270ms; }
+
+@keyframes cmx-act-lattice-on {
+  0%,
+  100% {
+    opacity: var(--idle);
+  }
+
+  18%,
+  42% {
+    opacity: var(--peak);
+  }
+
+  62% {
+    opacity: var(--idle);
+  }
+}
+
+.cmx-act-label {
+  font-weight: 500;
+  white-space: nowrap;
+  color: rgba(251, 251, 251, 0.5);
+  font-size: 14px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shimmer (shared by Thinking + Solving)                              */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--cmx-ink-2) 35%,
+    var(--cmx-ink) 50%,
+    var(--cmx-ink-2) 65%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: cmx-act-shimmer 1.6s linear infinite;
+}
+
+@keyframes cmx-act-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Solving — compact 22px orb row (NO pill, NO background, NO shadow)  */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-solving {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8.75px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.cmx-act-orb {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cmx-act-orb canvas {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+/* CSS fallback orb — same 22px footprint; no canvas, no WebGL, no
+   network. Subtle warm core; a soft breathing under motion only. */
+.cmx-act-orb-fallback {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex: none;
+  background:
+    radial-gradient(
+      circle at 38% 32%,
+      #ffc857 0%,
+      #ffc857 14%,
+      #d98e4a 46%,
+      #8a3413 78%,
+      #4c1d07 100%
+    );
+  box-shadow: inset 0 -2px 4px rgba(0, 0, 0, 0.4);
+}
+
+.cmx-act-orb-fallback[data-breathing="true"] {
+  animation: cmx-act-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes cmx-act-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.72;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Header button + chevron                                             */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border-radius: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.cmx-act-header:hover {
+  background: color-mix(in srgb, var(--cmx-ink-2) 10%, transparent);
+}
+
+.cmx-act-header:focus-visible {
+  outline: 1px solid var(--cmx-accent);
+  outline-offset: 2px;
+}
+
+.cmx-act-chevron {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--cmx-ink-2);
+  transition: transform 200ms ease;
+}
+
+.cmx-act-chevron[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+/* Waiting state — calm, no shimmer, subtle attention tone. */
+.cmx-act-waiting-label {
+  font-weight: 500;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--cmx-ink-2);
+}
+
+/* Final duration label — solid text, no shimmer. */
+.cmx-act-final-label {
+  font-weight: 500;
+  white-space: nowrap;
+  font-size: 14px;
+  color: var(--cmx-ink-2);
+}
+
+.cmx-act-final-label[data-outcome="failed"] {
+  color: var(--cmx-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Timeline (grid-rows expansion, rail, dots, rows)                    */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-timeline-grid {
+  display: grid;
+  transition: grid-template-rows 300ms ease-out;
+}
+
+.cmx-act-timeline-grid[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.cmx-act-timeline-grid[data-open="false"] {
+  grid-template-rows: 0fr;
+}
+
+.cmx-act-timeline-clip {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ~40vh internal scroll while the run is active; newest-follow. */
+.cmx-act-timeline-scroll {
+  max-height: 40vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cmx-line) transparent;
+  overscroll-behavior: contain;
+}
+
+.cmx-act-timeline {
+  position: relative;
+  margin-top: 10px;
+  margin-left: 5px;
+  padding-left: 18px;
+  padding-bottom: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cmx-act-timeline::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--cmx-line);
+}
+
+.cmx-act-item {
+  position: relative;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--cmx-ink);
+  animation: cmx-act-in 0.35s ease both;
+}
+
+.cmx-act-dot {
+  position: absolute;
+  left: -18px;
+  top: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.cmx-act-dot[data-status="running"] {
+  background: var(--cmx-accent);
+  animation: cmx-act-pulse 1s ease-in-out infinite;
+}
+
+.cmx-act-dot[data-status="completed"] {
+  background: var(--cmx-ink-2);
+}
+
+.cmx-act-dot[data-status="failed"] {
+  background: var(--cmx-danger);
+}
+
+.cmx-act-dot[data-status="cancelled"] {
+  background: var(--cmx-inset);
+  box-shadow: inset 0 0 0 1.5px var(--cmx-ink-2);
+}
+
+.cmx-act-dot[data-status="waiting"] {
+  background: var(--cmx-inset);
+  box-shadow: inset 0 0 0 1.5px var(--cmx-accent);
+}
+
+.cmx-act-item-title {
+  color: var(--cmx-ink);
+  overflow-wrap: anywhere;
+}
+
+.cmx-act-item[data-status="completed"] .cmx-act-item-title,
+.cmx-act-item[data-status="cancelled"] .cmx-act-item-title {
+  color: var(--cmx-ink-2);
+}
+
+.cmx-act-item[data-status="failed"] .cmx-act-item-title {
+  color: var(--cmx-danger);
+}
+
+.cmx-act-item[data-status="waiting"] .cmx-act-item-title {
+  color: var(--cmx-ink-2);
+}
+
+.cmx-act-item-detail {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--cmx-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.cmx-act-child-list {
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cmx-act-child {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--cmx-ink-2);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+button.cmx-act-child {
+  background: none;
+  border: none;
+  padding: 1px 2px;
+  margin-left: -2px;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+
+button.cmx-act-child:hover {
+  color: var(--cmx-ink);
+  background: color-mix(in srgb, var(--cmx-ink-2) 10%, transparent);
+}
+
+button.cmx-act-child:focus-visible {
+  outline: 1px solid var(--cmx-accent);
+  outline-offset: 1px;
+}
+
+.cmx-act-child-path {
+  color: var(--cmx-ink-2);
+}
+
+button.cmx-act-child:hover .cmx-act-child-path {
+  color: var(--cmx-ink);
+}
+
+.cmx-act-child-meta {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--cmx-ink-2);
+  opacity: 0.8;
+}
+
+.cmx-act-earlier {
+  margin: 0 0 2px;
+  font-size: 11.5px;
+  color: var(--cmx-ink-2);
+}
+
+button.cmx-act-earlier {
+  background: none;
+  border: none;
+  padding: 1px 2px;
+  margin-left: -2px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+button.cmx-act-earlier:hover {
+  color: var(--cmx-ink);
+}
+
+button.cmx-act-earlier:focus-visible {
+  outline: 1px solid var(--cmx-accent);
+  outline-offset: 1px;
+}
+
+/* Group badge — the merged-op count. */
+.cmx-act-group-count {
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--cmx-ink-2);
+  border: 1px solid var(--cmx-line);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 1.4;
+}
+
+/* ------------------------------------------------------------------ */
+/* Screen-reader live region (visually hidden)                          */
+/* ------------------------------------------------------------------ */
+
+.cmx-act-live-region {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion (spec: disable lattice/shimmer/entrance/pulse/       */
+/* cross-fade/orb; NEVER leave text transparent)                       */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .cmx-act-cell {
+    animation: none;
+    opacity: var(--idle);
+  }
+
+  /* A static diagonal of three lit cells reads "active" without motion. */
+  .cmx-act-cell:nth-child(1),
+  .cmx-act-cell:nth-child(5),
+  .cmx-act-cell:nth-child(9) {
+    opacity: 1;
+  }
+
+  .cmx-act-shimmer-text {
+    background: none;
+    animation: none;
+    color: var(--cmx-ink-2);
+  }
+
+  .cmx-act-item {
+    animation: none;
+  }
+
+  .cmx-act-dot[data-status="running"] {
+    animation: none;
+  }
+
+  .cmx-act-indicator-layer {
+    transition: none;
+    animation: none;
+  }
+
+  .cmx-act-orb-fallback[data-breathing="true"] {
+    animation: none;
+  }
+
+  .cmx-act-chevron {
+    transition: none;
+  }
+
+  .cmx-act-timeline-grid {
+    transition: none;
+  }
+}
+
+/* Forced-colors: shimmer text must stay visible (solid CanvasText). */
+@media (forced-colors: active) {
+  .cmx-act-shimmer-text {
+    background: none;
+    animation: none;
+    color: CanvasText;
+    -webkit-text-fill-color: CanvasText;
+  }
+
+  .cmx-act-dot {
+    forced-color-adjust: none;
+  }
+}

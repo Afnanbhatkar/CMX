@@ -10,7 +10,10 @@
  * - Persisted layout data must never contain credentials, tokens or secrets.
  */
 
-import type { ActivityKind } from "@/types/contracts";
+import type {
+  ActivityKind,
+  PersistedActivityChain,
+} from "@/types/contracts";
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -179,6 +182,9 @@ export interface ChatMessage {
   firstEventMs?: number | null;
   /** Engine-measured total run duration behind "Thought for Xs" (8B). */
   thoughtForMs?: number | null;
+  /* ---- 8D — real-time activity chain (persisted with the message) ---- */
+  /** The completed activity chain — reload keeps the final timeline. */
+  activityChain?: PersistedActivityChain | null;
   /* ---- 8C additions — context inspector / memory / questions / approval ---- */
   /** The backend run id this message belongs to (question-flow addressing). */
   runId?: string | null;

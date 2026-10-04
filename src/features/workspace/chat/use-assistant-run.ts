@@ -27,6 +27,9 @@ import {
   useWorkspaceStore,
 } from "@/stores/workspace-store";
 import type {
+  Attachment,
+} from "@/features/workspace/types";
+import type {
   ComposerMode,
   IntakeAnswer,
   SequencedAssistantEvent,
@@ -34,7 +37,6 @@ import type {
 import {
   applyWireEvent,
   assistantActivityEngine,
-  buildRunSteps,
   createRunId,
   exposeAssistantTooling,
   noteTransportSeq,
@@ -44,10 +46,12 @@ import {
   runFailed,
   runStarted,
 } from "../assistant";
-import type {
-  Attachment,
-  ChatActivityStep,
-} from "@/features/workspace/types";
+import {
+  exportPersistedChain,
+  ingestLocalRunActivityEvent,
+  ingestRunActivityEvent,
+  resumeRunActivity,
+} from "./activity/run-activity-store";
 
 /* Verification tooling (window.__cmxAssistant, read-only observation). */
 exposeAssistantTooling();
@@ -237,18 +241,6 @@ export function useAssistantRun(): AssistantRun {
     };
   }, []);
 
-  /** Mirror the engine snapshot onto the in-flight message's activity chain. */
-  const syncActivityFromEngine = useCallback(
-    (conversationId: string, assistantMsgId: string) => {
-      const snapshot = assistantActivityEngine.getSnapshot();
-      const steps: ChatActivityStep[] = buildRunSteps(snapshot);
-      useWorkspaceStore
-        .getState()
-        .updateMessage(conversationId, assistantMsgId, { activity: steps });
-    },
-    [],
-  );
-
   /**
    * Shared completion pipeline: appends the assistant placeholder, opens the
    * real run stream, applies every sequenced wire event to the engine, and
@@ -273,9 +265,6 @@ export function useAssistantRun(): AssistantRun {
       const startedWallClock = Date.now();
       const t0 = performance.now();
 
-      store.updateMessage(conversationId, assistantMsgId, {
-        activity: [],
-      });
       store.setConversationStatus(conversationId, "generating");
       store.setRunPhase("thinking");
 
@@ -295,6 +284,19 @@ export function useAssistantRun(): AssistantRun {
       let sawWireRunStart = false;
       let firstEventRecorded = false;
       let resultFrame: RunResultFrame | null = null;
+      /** Terminal chain export — persists the completed timeline (8D). */
+      const persistActivityChain = (): void => {
+        if (!wireRunId) return;
+        const chain = exportPersistedChain(wireRunId);
+        if (chain) {
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            activityChain: chain,
+            // Active work time (waiting excluded) — the duration behind the
+            // chain's final label, more honest than wall-clock time.
+            thoughtForMs: chain.activeMs,
+          });
+        }
+      };
 
       /** Apply one sequenced wire event; keep the message chain in sync. */
       const handleWireEvent = (event: SequencedAssistantEvent): void => {
@@ -305,6 +307,8 @@ export function useAssistantRun(): AssistantRun {
         // Engine first: RUN_STARTED resets the run metrics; the measured
         // latency is recorded against the NEW run right after.
         applyWireEvent(event);
+        // 8D: the same real event feeds the per-run activity chain store.
+        ingestRunActivityEvent(event);
         if (!firstEventRecorded) {
           firstEventRecorded = true;
           if (wireRunId) recordFirstEventLatency(wireRunId, performance.now() - t0);
@@ -336,7 +340,6 @@ export function useAssistantRun(): AssistantRun {
             runId: event.runId,
           });
         }
-        syncActivityFromEngine(conversationId, assistantMsgId);
       };
 
       try {
@@ -451,6 +454,7 @@ export function useAssistantRun(): AssistantRun {
         if (errorMessage !== null) {
           // The engine already applied RUN_FAILED from the wire; mirror the
           // terminal state on the message with the backend's real error.
+          persistActivityChain();
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             state: "error",
             error: errorMessage,
@@ -465,9 +469,12 @@ export function useAssistantRun(): AssistantRun {
             resultFrame.content.trim().length > 0 &&
             snapshot.status === "completed";
           if (completedOk) {
+            persistActivityChain();
             useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
               state: "complete",
-              thoughtForMs: snapshot.durationMs,
+              thoughtForMs:
+                (wireRunId ? exportPersistedChain(wireRunId)?.activeMs : null) ??
+                snapshot.durationMs,
             });
             useWorkspaceStore
               .getState()
@@ -475,6 +482,14 @@ export function useAssistantRun(): AssistantRun {
           } else if (resultFrame !== null && resultFrame.content.trim().length > 0) {
             // Content arrived but the stream ended without RUN_COMPLETED —
             // finish honestly from the measured facts we DO have.
+            if (wireRunId) {
+              ingestLocalRunActivityEvent({
+                type: "RUN_COMPLETED",
+                runId: wireRunId,
+                completedAt: Date.now(),
+              });
+            }
+            persistActivityChain();
             useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
               state: "complete",
               thoughtForMs: Date.now() - startedWallClock,
@@ -489,8 +504,19 @@ export function useAssistantRun(): AssistantRun {
               const localRunId = createRunId();
               runStarted(localRunId, conversationId);
               wireRunId = localRunId;
+              ingestLocalRunActivityEvent({
+                type: "RUN_STARTED",
+                runId: localRunId,
+                conversationId,
+                startedAt: startedWallClock,
+                mode: options?.mode ?? "agent",
+              });
             }
-            if (wireRunId) runFailed(wireRunId, error);
+            if (wireRunId) {
+              runFailed(wireRunId, error);
+              ingestLocalRunActivityEvent({ type: "RUN_FAILED", runId: wireRunId, error, failedAt: Date.now() });
+            }
+            persistActivityChain();
             useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
               state: "error",
               error,
@@ -507,9 +533,19 @@ export function useAssistantRun(): AssistantRun {
             const localRunId = createRunId();
             runStarted(localRunId, conversationId);
             wireRunId = localRunId;
+            ingestLocalRunActivityEvent({
+              type: "RUN_STARTED",
+              runId: localRunId,
+              conversationId,
+              startedAt: startedWallClock,
+              mode: options?.mode ?? "agent",
+            });
           }
-          if (wireRunId) runCancelled(wireRunId);
-          syncActivityFromEngine(conversationId, assistantMsgId);
+          if (wireRunId) {
+            runCancelled(wireRunId);
+            ingestLocalRunActivityEvent({ type: "RUN_CANCELLED", runId: wireRunId, cancelledAt: Date.now() });
+          }
+          persistActivityChain();
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             state: "stopped",
           });
@@ -527,9 +563,19 @@ export function useAssistantRun(): AssistantRun {
             const localRunId = createRunId();
             runStarted(localRunId, conversationId);
             wireRunId = localRunId;
+            ingestLocalRunActivityEvent({
+              type: "RUN_STARTED",
+              runId: localRunId,
+              conversationId,
+              startedAt: startedWallClock,
+              mode: options?.mode ?? "agent",
+            });
           }
-          if (wireRunId) runFailed(wireRunId, message);
-          syncActivityFromEngine(conversationId, assistantMsgId);
+          if (wireRunId) {
+            runFailed(wireRunId, message);
+            ingestLocalRunActivityEvent({ type: "RUN_FAILED", runId: wireRunId, error: message, failedAt: Date.now() });
+          }
+          persistActivityChain();
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             state: "error",
             error: message,
@@ -545,7 +591,7 @@ export function useAssistantRun(): AssistantRun {
         useWorkspaceStore.getState().setRunPhase("idle");
       }
     },
-    [syncActivityFromEngine],
+    [],
   );
 
   const send = useCallback(
@@ -631,10 +677,12 @@ export function useAssistantRun(): AssistantRun {
           });
           useWorkspaceStore.getState().setConversationStatus(conversationId, "error");
           runFailed(runId, error);
+          ingestLocalRunActivityEvent({ type: "RUN_FAILED", runId, error, failedAt: Date.now() });
           return false;
         }
         // Delivered: the engine resumes, the message records the answers.
         resumeRunFromAwaiting();
+        resumeRunActivity(runId);
         useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
           intakeAnswers: answers,
         });

@@ -13,6 +13,16 @@
 import { assistantActivityEngine } from "./activity-engine";
 import { ASSISTANT_CONTRACT_VERSION, PIPELINE_STAGES } from "./contracts";
 import { getLastRunMetrics } from "./run-adapter";
+import type { SequencedAssistantEvent } from "./contracts";
+import {
+  exportPersistedChain,
+  getRunActivityDebug,
+  getRunActivitySnapshot,
+  ingestLocalRunActivityEvent,
+  ingestRunActivityEvent,
+  resumeRunActivity,
+  type LocalRunActivityEvent,
+} from "@/features/workspace/chat/activity/run-activity-store";
 
 declare global {
   interface Window {
@@ -28,6 +38,20 @@ declare global {
         typeof assistantActivityEngine.getSnapshot
       >["contextSnapshot"];
     };
+    /**
+     * 8D verification harness for the per-run activity chain. `ingest`
+     * exists ONLY for browser-driven verification of the phase machine
+     * (solving transitions, dedup, waiting) with synthetic events; the
+     * production UI ingests real wire events exclusively.
+     */
+    __cmxRunActivity?: {
+      ingest: (event: SequencedAssistantEvent) => void;
+      ingestLocal: (event: LocalRunActivityEvent) => void;
+      resume: (runId: string) => void;
+      snapshot: (runId: string) => ReturnType<typeof getRunActivitySnapshot>;
+      chain: (runId: string) => ReturnType<typeof exportPersistedChain>;
+      debug: () => ReturnType<typeof getRunActivityDebug>;
+    };
   }
 }
 
@@ -42,5 +66,13 @@ export function exposeAssistantTooling(): void {
     lastRunMetrics: () => getLastRunMetrics(),
     pipelineStages: PIPELINE_STAGES,
     lastContextSnapshot: () => assistantActivityEngine.getSnapshot().contextSnapshot,
+  };
+  window.__cmxRunActivity = {
+    ingest: ingestRunActivityEvent,
+    ingestLocal: ingestLocalRunActivityEvent,
+    resume: resumeRunActivity,
+    snapshot: getRunActivitySnapshot,
+    chain: exportPersistedChain,
+    debug: getRunActivityDebug,
   };
 }

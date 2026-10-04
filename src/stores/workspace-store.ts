@@ -233,6 +233,7 @@ export interface WorkspaceState {
         | "state"
         | "error"
         | "activity"
+        | "activityChain"
         | "mode"
         | "servedModel"
         | "firstEventMs"

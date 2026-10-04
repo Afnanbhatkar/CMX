@@ -17,14 +17,14 @@ import { Check, Copy, FileCode2, Paperclip, RotateCcw } from "lucide-react";
 
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Attachment, ChatMessage } from "@/features/workspace/types";
-import {
-  buildRunSteps,
-  thoughtForLabel,
-  useAssistantEngineSnapshot,
-} from "@/features/workspace/assistant";
 import { selectLedger, useContextInspectorStore } from "@/stores/context-inspector-store";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
-import { ApprovalCard, LatticeLoader, ThinkingOrb, ThoughtChain } from "@/components/ai";
+import { ApprovalCard } from "@/components/ai";
+import {
+  ActivityChain,
+  ActivityChainLive,
+} from "@/components/ai-activity/ActivityChain";
+import { useRunActivity } from "@/features/workspace/chat/activity/use-run-activity";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -156,44 +156,38 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Live run activity (Phase 8B)                                        */
+/* Live run activity (Phase 8D — real-time activity chain)             */
 /* ------------------------------------------------------------------ */
 
 /**
- * The current run's backend-driven activity: Thought Chain from the engine
- * snapshot, with the reference LatticeLoader ("Thinking" + stopwatch) before
- * the first activity completes and the canvas ThinkingOrb pill ("Solving…")
- * once real work is running. While the run is PAUSED for intake questions
- * (8C), the QuestionFlow card replaces the loaders — the run resumes only
- * after the user answers.
+ * The current run's real-time activity chain, driven by the per-run store
+ * over the SAME backend events as before. While the run is PAUSED for
+ * intake questions (8C), the QuestionFlow card renders below the chain —
+ * the run resumes only after the user answers.
  */
 function RunActivityLive({
+  message,
   conversationId,
-  messageId,
-  startedAt,
 }: {
+  message: ChatMessage;
   conversationId: string;
-  messageId: string;
-  startedAt: number | null;
 }) {
-  const snapshot = useAssistantEngineSnapshot();
+  const runId = message.runId ?? null;
+  const snapshot = useRunActivity(runId);
   const { answerIntake } = useAssistantRun();
   const [submitting, setSubmitting] = useState(false);
 
-  // Only the LIVE run drives this view; history renders from the message's
-  // persisted activity chain.
-  if (snapshot.status !== "running" && snapshot.status !== "awaiting-answers") return null;
-
-  const steps = buildRunSteps(snapshot);
-  const anyCompleted = snapshot.activities.some((a) => a.status === "completed");
-  const stopwatchOrigin = snapshot.startedAt ?? startedAt;
-  const paused = snapshot.status === "awaiting-answers" && snapshot.questionBatch !== null;
+  const paused =
+    snapshot.status === "waiting" &&
+    snapshot.waitingKind === "question" &&
+    message.questionBatch !== null &&
+    message.questionBatch !== undefined;
 
   const handleAnswer = async (answers: Parameters<typeof answerIntake>[3]) => {
-    if (!snapshot.runId) return;
+    if (!runId) return;
     setSubmitting(true);
     try {
-      await answerIntake(conversationId, messageId, snapshot.runId, answers);
+      await answerIntake(conversationId, message.id, runId, answers);
     } finally {
       setSubmitting(false);
     }
@@ -201,19 +195,15 @@ function RunActivityLive({
 
   return (
     <div className="mb-2 space-y-2" data-testid="run-activity-live">
-      {steps.length > 0 ? <ThoughtChain steps={steps} dense /> : null}
-      {paused && snapshot.questionBatch ? (
+      <ActivityChainLive runId={runId} />
+      {paused && message.questionBatch ? (
         <QuestionFlow
-          batch={snapshot.questionBatch}
-          answers={[]}
+          batch={message.questionBatch}
+          answers={message.intakeAnswers ?? []}
           onAnswer={(answers) => void handleAnswer(answers)}
           submitting={submitting}
         />
-      ) : anyCompleted ? (
-        <ThinkingOrb state="solving" label="Solving…" />
-      ) : (
-        <LatticeLoader cellSize={5} label="Thinking" startedAt={stopwatchOrigin} />
-      )}
+      ) : null}
     </div>
   );
 }
@@ -277,34 +267,24 @@ function AssistantMessage({
 
   return (
     <div className="max-w-[92%]">
-      <div className="mb-1 flex items-center gap-1.5">
-        {busy ? (
-          <ThinkingOrb size={14} state="thinking" label="Assistant is thinking" />
-        ) : (
-          <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-primary" />
-        )}
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-          Assistant
-        </span>
-        <time dateTime={message.createdAt} className="text-[10px] text-muted-foreground/70">
-          {formatTime(message.createdAt)}
-        </time>
-      </div>
+      {/* Phase 8D: the real-time activity chain IS the message header — the
+          old "Assistant" heading/status presentation is intentionally gone. */}
 
-      {/* Phase 8B live run: backend-driven chain + reference indicators
-          (LatticeLoader while thinking, canvas orb once work is running);
-          Phase 8C: the run PAUSES here for intake questions. */}
+      {/* Phase 8D live run: per-run chain (Thinking → Solving → Waiting →
+          final duration) + the 8C question flow while paused. */}
       {busy && (
-        <RunActivityLive
-          conversationId={conversationId}
-          messageId={message.id}
-          startedAt={Date.parse(message.createdAt) || null}
-        />
+        <RunActivityLive message={message} conversationId={conversationId} />
       )}
 
-      {/* Persisted activity chain for history (engine-derived, safe only). */}
-      {!busy && message.activity && message.activity.length > 0 && (
-        <ThoughtChain steps={message.activity} dense className="mb-2" />
+      {/* Persisted chain for history (reload keeps the final timeline);
+          legacy pre-8D messages render through the same presentation. */}
+      {!busy && (
+        <ActivityChain
+          chain={message.activityChain ?? null}
+          legacySteps={message.activity}
+          legacyThoughtForMs={message.thoughtForMs ?? null}
+          legacyRunId={message.runId ?? null}
+        />
       )}
 
       {message.state === "complete" && <ChatMarkdown content={message.content} />}
@@ -354,18 +334,6 @@ function AssistantMessage({
           {isLast && (
             <RegenerateButton disabled={isGenerating} onRegenerate={onRegenerate} />
           )}
-          {/* Phase 8B measured-run meta — honest numbers only. */}
-          {(() => {
-            const thoughtFor = thoughtForLabel(message.thoughtForMs ?? null);
-            return thoughtFor ? (
-              <span
-                className="ml-1 rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/80"
-                title="Measured total run duration"
-              >
-                {thoughtFor}
-              </span>
-            ) : null;
-          })()}
           {typeof message.firstEventMs === "number" ? (
             <span
               className="rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/80"

@@ -126,6 +126,13 @@ function drawOrbFrame(ctx: CanvasRenderingContext2D, t: number): void {
   ctx.restore();
 }
 
+/**
+ * Phase 8D additive export: the solving orb's frame renderer, reused by the
+ * compact 22px `SolvingOrb` (components/ai-activity) so the supplied
+ * animation has ONE source of truth. No behavior of this component changes.
+ */
+export { drawOrbFrame };
+
 /** Canvas host for the solving pill: rAF loop, visibility/offscreen pause,
     DPR ≤ 1.5, reduced-motion static frame, full cleanup on unmount. */
 function SolvingOrbCanvas({ reduced }: { reduced: boolean }) {

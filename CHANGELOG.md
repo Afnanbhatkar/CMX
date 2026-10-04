@@ -4,6 +4,87 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 8D — Real-Time AI Thinking + Solving Activity Chain] — 2026-10-04
+
+The old assistant thought UI is replaced with a production-quality, real-time
+activity chain driven by the EXISTING Phase-8 sequenced events through a thin
+adapter + per-run external store. No second event system; no fake activity;
+no private chain-of-thought; titles come only from fixed templates.
+
+### Added
+- **Per-run activity store** (`src/features/workspace/chat/activity/`):
+  `useRunActivity(runId)` over `useSyncExternalStore`; idempotent ingestion
+  (duplicate seq ignored, stale seq never overwrites newer row state,
+  malformed events dropped at the boundary); one rAF-batched flush per frame
+  so a new event in one run never re-renders the chat or other runs; copy-
+  on-write rows keep snapshots stable for memoized rendering.
+- **Deterministic phase machine**: default `thinking`; the FIRST real
+  mutating/executing activity (create/edit/delete/rename file, command,
+  test) transitions to `solving` — never back; waiting (approval/question)
+  pauses the run; the FIRST final-answer chunk closes the work phase
+  (the answer may still be streaming); first terminal event finalizes
+  (completed/failed/cancelled).
+- **ONE run-level active-work timer** (spec A.7): performance.now() with an
+  explicit paused-duration accumulator; waiting time is EXCLUDED; the timer
+  is continuous across Thinking → Solving; never finalized while paused
+  (chunk/terminal events resume first — race-safe).
+- **Duration formatting** (spec A.8/A.9): `<1s` (never a false 1s), `Ns`
+  under a minute, `Xm Ys` at/over a minute; final labels exactly
+  `Thought for Xs` / `Worked for Xs` / `Failed after Xs` / `Stopped after Xs`.
+- **UI** (`src/components/ai-activity/`): the exact supplied 3×3 lattice
+  (6px cells, 2px gap, .15/1 opacity, 648ms cycle, reference delays and
+  cubic-bezier(.77,0,.175,1)) + shared shimmer; the compact Solving
+  indicator (22px visible orb + 14px label + 8.75px gap — NO pill, NO
+  background, NO shadow, NO 74px container) lazy-loading the project's own
+  vendored solving-orb canvas (pinned local dependency, never an @main CDN)
+  ONLY when a run reaches Solving, with a 22px CSS fallback orb for
+  reduced-motion/import failure; 150ms cross-fade in a shared shell with a
+  22px min-height header (no layout jump); collapsible timeline
+  (grid-rows 0fr→1fr, ~300ms ease-out, rotating chevron M6 3l5 5-5 5);
+  collapsed content is INERT; one polite live region announcing state
+  changes only; status dots (accent pulse / secondary / error / muted /
+  attention); ~40vh running cap with newest-follow scrolling; 200-row
+  render cap with an "Earlier steps" expander; 4+ consecutive same-kind
+  operations merge into grouped rows ("Read 12 files", "Edited 8 files");
+  real file rows navigate via the shared EditorNavigationService; search
+  children show only really-returned files; middle-ellipsis for long paths
+  with the full path in title.
+- **Secret redaction before render** (`activity/redact.ts`): API keys,
+  bearer/Authorization tokens, JWT/gh/xox token shapes, credential URLs,
+  `password=`/`--token`/`.env` assignments, control-character stripping and
+  field caps — reusable, applied inside the adapter.
+- **Persistence**: the final chain (`PersistedActivityChain`) is stored on
+  the chat message, so a reload keeps `Worked for 24s`-style labels and the
+  completed, still-expandable timeline; pre-8D history renders through the
+  same presentation from its recorded steps.
+- **Verification harness** (`window.__cmxRunActivity`): snapshot/ingest/
+  resume/debug surface used for browser-driven verification of the phase
+  machine, dedup and timer (production UI ingests real wire events only).
+
+### Changed
+- `AssistantMessage` no longer renders the old "Assistant" heading/status
+  presentation or the duplicate wall-clock duration chip; the activity chain
+  IS the message header. `use-assistant-run` feeds every sequenced wire
+  event into the per-run store and persists the final chain at the terminal
+  event; `thoughtForMs` now carries ACTIVE work time (waiting excluded).
+- `ThinkingOrb` gains one additive export (`drawOrbFrame`) so the supplied
+  solving animation has a single source of truth; the component's behavior
+  is unchanged. `types/contracts.ts` gains the additive VIEW type section
+  (no existing type changed).
+
+### Honest limits
+- Solving appears only when a real mutating/executing activity arrives — the
+  current backend (pre-8.5) performs no file mutations, so honest runs end
+  `Thought for Xs`; the solving path is verified with synthetic events
+  through the documented harness.
+- The approval card is emitted only when the model actually emits the
+  protocol block (stochastic); post-finalize approval renders as a
+  "Waiting for approval" timeline row while the header keeps the final
+  duration.
+- Automated unit-test files were not added in this sandbox (no-test-code
+  workspace constraint); correctness evidence is browser E2E + harness
+  probes recorded in `worklog.md`.
+
 ## [Phase 8C — Context Inspector + Approval Card + Question Flow] — 2026-10-04
 
 Context is inspectable, approval is actionable, questions pause execution.
