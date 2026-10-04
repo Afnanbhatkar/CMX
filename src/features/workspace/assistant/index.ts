@@ -26,6 +26,7 @@ export {
   applyWireEvent,
   recordFirstEventLatency,
   noteTransportSeq,
+  resumeRunFromAwaiting,
   getLastRunMetrics,
   type AssistantRunMetrics,
 } from "./run-adapter";

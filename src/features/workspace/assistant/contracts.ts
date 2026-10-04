@@ -23,7 +23,7 @@
 /* ------------------------------------------------------------------ */
 
 /** Bumped when a sub-phase extends the contract in a breaking way. */
-export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8b";
+export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8c";
 
 /* ------------------------------------------------------------------ */
 /* §1 — Run pipeline (the contract, not the executor)                  */
@@ -79,6 +79,9 @@ export const MEMORY_PRECEDENCE = [
 
 export type MemoryPrecedenceTier = (typeof MEMORY_PRECEDENCE)[number];
 
+/** Honest confidence for a memory record (derived from real match strength). */
+export type MemoryConfidence = "high" | "medium" | "low";
+
 /** A retrieved memory record (only real retrievals are ever listed). */
 export interface MemoryRecord {
   id: string;
@@ -87,6 +90,15 @@ export interface MemoryRecord {
   content: string;
   /** Where it came from (worklog, phase docs, user-saved note, …). */
   source: string;
+  /* ---- 8C additions (memory reveal UI) — additive, never breaks 8A consumers ---- */
+  /** What the memory is scoped to (task id, phase, conversation). */
+  scope: string | null;
+  /** Confidence derived from the REAL match strength (term hits), never a percentage. */
+  confidence: MemoryConfidence;
+  /** Real evidence pointer ("worklog.md#task-8b", "CHANGELOG.md#phase-7"). */
+  evidence: string | null;
+  /** The query terms that actually matched (the retrieval reason). */
+  matchedTerms: string[];
 }
 
 /** Outcome of the memory-retrieval stage for ONE run. */
@@ -159,6 +171,15 @@ export interface IntakeQuestionBatch {
   askedAt: number;
 }
 
+/** One answer to one intake question (8C question flow). */
+export interface IntakeAnswer {
+  questionId: string;
+  /** Chosen option id — null when a custom answer was typed. */
+  optionId: string | null;
+  /** Custom free-text answer — null when an option was chosen. */
+  customText: string | null;
+}
+
 /* ------------------------------------------------------------------ */
 /* §1.5 (V2.1) — Context Inspector snapshot (UI in 8C)                 */
 /* ------------------------------------------------------------------ */
@@ -171,7 +192,18 @@ export type ContextInspectorSource =
   | "selected-code"
   | "attachment"
   | "memory"
-  | "search";
+  | "search"
+  /** 8C: a file the user pinned in the Context Inspector (included every run). */
+  | "pinned";
+
+/** One included chunk of one context entry (8C — the real slice that was sent). */
+export interface ContextChunk {
+  /** Chunk ref, e.g. "src/auth/session.ts · chars 0–6000". */
+  ref: string;
+  included: boolean;
+  /** Why this chunk was (or was not) sent ("full file", "first 6000 of 12000 chars"). */
+  reason: string;
+}
 
 /** One selected-context entry, exactly as the run received it. */
 export interface ContextInspectorEntry {
@@ -182,13 +214,40 @@ export interface ContextInspectorEntry {
   included: boolean;
   /** Why it was selected/excluded (one line). */
   reason: string;
+  /* ---- 8C additions — additive ---- */
+  /** Display label (basename or short form of the ref). */
+  label: string;
+  /** Real character count of what this entry contributed to the payload. */
+  charCount: number;
+  /** Honest token estimate (chars ÷ 4) — always labeled as an estimate. */
+  tokenEstimate: number;
+  /** The real chunk(s) that were (or were not) sent for this entry. */
+  chunks: ContextChunk[];
+  /** Real symbols associated with the entry (search symbol hits; empty when unknown). */
+  symbols: string[];
 }
 
-/** What the future Context Inspector (8C) renders for a run. */
+/**
+ * What the Context Inspector (8C) renders for a run: the measured truth of
+ * what the request actually carried.
+ */
 export interface ContextInspectorSnapshot {
   runId: string;
   entries: ContextInspectorEntry[];
   capturedAt: number;
+  /* ---- 8C additions — additive ---- */
+  /** Sum of included entry character counts (real). */
+  charCountTotal: number;
+  /** Honest token estimate for the whole payload (chars ÷ 4). */
+  tokenEstimateTotal: number;
+  /** The configured context envelope of this pipeline (chars). */
+  budgetChars: number;
+  /** budgetChars ÷ 4 — displayed next to the estimate, always labeled as estimate. */
+  budgetTokensEstimate: number;
+  /** How many memory records were retrieved and applied (0 when none). */
+  memoryCount: number;
+  /** Honest memory note when nothing applied ("no memory matched", …). */
+  memoryNote: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,8 +319,18 @@ export interface ActivityNode {
   children: SafeToolSummary[];
 }
 
-/** Run-level lifecycle mirror of ActivityStatus. */
-export type RunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
+/**
+ * Run-level lifecycle mirror of ActivityStatus.
+ * 8C adds "awaiting-answers": the run is paused because the assistant asked
+ * material intake questions; it resumes ONLY after the user answers.
+ */
+export type RunStatus =
+  | "idle"
+  | "running"
+  | "awaiting-answers"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 /* ------------------------------------------------------------------ */
 /* §11/§12 — Approval + clarifying question payloads (UI in 8C)        */
@@ -281,7 +350,15 @@ export interface ApprovalRequest {
   risk: string;
   /** The permission being requested. */
   requestedPermission: string;
+  /* ---- 8C additions — additive ---- */
+  /** Tests the proposal expects to satisfy (model-provided; may be empty). */
+  expectedTests: string[];
+  /** Honest security impact statement (model-provided; may be empty). */
+  securityImpact: string;
 }
+
+/** The decision a human made on an approval card (8C — recorded, never applied). */
+export type ApprovalDecision = "approved" | "rejected" | "edited";
 
 export interface ClarifyQuestionOption {
   id: string;
@@ -399,6 +476,8 @@ export type ResponseSegment =
 export type AssistantStreamEvent =
   | { type: "RUN_STARTED"; runId: string; conversationId: string | null; startedAt: number; mode: ComposerMode }
   | { type: "INTAKE_QUESTIONS_REQUIRED"; runId: string; batch: IntakeQuestionBatch }
+  | { type: "CONTEXT_SNAPSHOT"; runId: string; snapshot: ContextInspectorSnapshot }
+  | { type: "MEMORY_USED"; runId: string; memories: MemoryRecord[]; note: string | null }
   | { type: "ACTIVITY_STARTED"; runId: string; activity: ActivityNode }
   | { type: "ACTIVITY_UPDATED"; runId: string; activityId: string; patch: Partial<Pick<ActivityNode, "title" | "summary" | "metadata">> & { status?: ActivityStatus } }
   | { type: "ACTIVITY_COMPLETED"; runId: string; activityId: string; summary: string | null; completedAt: number }
@@ -438,3 +517,24 @@ export const SAFE_ACTIVITY_SUMMARIES = [
 ] as const;
 
 export type SafeActivitySummary = (typeof SAFE_ACTIVITY_SUMMARIES)[number];
+
+/* ------------------------------------------------------------------ */
+/* §14 (8C) — Context Inspector budget constants                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The configured context envelope of THIS pipeline (server + client agree).
+ * It is a real, enforced design budget for the assembled request — not a
+ * transport limit. Token numbers are always derived as chars ÷ 4 and always
+ * labeled "estimate" (no tokenizer is connected in this build).
+ */
+export const CONTEXT_BUDGET_CHARS = 96_000;
+export const CONTEXT_BUDGET_TOKENS_ESTIMATE = Math.floor(CONTEXT_BUDGET_CHARS / 4);
+
+/**
+ * The marker fence the model must emit (code/agent mode only) when its plan
+ * would modify repository files. The backend parses this block, strips it
+ * from the displayed answer, and emits APPROVAL_REQUIRED. If the model never
+ * emits it, no approval card appears — nothing is fabricated.
+ */
+export const APPROVAL_MARKER = "codemind-approval-request";

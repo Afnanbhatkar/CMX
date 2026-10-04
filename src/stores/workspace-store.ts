@@ -227,7 +227,25 @@ export interface WorkspaceState {
     conversationId: string,
     messageId: string,
     patch: Partial<
-      Pick<ChatMessage, "content" | "state" | "error" | "activity" | "mode" | "servedModel">
+      Pick<
+        ChatMessage,
+        | "content"
+        | "state"
+        | "error"
+        | "activity"
+        | "mode"
+        | "servedModel"
+        | "firstEventMs"
+        | "thoughtForMs"
+        | "runId"
+        | "contextSnapshot"
+        | "memories"
+        | "memoryNote"
+        | "questionBatch"
+        | "intakeAnswers"
+        | "approval"
+        | "approvalDecision"
+      >
     >,
   ) => void;
   setConversationStatus: (id: string, status: Conversation["status"]) => void;

@@ -95,7 +95,7 @@ function finalizeMetrics(runId: string): void {
   const after = assistantActivityEngine.getSnapshot();
   metrics.durationMs = after.durationMs;
   metrics.categories = selectRelevantCategories(after.activities);
-  metrics.outcome = after.status;
+  if (after.status !== "idle") metrics.outcome = after.status;
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,8 +118,8 @@ export interface AssistantRunMetrics {
   durationMs: number | null;
   /** Categories that actually ran (category engine selection). */
   categories: ActivityCategory[];
-  /** Terminal state of the run. */
-  outcome: "running" | "completed" | "failed" | "cancelled";
+  /** Terminal (or paused) state of the run — 8C adds awaiting-answers. */
+  outcome: "running" | "awaiting-answers" | "completed" | "failed" | "cancelled";
 }
 
 let metrics: AssistantRunMetrics | null = null;
@@ -162,7 +162,7 @@ export function applyWireEvent(event: SequencedAssistantEvent): void {
   if (metrics && event.runId === metrics.runId) {
     metrics.durationMs = after.durationMs;
     metrics.categories = selectRelevantCategories(after.activities);
-    if (after.status === "completed" || after.status === "failed" || after.status === "cancelled") {
+    if (after.status === "awaiting-answers" || after.status === "completed" || after.status === "failed" || after.status === "cancelled") {
       metrics.outcome = after.status;
     }
   }
@@ -173,6 +173,15 @@ export function recordFirstEventLatency(runId: string, firstEventMs: number): vo
   if (metrics && metrics.runId === runId && metrics.firstEventMs === null) {
     metrics.firstEventMs = firstEventMs;
   }
+}
+
+/**
+ * 8C question flow: resume the paused run after the user's answers were
+ * delivered. The engine is the single writer; this is only a named wrapper
+ * so run consumers do not reach into the engine directly.
+ */
+export function resumeRunFromAwaiting(): void {
+  assistantActivityEngine.resumeFromAwaiting();
 }
 
 /**

@@ -22,8 +22,9 @@ import {
   thoughtForLabel,
   useAssistantEngineSnapshot,
 } from "@/features/workspace/assistant";
+import { selectLedger, useContextInspectorStore } from "@/stores/context-inspector-store";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
-import { LatticeLoader, ThinkingOrb, ThoughtChain } from "@/components/ai";
+import { ApprovalCard, LatticeLoader, ThinkingOrb, ThoughtChain } from "@/components/ai";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -35,6 +36,8 @@ import {
 import { useAssistantRun } from "./use-assistant-run";
 import { ApprovalCardSlot } from "./ApprovalCardSlot";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { MemoryUsedChip } from "./MemoryUsedChip";
+import { QuestionFlow } from "./QuestionFlow";
 
 export interface ConversationViewProps {
   conversationId: string;
@@ -160,23 +163,53 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
  * The current run's backend-driven activity: Thought Chain from the engine
  * snapshot, with the reference LatticeLoader ("Thinking" + stopwatch) before
  * the first activity completes and the canvas ThinkingOrb pill ("Solving…")
- * once real work is running.
+ * once real work is running. While the run is PAUSED for intake questions
+ * (8C), the QuestionFlow card replaces the loaders — the run resumes only
+ * after the user answers.
  */
-function RunActivityLive({ startedAt }: { startedAt: number | null }) {
+function RunActivityLive({
+  conversationId,
+  messageId,
+  startedAt,
+}: {
+  conversationId: string;
+  messageId: string;
+  startedAt: number | null;
+}) {
   const snapshot = useAssistantEngineSnapshot();
+  const { answerIntake } = useAssistantRun();
+  const [submitting, setSubmitting] = useState(false);
 
   // Only the LIVE run drives this view; history renders from the message's
   // persisted activity chain.
-  if (snapshot.status !== "running") return null;
+  if (snapshot.status !== "running" && snapshot.status !== "awaiting-answers") return null;
 
   const steps = buildRunSteps(snapshot);
   const anyCompleted = snapshot.activities.some((a) => a.status === "completed");
   const stopwatchOrigin = snapshot.startedAt ?? startedAt;
+  const paused = snapshot.status === "awaiting-answers" && snapshot.questionBatch !== null;
+
+  const handleAnswer = async (answers: Parameters<typeof answerIntake>[3]) => {
+    if (!snapshot.runId) return;
+    setSubmitting(true);
+    try {
+      await answerIntake(conversationId, messageId, snapshot.runId, answers);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className="mb-2 space-y-2" data-testid="run-activity-live">
       {steps.length > 0 ? <ThoughtChain steps={steps} dense /> : null}
-      {anyCompleted ? (
+      {paused && snapshot.questionBatch ? (
+        <QuestionFlow
+          batch={snapshot.questionBatch}
+          answers={[]}
+          onAnswer={(answers) => void handleAnswer(answers)}
+          submitting={submitting}
+        />
+      ) : anyCompleted ? (
         <ThinkingOrb state="solving" label="Solving…" />
       ) : (
         <LatticeLoader cellSize={5} label="Thinking" startedAt={stopwatchOrigin} />
@@ -218,16 +251,29 @@ function UserMessage({ message }: { message: ChatMessage }) {
 
 function AssistantMessage({
   message,
+  conversationId,
   isLast,
   isGenerating,
   onRegenerate,
 }: {
   message: ChatMessage;
+  conversationId: string;
   isLast: boolean;
   isGenerating: boolean;
   onRegenerate: () => void;
 }) {
   const busy = message.state === "generating";
+  const updateMessage = useWorkspaceStore((s) => s.updateMessage);
+  const disabledMemoryIds = useContextInspectorStore((s) =>
+    selectLedger(s, conversationId).disabledMemoryIds,
+  );
+  const disableMemory = useContextInspectorStore((s) => s.disableMemory);
+  const enableMemory = useContextInspectorStore((s) => s.enableMemory);
+
+  const recordApprovalDecision = (decision: "approved" | "rejected" | "edited") => {
+    if (!message.approval) return;
+    updateMessage(conversationId, message.id, { approvalDecision: decision });
+  };
 
   return (
     <div className="max-w-[92%]">
@@ -246,8 +292,15 @@ function AssistantMessage({
       </div>
 
       {/* Phase 8B live run: backend-driven chain + reference indicators
-          (LatticeLoader while thinking, canvas orb once work is running). */}
-      {busy && <RunActivityLive startedAt={Date.parse(message.createdAt) || null} />}
+          (LatticeLoader while thinking, canvas orb once work is running);
+          Phase 8C: the run PAUSES here for intake questions. */}
+      {busy && (
+        <RunActivityLive
+          conversationId={conversationId}
+          messageId={message.id}
+          startedAt={Date.parse(message.createdAt) || null}
+        />
+      )}
 
       {/* Persisted activity chain for history (engine-derived, safe only). */}
       {!busy && message.activity && message.activity.length > 0 && (
@@ -255,6 +308,16 @@ function AssistantMessage({
       )}
 
       {message.state === "complete" && <ChatMarkdown content={message.content} />}
+
+      {/* Phase 8C: the model's proposed change awaits an explicit human
+          decision — recorded locally, never applied (no ChangeSet yet). */}
+      {!busy && message.approval && (
+        <ApprovalCard
+          approval={message.approval}
+          decision={message.approvalDecision ?? null}
+          onDecision={recordApprovalDecision}
+        />
+      )}
 
       {message.state === "error" && (
         <div className="space-y-1.5">
@@ -329,6 +392,19 @@ function AssistantMessage({
               {message.servedModel}
             </span>
           ) : null}
+          {/* Phase 8C: memory reveal — what the run actually used. */}
+          {(message.memories?.length ?? 0) > 0 || message.memoryNote ? (
+            <MemoryUsedChip
+              memories={message.memories ?? []}
+              note={message.memoryNote ?? null}
+              disabledIds={disabledMemoryIds}
+              onToggle={(memoryId, enabled) =>
+                enabled
+                  ? enableMemory(conversationId, memoryId)
+                  : disableMemory(conversationId, memoryId)
+              }
+            />
+          ) : null}
         </div>
       )}
 
@@ -376,6 +452,7 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
               <AssistantMessage
                 key={message.id}
                 message={message}
+                conversationId={conversationId}
                 isLast={index === messages.length - 1}
                 isGenerating={isGenerating}
                 onRegenerate={regenerate}

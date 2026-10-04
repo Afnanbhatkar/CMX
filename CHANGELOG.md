@@ -4,6 +4,93 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 8C — Context Inspector + Approval Card + Question Flow] — 2026-10-04
+
+Context is inspectable, approval is actionable, questions pause execution.
+All data is measured truth — no fabricated context items, no fake impact
+graph, no silent re-inclusion of removed refs. NON-GOALS respected: no code
+mutation, no autonomous agent, no real ChangeSet application (approval
+decisions are recorded, never applied).
+
+### Added
+- **Context Inspector panel** (chat panel, collapsible): the measured truth
+  of what a run received — files, chunks (real byte ranges incl.
+  budget-capped slices), symbols (real search symbol hits), retrieval
+  source + reason per entry, honest token estimates (chars ÷ 4, always
+  labeled "estimate"), configured context budget (96k chars ≈ 24k tok est.)
+  with a usage bar, memory items, pinned and removed counts. New wire event
+  `CONTEXT_SNAPSHOT` carries the per-run snapshot (engine-recorded,
+  message-persisted, exposed via `window.__cmxAssistant.lastContextSnapshot()`).
+- **Context controls** per entry: pin (pinned files are read in full on
+  every run — enforced server-side as pinned reads with FILE_REFERENCED),
+  remove (refs are filtered from retrieval server-side; the search activity
+  reports "N hidden by your context filters" — a removed item NEVER
+  silently returns; restore is always explicit), open (EditorNavigationService),
+  replace (re-read from disk; next run uses current file state), inspect
+  (chunks/symbols/char detail). Ledger travels with every run
+  (`excludedRefs`/`pinnedRefs`/`excludedMemoryIds` on the run payload).
+- **Memory Used** (real retrieval over the project's persistent memory per
+  RULES §5 — worklog.md + CHANGELOG.md): "Memory used: N" chip on
+  assistant messages + in the inspector; reveal shows memory type
+  (tier), content, scope, source, confidence (derived from real term-match
+  strength), evidence anchor (file#anchor) and the matched terms. Each
+  memory can be disabled for the request — disabled ids are sent with the
+  run and filtered BEFORE anything reaches the model. New wire event
+  `MEMORY_USED`. Retrieved memories genuinely inform the preamble (tier 3,
+  never overrides repository evidence).
+- **ApprovalCard** (native CodeMind reconstruction of the 21st.dev
+  reference, `src/components/ai/ApprovalCard.tsx`): shows what will happen,
+  why, affected files (click → editor), risk badge, permission, expected
+  tests, security impact — with Review (expand details), Approve, Reject
+  and Edit (opens affected files) actions; decision banner states honestly
+  that ChangeSet application is not connected and nothing was modified.
+  Driven by a real model protocol: in code/agent mode the model is
+  instructed to end proposals that modify files with a
+  ```codemind-approval-request JSON fence; the backend parses it (with a
+  tolerant fallback), strips it from the displayed answer, and emits
+  `APPROVAL_REQUIRED`. No block → no card (nothing fabricated).
+- **BlastRadiusSlot** (`src/components/ai/BlastRadiusSlot.tsx`): reserved
+  visual area inside the approval card for Phase 10/15 impact data — four
+  typed slots (changed modules / affected APIs / affected tests / security
+  dependencies), each honestly "no data yet". No fake graph.
+- **Question flow (pause → ask → resume)**: when the request implies a
+  modification and REAL hybrid-retrieval finds multiple files with
+  comparable relevance (runner-up ≥ 60% of the leader's score, floor 0.08),
+  the run pauses and asks ONCE as a batch (`INTAKE_QUESTIONS_REQUIRED`) —
+  "I found N matching implementations for this change. Which one should I
+  work with?" with the real candidate files as options (plus custom text).
+  The stream stays open; `POST /api/assistant/runs/answers` delivers the
+  answers through a globalThis-registered pending map (Next.js compiles
+  per-route module graphs — module state is not shared across routes), the
+  engine flips to "awaiting-answers" and back, the answers join the user's
+  message, and the run completes. Client disconnect / 10-minute timeout
+  cancels the paused run honestly. Skipped when the query already names an
+  explicit repo path (the user already decided) or no material ambiguity
+  exists.
+
+### Changed
+- Assistant contracts → `2.1.0-phase8c` (additive only): `MemoryRecord`
+  (+scope/confidence/evidence/matchedTerms), `ApprovalRequest`
+  (+expectedTests/securityImpact), `ContextInspectorEntry`
+  (+label/charCount/tokenEstimate/chunks/symbols), `ContextInspectorSnapshot`
+  (+budget/token/memory fields), `ContextInspectorSource` +`"pinned"`,
+  `RunStatus` +`"awaiting-answers"`, new `IntakeAnswer` /
+  `MemoryConfidence` / `ApprovalDecision` / `ContextChunk` types,
+  `CONTEXT_BUDGET_*` constants, `APPROVAL_MARKER`.
+- ActivityEngine records contextSnapshot/memories/approvals/questionBatch,
+  accepts activity events while paused (implicit resume), rejects nothing
+  it did not before; run metrics outcome includes "awaiting-answers".
+- Retrieval runs in search AND code/agent modes (not loop) — real Phase 7
+  hybrid search drives context, intake ambiguity and the snapshot.
+- `updateMessage` store patch extended (firstEventMs/thoughtForMs gap fixed
+  additively); ChatMessage persists runId/contextSnapshot/memories/
+  questionBatch/intakeAnswers/approval/decision.
+- Fixed: assistant usage rows no longer write the wire runId into
+  `usage_records.runId` (DB-level FK → agent_runs.id made every streamed
+  run's usage insert fail); correlation stays on requestId.
+- Fixed (8B baseline): runs-route `writeEvent` typed against the unseq'd
+  event union — removes 8 baseline tsc errors.
+
 ## [Phase 8B — Activity Engine + Lattice Loader + Thinking Orb + Thought Chain] — 2026-10-04
 
 The user-visible execution activity engine. Privacy boundary enforced by

@@ -9,19 +9,26 @@ import {
   runAssistantTurn,
   type AssistantStageEvent,
 } from "@/server/services/assistant-service";
-import type { SequencedAssistantEvent } from "@/features/workspace/assistant/contracts";
+import {
+  cancelPendingRun,
+  waitForAnswers,
+} from "@/server/services/run-answers-registry";
+import type {
+  AssistantStreamEvent,
+  SequencedAssistantEvent,
+} from "@/features/workspace/assistant/contracts";
 
 /**
- * POST /api/assistant/runs — the Phase 8B streaming run surface.
+ * POST /api/assistant/runs — the Phase 8B/8C streaming run surface.
  *
  * One real assistant turn, streamed as the 8B event contract: every wire
  * event carries a monotonic per-run `seq` (starting at 1) and uses the
  * shared AssistantStreamEvent vocabulary:
  *
- *   RUN_STARTED → ACTIVITY_STARTED/UPDATED/COMPLETED → SEARCH_RESULT →
- *   FILE_REFERENCED → RESPONSE_CHUNK → `result` frame → RUN_COMPLETED
- *   (or RUN_FAILED + `error` frame; RUN_CANCELLED is published on the bus
- *   when the client disconnects).
+ *   RUN_STARTED → ACTIVITY_* → CONTEXT_SNAPSHOT → MEMORY_USED →
+ *   SEARCH_RESULT → FILE_REFERENCED → (INTAKE_QUESTIONS_REQUIRED → …user
+ *   answers via /api/assistant/runs/answers…) → RESPONSE_CHUNK → `result`
+ *   frame → APPROVAL_REQUIRED → RUN_COMPLETED (or RUN_FAILED/RUN_CANCELLED).
  *
  * First-event latency: RUN_STARTED is written SYNCHRONOUSLY when the stream
  * opens — before any await — so the first visible activity event does not
@@ -29,11 +36,11 @@ import type { SequencedAssistantEvent } from "@/features/workspace/assistant/con
  * first-event latency is logged with the run.
  *
  * Privacy boundary (8B §1): only safe execution summaries travel on this
- * stream. APPROVAL_REQUIRED / QUESTION_REQUIRED are part of the contract
- * but are NEVER emitted by this route yet — no approval/question logic is
- * connected (8B non-goals). RESPONSE_CHUNK arrives as ONE honest chunk
- * because the model gateway has no token-streaming API — nothing is
- * re-dressed as fake chunking.
+ * stream. The 8C additions (context snapshot, memory records, intake
+ * questions, approval payloads) carry safe execution facts — never chain-
+ * of-thought. RESPONSE_CHUNK arrives as ONE honest chunk because the model
+ * gateway has no token-streaming API — nothing is re-dressed as fake
+ * chunking.
  */
 
 const COMPOSER_MODES = ["search", "code", "agent", "loop"] as const;
@@ -64,6 +71,10 @@ const bodySchema = z.object({
         )
         .max(8)
         .optional(),
+      /* ---- 8C Context Inspector ledger (user-controlled, enforced here) ---- */
+      excludedRefs: z.array(z.string().max(512)).max(64).optional(),
+      excludedMemoryIds: z.array(z.string().max(128)).max(64).optional(),
+      pinnedRefs: z.array(z.string().max(512)).max(8).optional(),
     })
     .optional(),
   mode: z.enum(COMPOSER_MODES).optional(),
@@ -126,7 +137,7 @@ export async function POST(req: Request): Promise<Response> {
         }
       };
 
-      const writeEvent = (event: SequencedAssistantEvent): void => {
+      const writeEvent = (event: AssistantStreamEvent): void => {
         seq += 1;
         const withSeq = { ...event, seq } as SequencedAssistantEvent;
         write(`event: ${withSeq.type}\ndata: ${JSON.stringify(withSeq)}\n\n`);
@@ -191,6 +202,19 @@ export async function POST(req: Request): Promise<Response> {
           case "RESPONSE_CHUNK":
             writeEvent({ type: "RESPONSE_CHUNK", runId, segment: stage.segment });
             break;
+          /* ---- 8C surfaces ---- */
+          case "CONTEXT_SNAPSHOT":
+            writeEvent({ type: "CONTEXT_SNAPSHOT", runId, snapshot: stage.snapshot });
+            break;
+          case "MEMORY_USED":
+            writeEvent({ type: "MEMORY_USED", runId, memories: stage.memories, note: stage.note });
+            break;
+          case "INTAKE_QUESTIONS":
+            writeEvent({ type: "INTAKE_QUESTIONS_REQUIRED", runId, batch: stage.batch });
+            break;
+          case "APPROVAL_REQUIRED":
+            writeEvent({ type: "APPROVAL_REQUIRED", runId, approval: stage.approval });
+            break;
         }
       };
 
@@ -205,13 +229,15 @@ export async function POST(req: Request): Promise<Response> {
       };
 
       // Client disconnect: stop writing; the run is cancelled from the
-      // caller's perspective (the SDK call itself cannot be aborted). The
-      // process-wide bus keeps its existing lifecycle vocabulary; the
-      // cancellation is recorded in the log only.
+      // caller's perspective. If the run is paused for intake answers, the
+      // pending entry is cancelled so nothing dangles. The process-wide bus
+      // keeps its existing lifecycle vocabulary; the cancellation is
+      // recorded in the log only.
       req.signal.addEventListener(
         "abort",
         () => {
           logInfo("assistant run cancelled (client disconnect)", { runId, requestId });
+          cancelPendingRun(runId);
           close();
         },
         { once: true },
@@ -228,6 +254,12 @@ export async function POST(req: Request): Promise<Response> {
               mode: parsed.data.mode,
               model: parsed.data.model,
               requestId,
+              runId,
+              // 8C question flow: the run pauses here, and the answers route
+              // resolves it. Client disconnect cancels it.
+              answersProvider: () => waitForAnswers(runId, () => {
+                // nothing extra — the abort listener already closes the stream
+              }),
             },
             writeStage,
           );
@@ -246,6 +278,8 @@ export async function POST(req: Request): Promise<Response> {
           publish(createEvent({ type: "ASSISTANT_COMPLETED", runId }));
           logInfo("assistant run completed", { runId, requestId, mode, servedModel });
         } catch (error) {
+          const cancelled =
+            error instanceof AssistantError && error.reason === "cancelled";
           const safeReason =
             error instanceof AssistantError
               ? error.message
@@ -257,9 +291,15 @@ export async function POST(req: Request): Promise<Response> {
               error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
             });
           }
-          writeEvent({ type: "RUN_FAILED", runId, error: safeReason, failedAt: Date.now() });
-          write(`event: error\ndata: ${JSON.stringify({ error: safeReason })}\n\n`);
-          publish(createEvent({ type: "ASSISTANT_FAILED", runId, reason: safeReason }));
+          if (cancelled) {
+            writeEvent({ type: "RUN_CANCELLED", runId, cancelledAt: Date.now() });
+            write(`event: error\ndata: ${JSON.stringify({ error: safeReason })}\n\n`);
+            publish(createEvent({ type: "ASSISTANT_FAILED", runId, reason: safeReason }));
+          } else {
+            writeEvent({ type: "RUN_FAILED", runId, error: safeReason, failedAt: Date.now() });
+            write(`event: error\ndata: ${JSON.stringify({ error: safeReason })}\n\n`);
+            publish(createEvent({ type: "ASSISTANT_FAILED", runId, reason: safeReason }));
+          }
         } finally {
           close();
           cleanup = null;

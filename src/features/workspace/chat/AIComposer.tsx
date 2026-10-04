@@ -55,6 +55,7 @@ import {
 } from "lucide-react";
 
 import { selectActiveConversation, useWorkspaceStore } from "@/stores/workspace-store";
+import { selectLedger, useContextInspectorStore } from "@/stores/context-inspector-store";
 import type { Attachment } from "@/features/workspace/types";
 import { SELECTION_ACTION_PROMPTS } from "@/features/workspace/types";
 import type { ComposerMode } from "@/features/workspace/assistant/contracts";
@@ -462,6 +463,10 @@ export function AIComposer() {
   const contextBranch = meta?.repository.branch ?? null;
   const contextCurrentFile = activeTabPath ?? null;
 
+  // 8C: the user's Context Inspector ledger travels with every run so the
+  // backend can enforce pin/remove/memory-disable decisions.
+  const ledger = useContextInspectorStore((s) => selectLedger(s, activeConversationId));
+
   const submit = useCallback(() => {
     const trimmed = draft.trim();
     if (!trimmed || isGenerating) return;
@@ -476,6 +481,11 @@ export function AIComposer() {
         // Selected code reaches the run through the editor's selection
         // actions (embedded above); no live selection tracker is faked here.
         selectedCode: null,
+      },
+      ledger: {
+        excludedRefs: [...ledger.removedRefs.map((r) => r.ref)],
+        excludedMemoryIds: [...ledger.disabledMemoryIds],
+        pinnedRefs: [...ledger.pinnedRefs],
       },
     });
     setDraft("");
@@ -495,6 +505,7 @@ export function AIComposer() {
     contextRepository,
     contextBranch,
     contextCurrentFile,
+    ledger,
     setDraft,
   ]);
 

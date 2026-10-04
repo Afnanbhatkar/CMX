@@ -26,7 +26,11 @@ import {
   selectActiveConversation,
   useWorkspaceStore,
 } from "@/stores/workspace-store";
-import type { ComposerMode, SequencedAssistantEvent } from "../assistant/contracts";
+import type {
+  ComposerMode,
+  IntakeAnswer,
+  SequencedAssistantEvent,
+} from "../assistant/contracts";
 import {
   applyWireEvent,
   assistantActivityEngine,
@@ -35,6 +39,7 @@ import {
   exposeAssistantTooling,
   noteTransportSeq,
   recordFirstEventLatency,
+  resumeRunFromAwaiting,
   runCancelled,
   runFailed,
   runStarted,
@@ -80,11 +85,23 @@ export interface AssistantSendContext {
   selectedCode: string | null;
 }
 
+/** The user's Context Inspector ledger, enforced server-side per run (8C). */
+export interface AssistantContextLedger {
+  /** Refs removed by the user — filtered from retrieval; never silently return. */
+  excludedRefs: string[];
+  /** Memory ids disabled for this request — never reach the model. */
+  excludedMemoryIds: string[];
+  /** Refs pinned by the user — read like attachments on every run. */
+  pinnedRefs: string[];
+}
+
 export interface AssistantSendOptions {
   mode: ComposerMode;
   /** Requested gateway model id; null = gateway default. */
   model: string | null;
   context: AssistantSendContext;
+  /** 8C: the user's pin/remove/memory-disable ledger (defaults to empty). */
+  ledger?: AssistantContextLedger;
 }
 
 /** Prior-context window sent to the API (backend also caps at 30 messages). */
@@ -144,6 +161,13 @@ export interface AssistantRun {
   ) => void;
   stop: () => void;
   regenerate: () => void;
+  /** 8C: deliver answers to the paused run (resumes it on success). */
+  answerIntake: (
+    conversationId: string,
+    messageId: string,
+    runId: string,
+    answers: IntakeAnswer[],
+  ) => Promise<boolean>;
   isGenerating: boolean;
 }
 
@@ -288,6 +312,30 @@ export function useAssistantRun(): AssistantRun {
             firstEventMs: Math.round(performance.now() - t0),
           });
         }
+        // 8C surfaces: persist the run's measured facts onto the message so
+        // history keeps the truth after the engine moves on.
+        if (event.type === "CONTEXT_SNAPSHOT") {
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            contextSnapshot: event.snapshot,
+          });
+        } else if (event.type === "MEMORY_USED") {
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            memories: event.memories,
+            memoryNote: event.note,
+          });
+        } else if (event.type === "INTAKE_QUESTIONS_REQUIRED") {
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            questionBatch: event.batch,
+          });
+        } else if (event.type === "APPROVAL_REQUIRED") {
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            approval: event.approval,
+          });
+        } else if (event.type === "RUN_STARTED") {
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            runId: event.runId,
+          });
+        }
         syncActivityFromEngine(conversationId, assistantMsgId);
       };
 
@@ -308,6 +356,19 @@ export function useAssistantRun(): AssistantRun {
                   attachments:
                     wireAttachments && wireAttachments.length > 0
                       ? wireAttachments
+                      : undefined,
+                  /* 8C ledger — the user's context controls, enforced server-side. */
+                  excludedRefs:
+                    options?.ledger && options.ledger.excludedRefs.length > 0
+                      ? options.ledger.excludedRefs
+                      : undefined,
+                  excludedMemoryIds:
+                    options?.ledger && options.ledger.excludedMemoryIds.length > 0
+                      ? options.ledger.excludedMemoryIds
+                      : undefined,
+                  pinnedRefs:
+                    options?.ledger && options.ledger.pinnedRefs.length > 0
+                      ? options.ledger.pinnedRefs
                       : undefined,
                 }
               : undefined,
@@ -542,6 +603,59 @@ export function useAssistantRun(): AssistantRun {
   );
 
   /**
+   * 8C question flow: deliver the user's answers to the paused run. The run
+   * resumes ONLY after this succeeds — pause → ask → resume, never silently.
+   */
+  const answerIntake = useCallback(
+    async (
+      conversationId: string,
+      messageId: string,
+      runId: string,
+      answers: IntakeAnswer[],
+    ): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/assistant/runs/answers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runId, answers }),
+        });
+        const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+        if (!res.ok || !data?.ok) {
+          const error =
+            typeof data?.error === "string" && data.error.trim().length > 0
+              ? data.error
+              : `Delivering answers failed (HTTP ${res.status}).`;
+          useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
+            state: "error",
+            error,
+          });
+          useWorkspaceStore.getState().setConversationStatus(conversationId, "error");
+          runFailed(runId, error);
+          return false;
+        }
+        // Delivered: the engine resumes, the message records the answers.
+        resumeRunFromAwaiting();
+        useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
+          intakeAnswers: answers,
+        });
+        return true;
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Could not reach the answers endpoint.";
+        useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
+          state: "error",
+          error: message,
+        });
+        useWorkspaceStore.getState().setConversationStatus(conversationId, "error");
+        return false;
+      }
+    },
+    [],
+  );
+
+  /**
    * Regenerate keeps history honest: nothing is removed; a NEW assistant
    * placeholder is appended and the completion re-runs against the history up
    * to the last user message.
@@ -571,5 +685,5 @@ export function useAssistantRun(): AssistantRun {
     void runCompletion(conversation.id, history);
   }, [runCompletion]);
 
-  return { send, stop, regenerate, isGenerating };
+  return { send, stop, regenerate, answerIntake, isGenerating };
 }

@@ -23,6 +23,10 @@ declare global {
       lastRunMetrics: () => ReturnType<typeof getLastRunMetrics>;
       /** The pipeline stage vocabulary (memory-aware pipeline, V2.1). */
       pipelineStages: readonly string[];
+      /** 8C: the last run's measured context snapshot (null before one). */
+      lastContextSnapshot: () => ReturnType<
+        typeof assistantActivityEngine.getSnapshot
+      >["contextSnapshot"];
     };
   }
 }
@@ -37,5 +41,6 @@ export function exposeAssistantTooling(): void {
     engineState: () => assistantActivityEngine.getSnapshot(),
     lastRunMetrics: () => getLastRunMetrics(),
     pipelineStages: PIPELINE_STAGES,
+    lastContextSnapshot: () => assistantActivityEngine.getSnapshot().contextSnapshot,
   };
 }

@@ -24,7 +24,11 @@
 import type {
   ActivityNode,
   ActivityStatus,
+  ApprovalRequest,
   AssistantStreamEvent,
+  ContextInspectorSnapshot,
+  IntakeQuestionBatch,
+  MemoryRecord,
   RunStatus,
 } from "./contracts";
 import { canTransition } from "./contracts";
@@ -48,6 +52,17 @@ export interface ActivityEngineSnapshot {
   lastError: string | null;
   /** Honest record of the last rejected event (contract bugs stay visible). */
   lastRejection: string | null;
+  /* ---- 8C additions — the context/approval/question surfaces ---- */
+  /** The measured context snapshot the backend emitted (CONTEXT_SNAPSHOT). */
+  contextSnapshot: ContextInspectorSnapshot | null;
+  /** Real retrieved memory records (MEMORY_USED) — empty when none matched. */
+  memories: MemoryRecord[];
+  /** Honest note when no memory applied. */
+  memoryNote: string | null;
+  /** Approval requests emitted by the run (APPROVAL_REQUIRED). */
+  approvals: ApprovalRequest[];
+  /** The active intake question batch while the run is paused (8C question flow). */
+  questionBatch: IntakeQuestionBatch | null;
 }
 
 const EMPTY_SNAPSHOT: ActivityEngineSnapshot = {
@@ -61,6 +76,11 @@ const EMPTY_SNAPSHOT: ActivityEngineSnapshot = {
   searchResults: [],
   lastError: null,
   lastRejection: null,
+  contextSnapshot: null,
+  memories: [],
+  memoryNote: null,
+  approvals: [],
+  questionBatch: null,
 };
 
 /* ------------------------------------------------------------------ */
@@ -92,7 +112,7 @@ export class AssistantActivityEngine {
   }
 
   activityStart(node: ActivityNode): void {
-    if (this.state.status !== "running") {
+    if (this.state.status !== "running" && this.state.status !== "awaiting-answers") {
       this.reject(`ACTIVITY_STARTED outside a running run (${node.id})`);
       return;
     }
@@ -134,7 +154,7 @@ export class AssistantActivityEngine {
   }
 
   fileReferenced(path: string, line: number | null): void {
-    if (this.state.status !== "running") {
+    if (this.state.status !== "running" && this.state.status !== "awaiting-answers") {
       this.reject(`FILE_REFERENCED outside a running run (${path})`);
       return;
     }
@@ -147,7 +167,7 @@ export class AssistantActivityEngine {
   }
 
   searchResult(query: string, hits: number, topFiles: string[]): void {
-    if (this.state.status !== "running") {
+    if (this.state.status !== "running" && this.state.status !== "awaiting-answers") {
       this.reject("SEARCH_RESULT outside a running run");
       return;
     }
@@ -159,7 +179,7 @@ export class AssistantActivityEngine {
   }
 
   completeRun(completedAt: number): void {
-    if (this.state.status !== "running") {
+    if (this.state.status !== "running" && this.state.status !== "awaiting-answers") {
       this.reject(`RUN_COMPLETED while ${this.state.status}`);
       return;
     }
@@ -173,7 +193,7 @@ export class AssistantActivityEngine {
   }
 
   failRun(error: string, failedAt: number): void {
-    if (this.state.status !== "running") {
+    if (this.state.status !== "running" && this.state.status !== "awaiting-answers") {
       this.reject(`RUN_FAILED while ${this.state.status}`);
       return;
     }
@@ -188,7 +208,7 @@ export class AssistantActivityEngine {
   }
 
   cancelRun(cancelledAt: number): void {
-    if (this.state.status !== "running") {
+    if (this.state.status !== "running" && this.state.status !== "awaiting-answers") {
       this.reject(`RUN_CANCELLED while ${this.state.status}`);
       return;
     }
@@ -201,9 +221,60 @@ export class AssistantActivityEngine {
     this.emit();
   }
 
+  /* ---------------- 8C: context / memory / approval / question flow ------- */
+
+  /** Record the measured context snapshot emitted by the backend. */
+  setContextSnapshot(snapshot: ContextInspectorSnapshot): void {
+    this.state = { ...this.state, contextSnapshot: snapshot };
+    this.emit();
+  }
+
+  /** Record real retrieved memory records (or the honest none-matched note). */
+  setMemories(memories: MemoryRecord[], note: string | null): void {
+    this.state = { ...this.state, memories, memoryNote: note };
+    this.emit();
+  }
+
+  /** Record an approval request (what will change, risk, permissions…). */
+  addApproval(approval: ApprovalRequest): void {
+    if (this.state.approvals.some((a) => a.id === approval.id)) return;
+    this.state = { ...this.state, approvals: [...this.state.approvals, approval] };
+    this.emit();
+  }
+
+  /**
+   * Pause the run for material questions (8C question flow). The run stays
+   * on the wire; it resumes ONLY when the user answers.
+   */
+  pauseForQuestions(batch: IntakeQuestionBatch): void {
+    if (this.state.status !== "running") {
+      this.reject(`INTAKE_QUESTIONS_REQUIRED while ${this.state.status}`);
+      return;
+    }
+    this.state = { ...this.state, status: "awaiting-answers", questionBatch: batch };
+    this.emit();
+  }
+
+  /**
+   * Resume after the user answered. Activity events arriving while paused
+   * also implicitly resume (defensive against answer/stream races).
+   */
+  resumeFromAwaiting(): void {
+    if (this.state.status !== "awaiting-answers") return;
+    this.state = { ...this.state, status: "running", questionBatch: null };
+    this.emit();
+  }
+
   /** Apply any contract event to the engine — the single ingestion route. */
   applyEvent(event: AssistantStreamEvent): void {
-    if (event.type !== "RUN_STARTED" && event.runId !== this.state.runId) {
+    if (
+      event.type !== "RUN_STARTED" &&
+      event.runId !== this.state.runId &&
+      // CONTEXT_SNAPSHOT/MEMORY_USED may legally arrive for a run whose
+      // RUN_STARTED frame raced ahead — they are per-run facts, not lifecycle.
+      event.type !== "CONTEXT_SNAPSHOT" &&
+      event.type !== "MEMORY_USED"
+    ) {
       this.reject(`${event.type} for foreign run ${event.runId}`);
       return;
     }
@@ -249,11 +320,22 @@ export class AssistantActivityEngine {
       case "SEARCH_RESULT":
         this.searchResult(event.query, event.hits, event.topFiles);
         break;
+      case "CONTEXT_SNAPSHOT":
+        this.setContextSnapshot(event.snapshot);
+        break;
+      case "MEMORY_USED":
+        this.setMemories(event.memories, event.note);
+        break;
+      case "INTAKE_QUESTIONS_REQUIRED":
+        this.pauseForQuestions(event.batch);
+        break;
       case "APPROVAL_REQUIRED":
+        this.addApproval(event.approval);
+        break;
       case "QUESTION_REQUIRED":
       case "RESPONSE_CHUNK":
-        // Approval/question UI is 8C; segment rendering is 8.5. The engine
-        // records nothing for these yet — honest no-ops until those phases.
+        // Single mid-run questions and segment rendering are 8.5 surfaces;
+        // 8C consumes the batched intake flow instead. Honest no-op here.
         break;
       case "RUN_COMPLETED":
         this.completeRun(event.completedAt);

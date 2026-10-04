@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/tooltip";
 import { ConversationView } from "./ConversationView";
 import { AIComposer } from "./AIComposer";
+import { ContextInspector } from "./ContextInspector";
 
 /** Status → chip tone (real statuses only, honest labels). */
 const STATUS_CHIP: Record<
@@ -112,7 +113,12 @@ export function AIChatPanel() {
       {/* The composer is ALWAYS visible (spec §25): with no active
           conversation, sending from it starts a new conversation. */}
       {activeConversation ? (
-        <ConversationView conversationId={activeConversation.id} />
+        <>
+          <ConversationView conversationId={activeConversation.id} />
+          {/* Phase 8C: exactly what the AI received + pin/remove/open/replace
+              controls for the next request. */}
+          <ContextInspector conversationId={activeConversation.id} />
+        </>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center p-4">
           <div className="w-full max-w-sm rounded-lg border border-border-subtle p-8 text-center">

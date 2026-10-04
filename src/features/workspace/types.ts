@@ -11,6 +11,14 @@
  */
 
 import type { ActivityKind } from "@/types/contracts";
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+  ContextInspectorSnapshot,
+  IntakeAnswer,
+  IntakeQuestionBatch,
+  MemoryRecord,
+} from "@/features/workspace/assistant/contracts";
 
 /* ------------------------------------------------------------------ */
 /* Layout                                                              */
@@ -171,6 +179,23 @@ export interface ChatMessage {
   firstEventMs?: number | null;
   /** Engine-measured total run duration behind "Thought for Xs" (8B). */
   thoughtForMs?: number | null;
+  /* ---- 8C additions — context inspector / memory / questions / approval ---- */
+  /** The backend run id this message belongs to (question-flow addressing). */
+  runId?: string | null;
+  /** Measured truth of what the run actually received (CONTEXT_SNAPSHOT). */
+  contextSnapshot?: ContextInspectorSnapshot | null;
+  /** Real retrieved memory records shown by the "Memory used: N" chip. */
+  memories?: MemoryRecord[];
+  /** Honest note when no memory applied. */
+  memoryNote?: string | null;
+  /** The intake question batch the run paused on (8C question flow). */
+  questionBatch?: IntakeQuestionBatch | null;
+  /** The answers the user gave (persisted once the run resumed). */
+  intakeAnswers?: IntakeAnswer[];
+  /** Approval request parsed from the model's proposal (APPROVAL_REQUIRED). */
+  approval?: ApprovalRequest | null;
+  /** The recorded human decision on the approval card (never auto-applied). */
+  approvalDecision?: ApprovalDecision | null;
 }
 
 export interface Conversation {

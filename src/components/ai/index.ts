@@ -19,3 +19,5 @@ export {
   type ThoughtChainProps,
 } from "./ThoughtChain";
 export { ActivityPreview, type ActivityPreviewProps } from "./ActivityPreview";
+export { ApprovalCard, type ApprovalCardProps } from "./ApprovalCard";
+export { BlastRadiusSlot } from "./BlastRadiusSlot";
