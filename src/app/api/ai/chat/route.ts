@@ -7,15 +7,25 @@ import {
 } from "@/server/services/assistant-service";
 
 /**
- * POST /api/ai/chat — thin handler over the shared assistant-service
- * (Phase 3 refactor). The wire contract is UNCHANGED — the frontend's
- * use-assistant-run.ts depends on exactly these shapes:
- *   success → { ok: true, content }
+ * POST /api/ai/chat — thin handler over the shared assistant-service.
+ *
+ * Phase 8A wire contract (additive — the Phase ≤7 shapes still parse):
+ *   body: { messages, context?, mode?, model? }
+ *     - mode:  "search" | "code" | "agent" | "loop"  (composer mode contract)
+ *     - model: requested LLM Gateway model id (gateway validates; unknown
+ *              ids fail with 400, never silently remapped)
+ *     - context.selectedCode: the user's exact selected code
+ *     - context.attachments:  composer attachments; repository-file paths
+ *              are RE-READ server-side (allowlisted) — unreadable files are
+ *              reported honestly to the model, never faked
+ *   success → { ok: true, content, mode, servedModel }
  *   failure → { ok: false, error } (400 invalid payload, 502 assistant)
  *
- * Scope honesty (Phase 2 spec §18): single-turn-completion surface only; the
- * full AI execution engine is NOT implemented (see assistant-service).
+ * Scope honesty: single-turn-completion surface only; the full AI execution
+ * engine is NOT implemented (see assistant-service).
  */
+
+const COMPOSER_MODES = ["search", "code", "agent", "loop"] as const;
 
 const bodySchema = z.object({
   messages: z
@@ -32,8 +42,21 @@ const bodySchema = z.object({
       repository: z.string().max(128).optional(),
       branch: z.string().max(128).optional(),
       activeFile: z.string().max(512).optional(),
+      selectedCode: z.string().max(8_000).optional(),
+      attachments: z
+        .array(
+          z.object({
+            kind: z.enum(["repository-file", "selection", "session-file"]),
+            label: z.string().max(256),
+            path: z.string().max(512).nullable().optional(),
+          }),
+        )
+        .max(8)
+        .optional(),
     })
     .optional(),
+  mode: z.enum(COMPOSER_MODES).optional(),
+  model: z.string().max(64).optional(),
 });
 
 export async function POST(request: NextRequest) {
@@ -56,17 +79,28 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { content } = await runAssistantTurn({
+    const { content, servedModel } = await runAssistantTurn({
       messages: parsed.data.messages,
       context: parsed.data.context,
+      mode: parsed.data.mode,
+      model: parsed.data.model,
     });
-    return NextResponse.json({ ok: true, content });
+    return NextResponse.json({
+      ok: true,
+      content,
+      mode: parsed.data.mode ?? "search",
+      servedModel,
+    });
   } catch (error) {
     if (error instanceof AssistantError && error.reason === "empty") {
       return NextResponse.json(
         { ok: false, error: "The assistant returned an empty response." },
         { status: 502 },
       );
+    }
+    if (error instanceof AssistantError && error.reason === "failed") {
+      // Includes honest unknown-model failures from the gateway catalog.
+      return NextResponse.json({ ok: false, error: error.message }, { status: 502 });
     }
     // Service failures are already logged inside assistant-service.
     return NextResponse.json(

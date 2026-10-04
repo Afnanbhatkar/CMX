@@ -6,6 +6,74 @@ is phase-based during the V2 build-out.
 
 ## [Phase 7 — Hybrid Search + Hindi/Hinglish] — a real search engine for the workspace
 
+## [Phase 8A — Advanced AI Composer + Mode System] — 2026-10-04
+
+V2.1 ADDITIONS carried in the same phase: memory-aware pipeline contract,
+intake question batching, evidence-backed uncertainty vocabulary, and Context
+Inspector snapshot types (all contract-level; their dedicated UIs stay with
+8B/8C/later phases per the partition).
+
+### Added
+- **LLM Gateway** (`src/server/llm/llm-gateway.ts`): the ONLY module allowed
+  to import a model-provider SDK. Real model catalog with measured truth
+  (the transport serves `glm-4-plus` for all chat ids today — the catalog
+  says so instead of advertising a fake multi-model switcher), honest
+  `servedModel` reporting per completion, 60s hard timeout, typed
+  `LLMGatewayError`. New `GET /api/llm/models` serves the catalog to the UI.
+- **Composer modes** (8A §1/§4): Search / Code / Agent / Loop as a segmented
+  control integrated INTO the text input. Every request serializes
+  `mode` (typed backend zod enum); the assistant system prompt applies an
+  honest per-mode contract (Agent/Loop state plainly that autonomous
+  execution/looping are not connected — no pretended multi-step behavior).
+- **Composer input surface** (8A §2): multiline input, send, stop, cancel
+  (toolbar Stop + global Esc when a run is in flight), regenerate,
+  attachments, current-file/selected-code context, model selection through
+  the LLM Gateway, context selection popover (repository / branch / current
+  file toggles with real values; selected code honestly shown as "—" until a
+  live selection tracker exists).
+- **Attachments below the text field** (8A §3): repository-file attachments
+  are picked from the REAL workspace tree (`/api/repository/tree`, 60s TTL
+  cache, ≤80 rendered rows) and render as shared `FileReferenceChip`s whose
+  click routes through the EditorNavigationService. A filename that cannot
+  resolve is never displayed; unresolvable server-side reads are reported
+  honestly to the model (never invented).
+- **Backend attachment reality**: repository-file attachments are re-read
+  server-side via the allowlisted `readWorkspaceFile` (≤3 files, 6k chars
+  each) — the model answers from real file content (verified: correct
+  `build` script answer from the actual `package.json`).
+- **Keyboard** (8A §5): Enter send, Shift+Enter newline, Alt+1..4 mode,
+  Alt+M cycle, global Esc stops a running completion. Command Palette adds a
+  "Composer" group: 4 mode commands, cycle mode, attach file (opens the
+  picker), cancel run (enabled only while generating), regenerate (enabled
+  when the last message is an assistant reply).
+- **Run meta honesty**: assistant messages display the issued mode and the
+  model the gateway ACTUALLY served (from the response payload), as chips.
+- **V2.1 contract additions** (`assistant/contracts.ts`, additive):
+  extended `PIPELINE_STAGES` (+ task-contract, memory-retrieval,
+  context-inspector, verification), `MEMORY_PRECEDENCE`
+  (current user instruction > repository evidence > saved explicit memory >
+  inferred memory) with `MemoryRecord`/`MemoryRetrievalOutcome`,
+  `TaskContract`, `IntakeQuestionBatch` + `INTAKE_QUESTIONS_REQUIRED` event,
+  `UNCERTAINTY_LEVELS` (Confirmed/Likely/Potential/Unknown) +
+  `EvidenceBackedClaim`, `ContextInspectorSnapshot` types, and the
+  `ComposerModelSlot`/`GatewayModelDescriptor` evolution for the real
+  gateway catalog. Memory-precedence and uncertainty-vocabulary instructions
+  are live in the assistant system prompt.
+- **Responsive** (8A §7): composer verified usable at 360px with zero
+  horizontal overflow (`scrollWidth === 360` measured).
+
+### Changed
+- `POST /api/ai/chat` wire contract (additive): optional `mode`, `model`,
+  `context.selectedCode`, `context.attachments`; success response now also
+  echoes `mode` + `servedModel`. Unknown gateway model ids fail honestly.
+- `assistant-service.ts` routes ALL model access through the LLM Gateway
+  (pre-8A conversation wire shape preserved: one assistant preamble +
+  history — the transport rejects consecutive assistant messages).
+
+### Non-goals respected
+Activity Engine UI (8B), approval engine, autonomous loop, response
+renderer (8.5), coding mutation — none implemented.
+
 ### Added
 - **Hybrid retrieval engine** (`src/server/search/`): BM25 lexical (k1=1.4,
   b=0.72, idf-weighted inverted index over file + symbol-name units) +

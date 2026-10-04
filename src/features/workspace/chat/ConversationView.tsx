@@ -256,6 +256,24 @@ function AssistantMessage({
           {isLast && (
             <RegenerateButton disabled={isGenerating} onRegenerate={onRegenerate} />
           )}
+          {/* Phase 8A run meta — measured truth only (mode issued, model the
+              gateway actually served). Rendered only when present. */}
+          {message.mode ? (
+            <span
+              className="ml-1 rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground/80"
+              title={`Run mode: ${message.mode}`}
+            >
+              {message.mode}
+            </span>
+          ) : null}
+          {message.servedModel ? (
+            <span
+              className="rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/80"
+              title={`Model served by the LLM Gateway: ${message.servedModel}`}
+            >
+              {message.servedModel}
+            </span>
+          ) : null}
         </div>
       )}
 

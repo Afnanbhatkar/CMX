@@ -226,7 +226,9 @@ export interface WorkspaceState {
   updateMessage: (
     conversationId: string,
     messageId: string,
-    patch: Partial<Pick<ChatMessage, "content" | "state" | "error" | "activity">>,
+    patch: Partial<
+      Pick<ChatMessage, "content" | "state" | "error" | "activity" | "mode" | "servedModel">
+    >,
   ) => void;
   setConversationStatus: (id: string, status: Conversation["status"]) => void;
 

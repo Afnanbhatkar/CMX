@@ -22,6 +22,7 @@ import {
   selectActiveConversation,
   useWorkspaceStore,
 } from "@/stores/workspace-store";
+import type { ComposerMode } from "../assistant/contracts";
 import type {
   Attachment,
   ChatActivityStep,
@@ -46,10 +47,37 @@ interface ApiChatMessage {
   content: string;
 }
 
+/** Wire shape of one composer attachment (Phase 8A typed contract). */
+interface ApiChatAttachment {
+  kind: "repository-file" | "selection" | "session-file";
+  label: string;
+  path: string | null;
+}
+
 interface ApiChatResponse {
   ok?: boolean;
   content?: string;
+  mode?: ComposerMode;
+  servedModel?: string | null;
   error?: string;
+}
+
+/**
+ * Explicit context the composer attached to THIS run (Phase 8A §2
+ * "context selection"). All fields are real when present, null otherwise.
+ */
+export interface AssistantSendContext {
+  repository: string | null;
+  branch: string | null;
+  currentFile: string | null;
+  selectedCode: string | null;
+}
+
+export interface AssistantSendOptions {
+  mode: ComposerMode;
+  /** Requested gateway model id; null = gateway default. */
+  model: string | null;
+  context: AssistantSendContext;
 }
 
 /** Prior-context window sent to the API (backend also caps at 30 messages). */
@@ -131,7 +159,12 @@ interface ChatMessageLike {
 let activeController: AbortController | null = null;
 
 export interface AssistantRun {
-  send: (conversationId: string, content: string, attachments?: Attachment[]) => void;
+  send: (
+    conversationId: string,
+    content: string,
+    attachments?: Attachment[],
+    options?: AssistantSendOptions,
+  ) => void;
   stop: () => void;
   regenerate: () => void;
   isGenerating: boolean;
@@ -163,7 +196,12 @@ export function useAssistantRun(): AssistantRun {
    * `history` is the exact wire payload (already capped/filtered).
    */
   const runCompletion = useCallback(
-    async (conversationId: string, history: ApiChatMessage[]) => {
+    async (
+      conversationId: string,
+      history: ApiChatMessage[],
+      options?: AssistantSendOptions,
+      wireAttachments?: ApiChatAttachment[],
+    ) => {
       if (generatingRef.current || activeController) return;
 
       const store = useWorkspaceStore.getState();
@@ -183,7 +221,13 @@ export function useAssistantRun(): AssistantRun {
       const controller = new AbortController();
       activeController = controller;
 
-      const activeFile = useWorkspaceStore.getState().activeTabPath ?? undefined;
+      const activeFile = options?.context.currentFile ?? undefined;
+      const hasContext =
+        Boolean(activeFile) ||
+        Boolean(options?.context.repository) ||
+        Boolean(options?.context.branch) ||
+        Boolean(options?.context.selectedCode) ||
+        (wireAttachments?.length ?? 0) > 0;
 
       /* Phase 8 plumbing: report the run through the ActivityEngine. Both
          steps are genuinely in-flight during the single backend call —
@@ -214,7 +258,20 @@ export function useAssistantRun(): AssistantRun {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             messages: history,
-            context: activeFile ? { activeFile } : undefined,
+            mode: options?.mode,
+            model: options?.model ?? undefined,
+            context: hasContext
+              ? {
+                  repository: options?.context.repository ?? undefined,
+                  branch: options?.context.branch ?? undefined,
+                  activeFile,
+                  selectedCode: options?.context.selectedCode ?? undefined,
+                  attachments:
+                    wireAttachments && wireAttachments.length > 0
+                      ? wireAttachments
+                      : undefined,
+                }
+              : undefined,
           }),
           signal: controller.signal,
         });
@@ -234,6 +291,8 @@ export function useAssistantRun(): AssistantRun {
               content,
               state: "complete",
               activity: doneSteps(),
+              mode: options?.mode,
+              servedModel: typeof data.servedModel === "string" ? data.servedModel : null,
             },
           );
           useWorkspaceStore
@@ -301,7 +360,12 @@ export function useAssistantRun(): AssistantRun {
   );
 
   const send = useCallback(
-    (conversationId: string, content: string, attachments?: Attachment[]) => {
+    (
+      conversationId: string,
+      content: string,
+      attachments?: Attachment[],
+      options?: AssistantSendOptions,
+    ) => {
       const trimmed = typeof content === "string" ? content.trim() : "";
       if (!trimmed || generatingRef.current || activeController) return;
 
@@ -329,7 +393,22 @@ export function useAssistantRun(): AssistantRun {
         { role: "user", content: capContent(trimmed) },
       ];
 
-      void runCompletion(conversationId, history);
+      // Phase 8A typed wire attachments: only REAL repository files and real
+      // selections go on the wire; labels without a resolvable path do not.
+      const wireAttachments: ApiChatAttachment[] = (attachments ?? [])
+        .filter(
+          (a): a is Attachment & { path: string } =>
+            (a.kind === "file" || a.kind === "selection") &&
+            typeof a.path === "string" &&
+            a.path.trim().length > 0,
+        )
+        .map((a) => ({
+          kind: a.kind === "file" ? ("repository-file" as const) : ("selection" as const),
+          label: a.label,
+          path: a.path,
+        }));
+
+      void runCompletion(conversationId, history, options, wireAttachments);
     },
     [runCompletion],
   );

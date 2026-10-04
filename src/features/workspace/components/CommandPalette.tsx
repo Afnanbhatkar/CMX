@@ -23,6 +23,7 @@ import {
   Bookmark,
   Bug,
   ClipboardCheck,
+  Code2,
   File,
   FlaskConical,
   Focus,
@@ -34,12 +35,16 @@ import {
   MessageSquare,
   Network,
   PanelLeft,
+  Paperclip,
   Plus,
+  Repeat,
   RotateCcw,
   Search,
   Settings,
   ShieldCheck,
   Sparkles,
+  Square,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 
@@ -53,10 +58,13 @@ import {
   CommandShortcut,
 } from "@/components/ui/command";
 import { useWorkspaceStore } from "@/stores/workspace-store";
+import type { ComposerMode } from "@/features/workspace/assistant/contracts";
 import { editorNavigation } from "../editor-navigation";
 import { navigationHistory } from "../editor/navigation-history";
 import { getDebugCapability } from "../debug/dap-contracts";
 import type { RepoTreeNode } from "../types";
+import { useAssistantRun } from "../chat/use-assistant-run";
+import { useChatUiStore } from "../chat/chat-ui-store";
 
 export interface CommandPaletteProps {
   filesMode: boolean;
@@ -100,6 +108,37 @@ export function CommandPalette({ filesMode, onFilesModeChange }: CommandPaletteP
   const resetLayout = useWorkspaceStore((s) => s.resetLayout);
 
   const mode = filesMode ? "files" : "commands";
+
+  /* Composer commands (Phase 8A) — modes, attach, cancel, regenerate. */
+  const composerMode = useChatUiStore((s) => s.mode);
+  const setComposerMode = useChatUiStore((s) => s.setMode);
+  const requestAttachFile = useChatUiStore((s) => s.requestAttachFile);
+  const { stop: stopAssistantRun, regenerate: regenerateAssistantRun, isGenerating } =
+    useAssistantRun();
+  const lastIsAssistant = useWorkspaceStore((s) => {
+    const conversation = s.conversations.find((c) => c.id === s.activeConversationId);
+    const messages = conversation?.messages ?? [];
+    return messages.length > 0 && messages[messages.length - 1].role === "assistant";
+  });
+
+  const runComposerCommand = (action: () => void) => {
+    setSection("assistant");
+    action();
+    close();
+  };
+
+  const composerModeCommand = (
+    id: string,
+    target: ComposerMode,
+    icon: LucideIcon,
+    shortcut: string,
+  ): PaletteCommand => ({
+    id,
+    label: `Composer mode: ${target[0]!.toUpperCase()}${target.slice(1)}`,
+    icon,
+    shortcut,
+    run: () => runComposerCommand(() => setComposerMode(target)),
+  });
 
   const [fileState, setFileState] = useState<{
     status: "loading" | "ready" | "error";
@@ -287,6 +326,55 @@ export function CommandPalette({ filesMode, onFilesModeChange }: CommandPaletteP
           shortcut: "⌘I",
           run: () => {
             requestComposerFocus();
+            close();
+          },
+        },
+      ],
+    },
+    {
+      heading: "Composer",
+      commands: [
+        composerModeCommand("composer-mode-search", "search", Search, "Alt+1"),
+        composerModeCommand("composer-mode-code", "code", Code2, "Alt+2"),
+        composerModeCommand("composer-mode-agent", "agent", Workflow, "Alt+3"),
+        composerModeCommand("composer-mode-loop", "loop", Repeat, "Alt+4"),
+        {
+          id: "composer-cycle-mode",
+          label: `Composer: cycle mode (current: ${composerMode})`,
+          icon: Workflow,
+          shortcut: "Alt+M",
+          run: () =>
+            runComposerCommand(() => {
+              const order: ComposerMode[] = ["search", "code", "agent", "loop"];
+              const current = order.indexOf(useChatUiStore.getState().mode);
+              setComposerMode(order[(current + 1) % order.length]!);
+            }),
+        },
+        {
+          id: "composer-attach-file",
+          label: "Attach a repository file to composer",
+          icon: Paperclip,
+          run: () => runComposerCommand(requestAttachFile),
+        },
+        {
+          id: "composer-cancel-run",
+          label: "Cancel assistant run",
+          icon: Square,
+          enabled: isGenerating,
+          disabledReason: "No assistant run is active.",
+          run: () => {
+            stopAssistantRun();
+            close();
+          },
+        },
+        {
+          id: "composer-regenerate",
+          label: "Regenerate last response",
+          icon: RotateCcw,
+          enabled: lastIsAssistant && !isGenerating,
+          disabledReason: "The latest message must be an assistant reply.",
+          run: () => {
+            regenerateAssistantRun();
             close();
           },
         },

@@ -33,19 +33,163 @@ export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8";
  * The assistant pipeline every run conceptually passes through. Sub-phases
  * map their engines onto these stages; the stage ids are stable identifiers
  * for activity reporting and telemetry.
+ *
+ * V2.1 ADDITIONS (memory-aware pipeline) — the stage list was extended
+ * additively (no existing id removed or renamed) to carry the updated
+ * pipeline: User Request → Language Detection → Intent Understanding →
+ * Task Contract (when material) → Memory Retrieval → Repository Retrieval →
+ * Context Inspector → Agent/Tool Selection → Execution → Verification →
+ * Response.
  */
 export const PIPELINE_STAGES = [
   "language-detection",
   "intent-understanding",
   "task-classification",
+  "task-contract",
+  "memory-retrieval",
   "repository-retrieval",
+  "context-inspector",
   "tool-selection",
   "agent-execution",
   "activity-events",
+  "verification",
   "response",
 ] as const;
 
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
+
+/* ------------------------------------------------------------------ */
+/* §1.1 (V2.1) — Memory contract                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Evidence precedence, strongest first. Memory may inform style,
+ * conventions and prior decisions but must NEVER override actual
+ * repository truth:
+ *
+ *   current user instruction > actual repository code/evidence >
+ *   saved explicit memory > inferred memory
+ */
+export const MEMORY_PRECEDENCE = [
+  "current-user-instruction",
+  "repository-evidence",
+  "saved-explicit-memory",
+  "inferred-memory",
+] as const;
+
+export type MemoryPrecedenceTier = (typeof MEMORY_PRECEDENCE)[number];
+
+/** A retrieved memory record (only real retrievals are ever listed). */
+export interface MemoryRecord {
+  id: string;
+  tier: Extract<MemoryPrecedenceTier, "saved-explicit-memory" | "inferred-memory">;
+  /** Privacy-safe content actually handed to the run (no secrets). */
+  content: string;
+  /** Where it came from (worklog, phase docs, user-saved note, …). */
+  source: string;
+}
+
+/** Outcome of the memory-retrieval stage for ONE run. */
+export interface MemoryRetrievalOutcome {
+  retrieved: MemoryRecord[];
+  /** Whether any memory actually informed the response. */
+  applied: boolean;
+  /** Why nothing was applied ("no memory store connected", …). */
+  note: string | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* §1.2 (V2.1) — Task contract (when material)                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The material understanding of a request, produced by the task-contract
+ * stage only when the request is substantial enough to warrant one.
+ */
+export interface TaskContract {
+  /** Short imperative title ("Add retry to importer"). */
+  title: string;
+  /** What success looks like, in plain language. */
+  goal: string;
+  /** Real constraints (files, compat, perf, style). */
+  constraints: string[];
+  /** The concrete deliverable ("patch + tests", "explanation", …). */
+  deliverable: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* §1.3 (V2.1) — Uncertainty vocabulary (evidence-backed)              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Visible uncertainty labels the response system supports. Every label
+ * MUST be evidence-backed: "confirmed"/"likely" carry evidence references,
+ * "potential" states the assumption, "unknown" states what is missing.
+ */
+export const UNCERTAINTY_LEVELS = [
+  "confirmed",
+  "likely",
+  "potential",
+  "unknown",
+] as const;
+
+export type UncertaintyLevel = (typeof UNCERTAINTY_LEVELS)[number];
+
+export interface EvidenceBackedClaim {
+  statement: string;
+  uncertainty: UncertaintyLevel;
+  /** Real evidence ref (repo path:line, tool output) — null ONLY for "unknown". */
+  evidence: string | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* §1.4 (V2.1) — Intake question batching                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * When multiple material decisions are needed before execution, they are
+ * asked ONCE as a batch at the start of the run — never as repeated tiny
+ * interruptions. (Batch UI consumes this in 8C.)
+ */
+export interface IntakeQuestionBatch {
+  id: string;
+  questions: ClarifyQuestion[];
+  /** Why these decisions are material (one line). */
+  rationale: string | null;
+  askedAt: number;
+}
+
+/* ------------------------------------------------------------------ */
+/* §1.5 (V2.1) — Context Inspector snapshot (UI in 8C)                 */
+/* ------------------------------------------------------------------ */
+
+/** Where one selected-context item came from. */
+export type ContextInspectorSource =
+  | "repository"
+  | "branch"
+  | "current-file"
+  | "selected-code"
+  | "attachment"
+  | "memory"
+  | "search";
+
+/** One selected-context entry, exactly as the run received it. */
+export interface ContextInspectorEntry {
+  source: ContextInspectorSource;
+  /** Stable ref: path, "repo:name", "branch:x", "selection:path:L-L", … */
+  ref: string;
+  /** Included in the actual request payload — never a planned-only item. */
+  included: boolean;
+  /** Why it was selected/excluded (one line). */
+  reason: string;
+}
+
+/** What the future Context Inspector (8C) renders for a run. */
+export interface ContextInspectorSnapshot {
+  runId: string;
+  entries: ContextInspectorEntry[];
+  capturedAt: number;
+}
 
 /* ------------------------------------------------------------------ */
 /* §10 — Activity model + state machine                                */
@@ -183,10 +327,31 @@ export interface ComposerActionHandlers {
   retry: () => void;
 }
 
-/** Model selection stays a CONTRACT SLOT until a real model list exists. */
+/**
+ * Model descriptor served BY the LLM Gateway (never by a provider SDK in
+ * UI code). Availability/labels come from the gateway's real catalog.
+ */
+export interface GatewayModelDescriptor {
+  /** Opaque model id as the gateway routes it. */
+  id: string;
+  /** Human label for the picker. */
+  label: string;
+  /** Whether the gateway can actually route this model today. */
+  available: boolean;
+  /** The model the transport ACTUALLY serves for this id, when measured. */
+  servedModel: string | null;
+  /** Honest note (e.g. transport normalizes ids to one served model). */
+  note: string | null;
+}
+
+/**
+ * Model selection resolves through the LLM Gateway catalog. When the
+ * gateway cannot serve a catalog, `available: false` carries the reason.
+ */
 export interface ComposerModelSlot {
-  available: false;
-  reason: string;
+  available: boolean;
+  reason: string | null;
+  models: GatewayModelDescriptor[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -220,6 +385,7 @@ export type ResponseSegment =
  */
 export type AssistantStreamEvent =
   | { type: "RUN_STARTED"; runId: string; conversationId: string | null; startedAt: number; mode: ComposerMode }
+  | { type: "INTAKE_QUESTIONS_REQUIRED"; runId: string; batch: IntakeQuestionBatch }
   | { type: "ACTIVITY_STARTED"; runId: string; activity: ActivityNode }
   | { type: "ACTIVITY_UPDATED"; runId: string; activityId: string; patch: Partial<Pick<ActivityNode, "title" | "summary" | "metadata">> & { status?: ActivityStatus } }
   | { type: "ACTIVITY_COMPLETED"; runId: string; activityId: string; summary: string | null; completedAt: number }

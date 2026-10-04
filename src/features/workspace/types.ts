@@ -150,6 +150,10 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** User-visible execution summary for the activity region. */
   activity?: ChatActivityStep[];
+  /** Composer mode the run was issued with (Phase 8A; assistant messages). */
+  mode?: "search" | "code" | "agent" | "loop";
+  /** The model the gateway ACTUALLY served for this message (measured). */
+  servedModel?: string | null;
 }
 
 export interface Conversation {
