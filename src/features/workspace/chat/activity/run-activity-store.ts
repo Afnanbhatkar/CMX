@@ -376,7 +376,19 @@ function appendRow(state: RunActivityState, row: ActivityViewRow): void {
     }
   }
 
-  state.rows = [...rows, row];
+  // Prototype behavior: a newly appearing row completes the previous one —
+  // the tail row's formal COMPLETED event may still be in flight, but the
+  // work it describes has visibly ended (its summary/detail still lands when
+  // the event arrives). Only the LAST running row settles; waiting rows stay.
+  if (rows.length > 0) {
+    const tailIndex = rows.length - 1;
+    const tail = rows[tailIndex];
+    if (tail && tail.status === "running") {
+      state.rows = [...rows.slice(0, tailIndex), { ...tail, status: "completed" }];
+    }
+  }
+
+  state.rows = [...state.rows, row];
   state.dirty = true;
 }
 

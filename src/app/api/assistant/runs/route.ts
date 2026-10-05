@@ -38,9 +38,9 @@ import type {
  * Privacy boundary (8B §1): only safe execution summaries travel on this
  * stream. The 8C additions (context snapshot, memory records, intake
  * questions, approval payloads) carry safe execution facts — never chain-
- * of-thought. RESPONSE_CHUNK arrives as ONE honest chunk because the model
- * gateway has no token-streaming API — nothing is re-dressed as fake
- * chunking.
+ * of-thought. Phase 9: RESPONSE_CHUNK now carries REAL model token deltas
+ * (the gateway streams with `stream: true`); each delta is forwarded exactly
+ * as the transport produced it — nothing is re-dressed or fabricated.
  */
 
 const COMPOSER_MODES = ["search", "code", "agent", "loop"] as const;
@@ -91,7 +91,7 @@ interface ResultFrame {
 }
 
 const RESULT_NOTE =
-  "The complete answer arrives as one chunk — the model gateway has no token-streaming API yet; no fake chunking is performed.";
+  "The answer streamed as real model token deltas (gateway stream: true); this frame carries the authoritative final content.";
 
 export const dynamic = "force-dynamic";
 
@@ -260,6 +260,11 @@ export async function POST(req: Request): Promise<Response> {
               answersProvider: () => waitForAnswers(runId, () => {
                 // nothing extra — the abort listener already closes the stream
               }),
+              // Phase 9: opt into REAL token streaming — every gateway delta
+              // becomes one sequenced RESPONSE_CHUNK on this run stream.
+              onResponseDelta: (text) => {
+                writeStage({ type: "RESPONSE_CHUNK", segment: { kind: "markdown", text } });
+              },
             },
             writeStage,
           );

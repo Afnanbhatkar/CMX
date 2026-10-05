@@ -49,9 +49,10 @@ import {
 import {
   exportPersistedChain,
   ingestLocalRunActivityEvent,
-  ingestRunActivityEvent,
   resumeRunActivity,
 } from "./activity/run-activity-store";
+import { createChainPacer } from "./activity/chain-pacer";
+import { createAnswerPacer } from "./activity/answer-pacer";
 
 /* Verification tooling (window.__cmxAssistant, read-only observation). */
 exposeAssistantTooling();
@@ -284,6 +285,21 @@ export function useAssistantRun(): AssistantRun {
       let sawWireRunStart = false;
       let firstEventRecorded = false;
       let resultFrame: RunResultFrame | null = null;
+
+      /* ---- Phase 9: the two presentation pacers (both honest) ----
+       * chainPacer — display smoothing of REAL chain events (thinking first,
+       * steps one-by-one, visible dwell); the engine + message metadata stay
+       * immediate.
+       * answerPacer — word-by-word reveal of REAL streamed deltas
+       * (45ms/word, adaptive catch-up); flushAll guarantees the full answer
+       * is visible at every terminal state. */
+      const chainPacer = createChainPacer();
+      const answerPacer = createAnswerPacer((revealed) => {
+        useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+          content: revealed,
+        });
+      });
+
       /** Terminal chain export — persists the completed timeline (8D). */
       const persistActivityChain = (): void => {
         if (!wireRunId) return;
@@ -307,8 +323,14 @@ export function useAssistantRun(): AssistantRun {
         // Engine first: RUN_STARTED resets the run metrics; the measured
         // latency is recorded against the NEW run right after.
         applyWireEvent(event);
-        // 8D: the same real event feeds the per-run activity chain store.
-        ingestRunActivityEvent(event);
+        // 8D + Phase 9: the same real event feeds the per-run activity chain
+        // store through the display pacer (order-preserving, terminal/intake
+        // events never wait).
+        chainPacer.ingest(event);
+        // Phase 9: real streamed answer deltas reveal word by word.
+        if (event.type === "RESPONSE_CHUNK" && event.segment.kind === "markdown") {
+          answerPacer.push(event.segment.text);
+        }
         if (!firstEventRecorded) {
           firstEventRecorded = true;
           if (wireRunId) recordFirstEventLatency(wireRunId, performance.now() - t0);
@@ -430,9 +452,11 @@ export function useAssistantRun(): AssistantRun {
                 if (wireRunId && typeof frame.frame.seq === "number") {
                   noteTransportSeq(wireRunId, frame.frame.seq);
                 }
-                // One honest chunk: the complete answer, exactly once.
+                // Phase 9: the final content is authoritative — sync the
+                // reveal buffer (grows only) and record run meta. The answer
+                // keeps streaming word by word until the terminal flush.
+                answerPacer.syncFull(frame.frame.content);
                 useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
-                  content: frame.frame.content,
                   servedModel: frame.frame.servedModel,
                   mode: (frame.frame.mode as ComposerMode) ?? options?.mode,
                 });
@@ -454,6 +478,8 @@ export function useAssistantRun(): AssistantRun {
         if (errorMessage !== null) {
           // The engine already applied RUN_FAILED from the wire; mirror the
           // terminal state on the message with the backend's real error.
+          chainPacer.flushAll();
+          answerPacer.flushAll();
           persistActivityChain();
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             state: "error",
@@ -464,39 +490,59 @@ export function useAssistantRun(): AssistantRun {
             .setConversationStatus(conversationId, "error");
         } else {
           const snapshot = assistantActivityEngine.getSnapshot();
+          const finalContent = resultFrame?.content ?? null;
           const completedOk =
-            resultFrame !== null &&
-            resultFrame.content.trim().length > 0 &&
+            finalContent !== null &&
+            finalContent.trim().length > 0 &&
             snapshot.status === "completed";
           if (completedOk) {
-            persistActivityChain();
-            useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
-              state: "complete",
-              thoughtForMs:
-                (wireRunId ? exportPersistedChain(wireRunId)?.activeMs : null) ??
-                snapshot.durationMs,
+            // Keep the word-by-word rhythm until the reveal finishes (the
+            // prototype streams while/after the chain closes), then settle
+            // any remaining paced chain events and persist the final state.
+            // Do NOT flush the chain pacer here — on fast runs the story is
+            // still animating and must finish before the final label lands.
+            answerPacer.drain(() => {
+              chainPacer.flushAll();
+              chainPacer.dispose();
+              persistActivityChain();
+              useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+                state: "complete",
+                content: finalContent ?? undefined,
+                thoughtForMs:
+                  (wireRunId ? exportPersistedChain(wireRunId)?.activeMs : null) ??
+                  snapshot.durationMs,
+              });
+              useWorkspaceStore
+                .getState()
+                .setConversationStatus(conversationId, "completed");
+              // The reveal owned its own lifecycle — done now.
+              answerPacer.dispose();
             });
-            useWorkspaceStore
-              .getState()
-              .setConversationStatus(conversationId, "completed");
           } else if (resultFrame !== null && resultFrame.content.trim().length > 0) {
             // Content arrived but the stream ended without RUN_COMPLETED —
             // finish honestly from the measured facts we DO have.
             if (wireRunId) {
+              chainPacer.flushAll();
               ingestLocalRunActivityEvent({
                 type: "RUN_COMPLETED",
                 runId: wireRunId,
                 completedAt: Date.now(),
               });
             }
-            persistActivityChain();
-            useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
-              state: "complete",
-              thoughtForMs: Date.now() - startedWallClock,
+            answerPacer.drain(() => {
+              chainPacer.flushAll();
+              chainPacer.dispose();
+              persistActivityChain();
+              useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+                state: "complete",
+                content: resultFrame?.content ?? "",
+                thoughtForMs: Date.now() - startedWallClock,
+              });
+              useWorkspaceStore
+                .getState()
+                .setConversationStatus(conversationId, "completed");
+              answerPacer.dispose();
             });
-            useWorkspaceStore
-              .getState()
-              .setConversationStatus(conversationId, "completed");
           } else {
             const error =
               "The assistant returned an empty response.";
@@ -504,6 +550,7 @@ export function useAssistantRun(): AssistantRun {
               const localRunId = createRunId();
               runStarted(localRunId, conversationId);
               wireRunId = localRunId;
+              chainPacer.flushAll();
               ingestLocalRunActivityEvent({
                 type: "RUN_STARTED",
                 runId: localRunId,
@@ -514,8 +561,10 @@ export function useAssistantRun(): AssistantRun {
             }
             if (wireRunId) {
               runFailed(wireRunId, error);
+              chainPacer.flushAll();
               ingestLocalRunActivityEvent({ type: "RUN_FAILED", runId: wireRunId, error, failedAt: Date.now() });
             }
+            answerPacer.flushAll();
             persistActivityChain();
             useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
               state: "error",
@@ -529,10 +578,13 @@ export function useAssistantRun(): AssistantRun {
       } catch (error) {
         if (isAbortError(error)) {
           // Client cancel: the run is honestly cancelled in the engine.
+          // The answer stays EXACTLY as revealed — nothing received-but-hidden
+          // is flushed in after the user stopped.
           if (!sawWireRunStart) {
             const localRunId = createRunId();
             runStarted(localRunId, conversationId);
             wireRunId = localRunId;
+            chainPacer.flushAll();
             ingestLocalRunActivityEvent({
               type: "RUN_STARTED",
               runId: localRunId,
@@ -543,8 +595,10 @@ export function useAssistantRun(): AssistantRun {
           }
           if (wireRunId) {
             runCancelled(wireRunId);
+            chainPacer.flushAll();
             ingestLocalRunActivityEvent({ type: "RUN_CANCELLED", runId: wireRunId, cancelledAt: Date.now() });
           }
+          answerPacer.dispose();
           persistActivityChain();
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             state: "stopped",
@@ -563,6 +617,7 @@ export function useAssistantRun(): AssistantRun {
             const localRunId = createRunId();
             runStarted(localRunId, conversationId);
             wireRunId = localRunId;
+            chainPacer.flushAll();
             ingestLocalRunActivityEvent({
               type: "RUN_STARTED",
               runId: localRunId,
@@ -573,8 +628,10 @@ export function useAssistantRun(): AssistantRun {
           }
           if (wireRunId) {
             runFailed(wireRunId, message);
+            chainPacer.flushAll();
             ingestLocalRunActivityEvent({ type: "RUN_FAILED", runId: wireRunId, error: message, failedAt: Date.now() });
           }
+          answerPacer.flushAll();
           persistActivityChain();
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             state: "error",
@@ -589,6 +646,12 @@ export function useAssistantRun(): AssistantRun {
         if (activeController === controller) activeController = null;
         // runPhase describes in-flight work only; the message carries the state.
         useWorkspaceStore.getState().setRunPhase("idle");
+        // Presentation pacers are per-run — stop their timers. The answer
+        // pacer may still be DRAINING (word-by-word reveal in progress on the
+        // success path) and the chain pacer may still hold the story tail;
+        // the drain callbacks above flush + dispose both when finished.
+        if (!chainPacer.isBusy()) chainPacer.dispose();
+        if (!answerPacer.isDraining()) answerPacer.dispose();
       }
     },
     [],

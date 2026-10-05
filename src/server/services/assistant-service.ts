@@ -92,6 +92,13 @@ export interface AssistantTurnInput {
    * (cancelled while paused). Absent → no pause is ever requested.
    */
   answersProvider?: (batch: IntakeQuestionBatch) => Promise<IntakeAnswer[] | null>;
+  /**
+   * Real token streaming (Phase 9): when provided, the gateway completion
+   * runs with `stream: true` and EVERY content delta the transport emits is
+   * delivered here as it arrives (no chunk is fabricated or re-dressed).
+   * The final `content` return value remains the authoritative full answer.
+   */
+  onResponseDelta?: (text: string) => void;
 }
 
 export type AssistantFailureReason = "empty" | "failed" | "cancelled";
@@ -906,13 +913,57 @@ export async function runAssistantTurn(
   });
 
   const startedAt = Date.now();
+  /* Streaming emission state: rawAccumulated holds EVERY raw delta; only the
+     prefix before the approval fence (when one exists) is ever emitted as
+     RESPONSE_CHUNK stage events. The route opts into streaming by providing
+     onResponseDelta — the wire delivery itself goes through onStage, so
+     exactly one copy of each delta travels on the run stream. */
+  const APPROVAL_FENCE_OPEN = "```" + APPROVAL_MARKER;
+  /** Tail held back while streaming so a fence marker split across deltas
+      can never leak into the visible answer (flushed at stream end). */
+  const APPROVAL_HOLD_BACK = 40;
+  let rawAccumulated = "";
+  let emittedChars = 0;
+  let approvalGateClosed = false;
+  const emitUpTo = (upTo: number): void => {
+    if (upTo <= emittedChars) return;
+    const pending = rawAccumulated.slice(emittedChars, upTo);
+    emittedChars = upTo;
+    onStage?.({ type: "RESPONSE_CHUNK", segment: { kind: "markdown", text: pending } });
+  };
   let result;
   try {
-    result = await withSpan(
-      "assistant.completion",
-      { provider: GATEWAY_PROVIDER, model: input.model ?? "gateway-default", mode },
-      () => LLMGateway.complete({ messages: sdkMessages, model: input.model }),
-    );
+    if (input.onResponseDelta) {
+      result = await withSpan(
+        "assistant.completion",
+        { provider: GATEWAY_PROVIDER, model: input.model ?? "gateway-default", mode, stream: true },
+        () =>
+          LLMGateway.stream({ messages: sdkMessages, model: input.model }, (delta) => {
+            if (approvalGateClosed) {
+              rawAccumulated += delta;
+              return;
+            }
+            rawAccumulated += delta;
+            const markerIndex = rawAccumulated.indexOf(APPROVAL_FENCE_OPEN);
+            if (markerIndex !== -1) {
+              approvalGateClosed = true;
+              emitUpTo(markerIndex);
+              return;
+            }
+            emitUpTo(Math.max(emittedChars, rawAccumulated.length - APPROVAL_HOLD_BACK));
+          }),
+      );
+      // Stream finished — flush the hold-back tail (up to a late marker).
+      const markerIndex = rawAccumulated.indexOf(APPROVAL_FENCE_OPEN);
+      approvalGateClosed = true;
+      emitUpTo(markerIndex === -1 ? rawAccumulated.length : markerIndex);
+    } else {
+      result = await withSpan(
+        "assistant.completion",
+        { provider: GATEWAY_PROVIDER, model: input.model ?? "gateway-default", mode },
+        () => LLMGateway.complete({ messages: sdkMessages, model: input.model }),
+      );
+    }
   } catch (error) {
     if (error instanceof LLMGatewayError && error.code === "unknown-model") {
       throw new AssistantError("failed", error.message);

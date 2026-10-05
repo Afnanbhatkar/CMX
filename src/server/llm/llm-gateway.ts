@@ -81,13 +81,18 @@ export interface GatewayCompletionResult {
 /** Gateway-scoped failure — routes map this to their own error contracts. */
 export class LLMGatewayError extends Error {
   constructor(
-    public code: "unknown-model" | "empty" | "failed",
+    public code: "unknown-model" | "empty" | "failed" | "timeout",
     message: string,
   ) {
     super(message);
     this.name = "LLMGatewayError";
   }
 }
+
+/** Hard overall deadline for one streaming completion. */
+const STREAM_TIMEOUT_MS = 120_000;
+/** A single stalled read beyond this cancels the stream. */
+const STREAM_STALL_MS = 45_000;
 
 function describeError(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -200,6 +205,161 @@ export const LLMGateway = {
       requestedModel,
       latencyMs,
       usage: extractUsage(completion),
+    };
+  },
+
+  /**
+   * One REAL token-streaming chat completion through the provider SDK.
+   *
+   * The gateway accepts `stream: true` and answers with OpenAI-style SSE
+   * frames (`data: {"choices":[{"delta":{"content":"…"}}]}` terminated by
+   * `data: [DONE]`). Every content delta is delivered through `onDelta`
+   * EXACTLY as the transport produced it — no chunk is fabricated, merged,
+   * or reordered downstream of the wire. When the transport does not
+   * stream (plain JSON answer), the whole content is delivered through one
+   * `onDelta` call instead of failing — the one-shot contract.
+   *
+   * Returns the SAME result shape as complete() (accumulated content,
+   * served model, measured latency, usage when the final frame carries it).
+   */
+  async stream(
+    request: GatewayCompletionRequest,
+    onDelta: (text: string) => void,
+  ): Promise<GatewayCompletionResult> {
+    const model = LLMGateway.resolveModel(request.model);
+    const requestedModel = request.model?.trim() ? model.id : null;
+
+    const zai = await ZAI.create();
+    const startedAt = Date.now();
+    let response: unknown;
+    try {
+      response = await zai.chat.completions.create({
+        messages: request.messages,
+        ...(request.thinking ? { thinking: request.thinking } : {}),
+        stream: true,
+      });
+    } catch (error) {
+      logError("llm-gateway: stream open failed", {
+        error: describeError(error),
+        requestedModel: requestedModel ?? model.id,
+      });
+      throw new LLMGatewayError("failed", "The model gateway request failed.");
+    }
+
+    // Transport answered with a plain JSON completion — no stream exists.
+    // Deliver the full content through ONE delta call (the one-shot path).
+    if (!response || typeof (response as ReadableStream).getReader !== "function") {
+      const completion = response as Record<string, unknown> | null;
+      const content =
+        (completion as { choices?: { message?: { content?: unknown } }[] } | null)?.choices?.[0]
+          ?.message?.content;
+      if (typeof content !== "string" || !content.trim()) {
+        logWarn("llm-gateway: stream fallback returned empty completion", { requestedModel: model.id });
+        throw new LLMGatewayError("empty", "The model returned an empty response.");
+      }
+      const servedModel = extractServedModel(completion);
+      onDelta(content);
+      return {
+        content,
+        servedModel,
+        requestedModel,
+        latencyMs: Date.now() - startedAt,
+        usage: extractUsage(completion),
+      };
+    }
+
+    /* ---- Real SSE streaming ---- */
+    const reader = (response as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let content = "";
+    let servedModel: string | null = null;
+    let usage = { inputTokens: null as number | null, outputTokens: null as number | null };
+    const deadline = startedAt + STREAM_TIMEOUT_MS;
+
+    const consumeFrame = (raw: string): void => {
+      for (const line of raw.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(payload) as Record<string, unknown>;
+        } catch {
+          continue; // partial frame across reads — the split guard re-joins
+        }
+        const frameModel = parsed.model;
+        if (typeof frameModel === "string" && frameModel.trim().length > 0 && servedModel === null) {
+          servedModel = frameModel;
+        }
+        const frameUsage = parsed.usage as Record<string, unknown> | undefined;
+        if (frameUsage) {
+          usage = extractUsage({ usage: frameUsage });
+        }
+        const delta =
+          (parsed.choices as { delta?: { content?: unknown } }[] | undefined)?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta.length > 0) {
+          content += delta;
+          onDelta(delta);
+        }
+      }
+    };
+
+    try {
+      while (true) {
+        const now = Date.now();
+        if (now >= deadline) {
+          throw new LLMGatewayError("timeout", "The model gateway stream timed out.");
+        }
+        const read = await Promise.race([
+          reader.read(),
+          new Promise<"stall">((resolve) => {
+            setTimeout(() => resolve("stall"), Math.min(STREAM_STALL_MS, deadline - Date.now()));
+          }),
+        ]);
+        if (read === "stall") {
+          throw new LLMGatewayError("timeout", "The model gateway stream stalled.");
+        }
+        const { done, value } = read;
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line; a frame split across
+        // reads stays buffered until its terminator arrives.
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          consumeFrame(buffer.slice(0, boundary));
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+      const tail = decoder.decode().trim();
+      if (tail) consumeFrame(tail);
+    } catch (error) {
+      logError("llm-gateway: stream failed", {
+        error: describeError(error),
+        requestedModel: requestedModel ?? model.id,
+      });
+      if (error instanceof LLMGatewayError) throw error;
+      throw new LLMGatewayError("failed", "The model gateway request failed.");
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // reader already closed
+      }
+    }
+
+    if (!content.trim()) {
+      logWarn("llm-gateway: empty stream", { requestedModel: model.id });
+      throw new LLMGatewayError("empty", "The model returned an empty response.");
+    }
+
+    return {
+      content,
+      servedModel,
+      requestedModel,
+      latencyMs: Date.now() - startedAt,
+      usage,
     };
   },
 } as const;

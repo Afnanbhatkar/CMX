@@ -4,10 +4,11 @@
  * CodeMind X V2 — conversation view (messages + activity + approval slot).
  *
  * Renders the ACTIVE conversation's real messages only: real timestamps,
- * real per-message states, privacy-safe activity chains (ThoughtChain) and
- * the assistant's actual markdown answer. No simulated streaming — a
- * generating message shows an honest "Composing response…" loader until the
- * real response arrives, fails, or is stopped.
+ * real per-message states, privacy-safe activity chains and the assistant's
+ * actual markdown answer. The answer streams word by word (Phase 9) from
+ * REAL gateway token deltas — received content is revealed smoothly, never
+ * invented; a generating message with no content yet shows the live
+ * activity chain until the first token arrives.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -286,7 +287,14 @@ function AssistantMessage({
         />
       )}
 
-      {message.state === "complete" && <ChatMarkdown content={message.content} />}
+      {/* Phase 9: the answer streams word by word below the live chain
+          (revealed REAL gateway deltas). The chain closes into its final
+          duration chip when the first token arrives, exactly like the
+          prototype; history and stopped runs keep their real content. */}
+      {message.content.trim().length > 0 &&
+      (busy || message.state === "complete" || message.state === "stopped") ? (
+        <ChatMarkdown content={message.content} />
+      ) : null}
 
       {/* Phase 8C: the model's proposed change awaits an explicit human
           decision — recorded locally, never applied (no ChangeSet yet). */}
