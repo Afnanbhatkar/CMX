@@ -44,7 +44,7 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", ".ingestion-workspaces/**", ".ingestion-probe/**", "public/monaco/**", "public/wasm/**"]
+  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", ".ingestion-workspaces/**", ".ingestion-probe/**", "public/monaco/**", "public/wasm/**", "src/components/ai-activity/thinking-orbs.js"]
 }];
 
 export default eslintConfig;

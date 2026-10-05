@@ -195,6 +195,18 @@
   display: block;
 }
 
+/* Live library orb — the user's reference snippet footprint: the 64px
+   backing canvas displayed at 56px, exactly like the prototype page. */
+.cmx-act-orb-live {
+  width: 56px;
+  height: 56px;
+}
+
+.cmx-act-orb-live canvas {
+  width: 56px;
+  height: 56px;
+}
+
 /* CSS fallback orb — same 22px footprint; no canvas, no WebGL, no
    network. EXACT prototype fallback: ink core over the inset surface
    with a soft breathing under motion only. */
@@ -438,19 +450,16 @@ button.cmx-act-row-line:hover .cmx-act-title-chip {
   color: var(--cmx-ink);
 }
 
-button.cmx-act-row-line:hover .cmx-act-title-chip[data-emphasis="true"] {
-  border-color: color-mix(in srgb, var(--cmx-ink-2) 26%, transparent);
-}
-
 button.cmx-act-row-line:focus-visible {
   outline: 1px solid var(--cmx-accent);
   outline-offset: 1px;
 }
 
 /* Step title — PLAIN TEXT (user direction: step names read like normal
-   writing, exactly like "Understanding the request"). The dark grey
-   rounded panels are reserved for the row's CONTENT: the search query,
-   file path chips, and the emphasized "Preparing response" step. */
+   writing, exactly like "Understanding the request"; the "Preparing
+   response" dark grey panel was removed in Phase 9.1). The dark grey
+   rounded chips are reserved for the row's CONTENT: the search query,
+   file paths, and the served model beside Preparing response. */
 .cmx-act-title-chip {
   display: inline-flex;
   align-items: center;
@@ -465,16 +474,6 @@ button.cmx-act-row-line:focus-visible {
 .cmx-act-item[data-status="completed"] .cmx-act-title-chip,
 .cmx-act-item[data-status="cancelled"] .cmx-act-title-chip {
   color: var(--cmx-ink-2);
-}
-
-/* Emphasized title — "Preparing response" keeps the dark grey rounded
-   panel (it is the hand-off beat right before the answer streams). */
-.cmx-act-title-chip[data-emphasis="true"] {
-  padding: 2.5px 9px;
-  border-radius: 9px;
-  background: var(--cmx-chip-bg);
-  border: 1px solid var(--cmx-chip-line);
-  font-size: 12.5px;
 }
 
 /* Inline content chip — the search query beside "Searching repository"

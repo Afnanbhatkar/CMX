@@ -199,14 +199,20 @@ const ChildRow = memo(function ChildRow({ child }: { child: ActivityViewChild })
 
 /**
  * Inline side chip — the real content beside the row's title:
- * the repository-search query beside "Searching repository", or the target
- * path beside a single "Reading/Editing/Creating/Removing/Renaming" row
- * (prototype: "Reading <src/ui/Button.tsx>"). Group rows keep the count in
- * their title and list every file in the dropdown body.
+ * the repository-search query beside "Searching repository", the target
+ * path beside a single "Reading/Editing/Creating/Removing/Renaming" row,
+ * or the served model beside "Preparing response" (the gateway serves
+ * glm-4-plus — user direction: the model name carries the dark grey chip
+ * on the Preparing response row). Group rows keep the count in their
+ * title and list every file in the dropdown body.
  */
 function sideChipFor(row: ActivityViewRow): string | null {
   if (row.kind === "repo_search") {
     return row.query ?? null;
+  }
+  if (row.kind === "prepare") {
+    // Fixed, honest label — the gateway's served model (llm-gateway.ts).
+    return "glm-4-plus";
   }
   if (
     (row.kind === "read_file" ||
@@ -228,7 +234,8 @@ function sideChipFor(row: ActivityViewRow): string | null {
  * hides/shows the child rows. Plain file rows already carry their path on
  * the line — a single-file dropdown would be redundant, so only GROUP rows
  * ("Read 4 files" / "Edited 5 files") and detail-bearing rows expand.
- * Open by default — live steps stay visible while they stream.
+ * Open by default EXCEPT counter groups ("Read N files", Phase 9.1) which
+ * mount collapsed — the live count is the point, not the file list.
  */
 const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow }) {
   const side = sideChipFor(row);
@@ -240,20 +247,21 @@ const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow 
   const isPlainFileRow = row.groupCount === null && side !== null && singleFileChild;
   const detailInBody = row.detail !== null && row.detail !== side;
   const hasBody = isPlainFileRow ? detailInBody : row.children.length > 0 || detailInBody;
-  const [open, setOpen] = useState(true);
+  // User direction (Phase 9.1): the first THREE file reads show one by one;
+  // the moment they merge into a counter group ("Read 4 files"), the
+  // dropdown closes instantly — the group row mounts COLLAPSED and the
+  // live count is read straight off the title. The user can still open
+  // any group by clicking; their toggle wins while mounted.
+  const [open, setOpen] = useState(row.groupCount === null);
   const bodyId = `${row.id}-body`;
 
   const line = (
     <>
-      {/* Titles are PLAIN text (user direction); the dark grey rounded
-          panels are reserved for the row's CONTENT — the query, file paths,
-          and the emphasized "Preparing response" step. */}
-      <span
-        className="cmx-act-title-chip"
-        data-emphasis={row.kind === "prepare" ? "true" : undefined}
-      >
-        {row.title}
-      </span>
+      {/* Titles are PLAIN text (user direction — the "Preparing response"
+          dark grey panel was removed in 9.1); the dark grey rounded chips
+          are reserved for the row's CONTENT: the query, file paths, and
+          the served model ("glm-4-plus") beside Preparing response. */}
+      <span className="cmx-act-title-chip">{row.title}</span>
       {side !== null ? (
         <span className="cmx-act-side-chip" title={side}>
           {side}

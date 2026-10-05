@@ -35,6 +35,22 @@
 import type { SequencedAssistantEvent } from "../../assistant/contracts";
 import { ingestRunActivityEvent } from "./run-activity-store";
 
+export interface ChainPacerOptions {
+  /**
+   * Fired EXACTLY ONCE when the first RESPONSE_CHUNK is released into the
+   * chain store — the moment the thought chain has finished telling its
+   * story (the chunk is queued behind every pending row, so this fires
+   * after the whole one-by-one sequence, right as the chain closes and the
+   * final "Thought for Xs" label lands).
+   *
+   * User direction (Phase 9.1): the answer WRITING must start only after
+   * the full thought chain completes — never while rows are still appearing
+   * ("writing right after Searching repository looks wrong"). The caller
+   * buffers streamed answer text until this fires, then starts the reveal.
+   */
+  onAnswerReady?: () => void;
+}
+
 /** The Thinking header is visible on its own before the first step. */
 const FIRST_STEP_DELAY_MS = 900;
 /** Minimum visible gap between two consecutive step rows. */
@@ -84,10 +100,18 @@ function timingOf(event: SequencedAssistantEvent): EventTiming {
   }
 }
 
-export function createChainPacer(): ChainPacer {
+export function createChainPacer(options: ChainPacerOptions = {}): ChainPacer {
+  const { onAnswerReady } = options;
   const pending: { event: SequencedAssistantEvent; releaseAt: number }[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  /** onAnswerReady fires once — at the first chunk's actual release. */
+  let answerReadyFired = false;
+  const fireAnswerReady = (): void => {
+    if (answerReadyFired) return;
+    answerReadyFired = true;
+    onAnswerReady?.();
+  };
 
   let runStartAt: number | null = null;
   /** Release time of the last ACTIVITY_STARTED (step-gap anchor). */
@@ -119,6 +143,9 @@ export function createChainPacer(): ChainPacer {
     }
     lastReleaseAt = now;
     ingestRunActivityEvent(event);
+    // The first chunk's release IS the chain-close moment — whether it
+    // released on schedule, immediately (no story) or via flushAll().
+    if (event.type === "RESPONSE_CHUNK") fireAnswerReady();
   };
 
   const schedule = (): void => {

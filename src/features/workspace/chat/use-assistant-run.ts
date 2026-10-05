@@ -286,19 +286,66 @@ export function useAssistantRun(): AssistantRun {
       let firstEventRecorded = false;
       let resultFrame: RunResultFrame | null = null;
 
-      /* ---- Phase 9: the two presentation pacers (both honest) ----
+      /* ---- Phase 9 + 9.1: the two presentation pacers (both honest) ----
        * chainPacer — display smoothing of REAL chain events (thinking first,
        * steps one-by-one, visible dwell); the engine + message metadata stay
        * immediate.
        * answerPacer — word-by-word reveal of REAL streamed deltas
        * (45ms/word, adaptive catch-up); flushAll guarantees the full answer
-       * is visible at every terminal state. */
-      const chainPacer = createChainPacer();
+       * is visible at every terminal state.
+       *
+       * Phase 9.1 GATE (user direction): writing starts only after the FULL
+       * thought chain completes — streamed deltas are buffered honestly
+       * until the chain pacer releases the first chunk (the chain-close
+       * moment, right as "Thought for Xs" lands), then the reveal begins.
+       * Nothing is invented: the buffer only ever holds real received text. */
+      let answerRevealStarted = false;
+      let answerBuffer = "";
+      let deferredSyncFull: string | null = null;
+      let pendingDrain: (() => void) | null = null;
+      /** A real RESPONSE_CHUNK arrived from the wire (release may lag). */
+      let sawAnswerChunk = false;
+
       const answerPacer = createAnswerPacer((revealed) => {
         useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
           content: revealed,
         });
       });
+
+      /** The chain finished → start revealing the buffered real answer. */
+      const startAnswerReveal = (): void => {
+        if (answerRevealStarted) return;
+        answerRevealStarted = true;
+        if (answerBuffer) answerPacer.push(answerBuffer);
+        answerBuffer = "";
+        if (deferredSyncFull !== null) {
+          answerPacer.syncFull(deferredSyncFull);
+          deferredSyncFull = null;
+        }
+        const drain = pendingDrain;
+        pendingDrain = null;
+        if (drain) answerPacer.drain(drain);
+      };
+
+      const chainPacer = createChainPacer({ onAnswerReady: startAnswerReveal });
+
+      /** Drain AFTER the reveal has started (terminal states). */
+      const revealThenDrain = (onDone: () => void): void => {
+        if (answerRevealStarted) {
+          answerPacer.drain(onDone);
+          return;
+        }
+        if (sawAnswerChunk) {
+          // The chain story is still playing — the reveal (and this drain)
+          // starts the moment the chain releases the first chunk.
+          pendingDrain = onDone;
+          return;
+        }
+        // Defensive: no chunk ever arrived — nothing to reveal; settle now
+        // (drain fires immediately on an empty buffer, never hangs).
+        startAnswerReveal();
+        answerPacer.drain(onDone);
+      };
 
       /** Terminal chain export — persists the completed timeline (8D). */
       const persistActivityChain = (): void => {
@@ -327,9 +374,13 @@ export function useAssistantRun(): AssistantRun {
         // store through the display pacer (order-preserving, terminal/intake
         // events never wait).
         chainPacer.ingest(event);
-        // Phase 9: real streamed answer deltas reveal word by word.
+        // Phase 9: real streamed answer deltas reveal word by word — but
+        // 9.1: only AFTER the chain story completes. Until then they are
+        // buffered verbatim (still real, still in order).
         if (event.type === "RESPONSE_CHUNK" && event.segment.kind === "markdown") {
-          answerPacer.push(event.segment.text);
+          sawAnswerChunk = true;
+          if (answerRevealStarted) answerPacer.push(event.segment.text);
+          else answerBuffer += event.segment.text;
         }
         if (!firstEventRecorded) {
           firstEventRecorded = true;
@@ -455,7 +506,10 @@ export function useAssistantRun(): AssistantRun {
                 // Phase 9: the final content is authoritative — sync the
                 // reveal buffer (grows only) and record run meta. The answer
                 // keeps streaming word by word until the terminal flush.
-                answerPacer.syncFull(frame.frame.content);
+                // 9.1: if the chain is still playing, the sync is deferred
+                // to startAnswerReveal so the full text never jumps early.
+                if (answerRevealStarted) answerPacer.syncFull(frame.frame.content);
+                else deferredSyncFull = frame.frame.content;
                 useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
                   servedModel: frame.frame.servedModel,
                   mode: (frame.frame.mode as ComposerMode) ?? options?.mode,
@@ -496,12 +550,13 @@ export function useAssistantRun(): AssistantRun {
             finalContent.trim().length > 0 &&
             snapshot.status === "completed";
           if (completedOk) {
-            // Keep the word-by-word rhythm until the reveal finishes (the
-            // prototype streams while/after the chain closes), then settle
-            // any remaining paced chain events and persist the final state.
-            // Do NOT flush the chain pacer here — on fast runs the story is
-            // still animating and must finish before the final label lands.
-            answerPacer.drain(() => {
+            // Keep the word-by-word rhythm until the reveal finishes, then
+            // settle any remaining paced chain events and persist the final
+            // state. Do NOT flush the chain pacer here — on fast runs the
+            // story is still animating and must finish before the final
+            // label lands. 9.1: if the story is still playing, the reveal
+            // (and thus this drain) starts only when the chain completes.
+            revealThenDrain(() => {
               chainPacer.flushAll();
               chainPacer.dispose();
               persistActivityChain();
@@ -529,7 +584,7 @@ export function useAssistantRun(): AssistantRun {
                 completedAt: Date.now(),
               });
             }
-            answerPacer.drain(() => {
+            revealThenDrain(() => {
               chainPacer.flushAll();
               chainPacer.dispose();
               persistActivityChain();

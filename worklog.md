@@ -955,3 +955,21 @@ Stage Summary:
 - The one-by-one top-to-bottom fade-in entrance is RESTORED on every run: the metadata flush that silently dumped the story in one frame is gone, and starts can no longer overtake queued file rows — the timeline now always reads in the backend's true order with visible per-row entrances (320ms slide-down + fade).
 - The Solving text + orb now show EXACTLY while file read/edit rows are in flight and revert to Thinking the moment they settle — searching, understanding, preparing, and post-work phases all show the Thinking lattice; reachedSolving remains a final-label-only latch ("Worked for" vs "Thought for").
 - Scope note: the sidebar "CURRENT RUN" dot (coarse global AIRunPhase, only ever idle|thinking|failed) intentionally stays as-is — it never claims Solving, so it cannot violate the rule; syncing it to the paced chain phase would extend the AIRunPhase contract for no visible gain.
+
+---
+Task ID: 10
+Agent: Z.ai Code (main)
+Task: Fix 3 user-reported bugs in the AI chat activity chain + Preparing response styling (Phase 9.1)
+
+Work Log:
+- Bug 1 (writing started while the chain was still playing): added `ChainPacerOptions.onAnswerReady` to `chain-pacer.ts`, fired exactly once when the FIRST RESPONSE_CHUNK is released into the chain store (queued behind the whole story, or flushed). In `use-assistant-run.ts` the streamed markdown deltas are now buffered (`answerBuffer`) until that fires (`startAnswerReveal`), `syncFull` is deferred (`deferredSyncFull`), terminal drains go through `revealThenDrain` (with a no-chunk-arrived defensive fallback so completion can never hang). Verified in-browser: revealed text length stays flat through Searching/Reading/Preparing and paragraphs only appear right after the "Worked for Xs" label lands.
+- Bug 2 (read-file dropdown should close after 3): `ActivityItem` in `ActivityChain.tsx` now mounts COLLAPSED when `row.groupCount !== null` — the first 3 reads show individually, the merge instantiates "Read 4 files" closed, and the counter lives on the title ("Read 5 files"…) via the existing group absorption. User toggles still win while mounted.
+- Bug 3 (solving orb must be the user's reference orb): vendored the `thinking-orbs` ES module 1:1 from the user's CDN snippet into `src/components/ai-activity/thinking-orbs.js`; rewrote `SolvingOrb.tsx` to lazy-import it and call `createThinkingOrb(host, { state:"solving", size:64, theme:"dark", variant:"classic", speed:1, interactive:false, ariaLabel:"Solving" })` with the canvas displayed at 56px (the snippet's exact footprint). Library owns rAF/DPR/reduced-motion/visibility; StrictMode-safe destroy on cleanup. Added `.cmx-act-orb-live` (56px) CSS; old `orb-engine.ts` is now unreferenced (kept on disk, never bundled). Verified in-browser: `data-thinking-orb-canvas` canvas at exactly 56×56 while "Solving" shows, unmounts cleanly after the run.
+- Preparing response styling: removed the `data-emphasis` dark-grey panel from the title (plain text like other steps) and added a fixed honest side chip `glm-4-plus` (the gateway's served model, llm-gateway.ts) via `sideChipFor`; removed the emphasis CSS block + hover rule. Verified: title background transparent, chip rendered.
+- Added the vendored minified lib to ESLint ignores; `bun run lint` passes (only the pre-existing TanStack Virtual warning).
+
+Stage Summary:
+- Writing now starts ONLY after the full thought chain completes (the "Thought/Worked for Xs" moment) — no more text appearing right after "Searching repository".
+- Read-file flow: 1st/2nd/3rd reads show one-by-one; the counter group ("Read 4 files" → "Read 5 files") mounts with its dropdown closed and the count updates live.
+- The Solving header uses the user-supplied thinking-orbs library orb (solving state, classic variant, dark, speed 1) at the reference 56px size.
+- "Preparing response" is plain text with a dark grey "glm-4-plus" chip; nothing else was touched.
