@@ -8,7 +8,7 @@
  *
  *   createThinkingOrb(target, {
  *     state: "solving",
- *     size: 64,
+ *     size: 22,
  *     theme: "dark",
  *     variant: "classic",
  *     speed: 1,
@@ -16,8 +16,13 @@
  *     ariaLabel: "Solving",
  *   });
  *
- * with the canvas displayed at 56px (the snippet's #orb footprint: the
- * 64px backing store shown at 56px, exactly like the reference page).
+ * with the canvas displayed at 22px — EXACTLY the Thinking lattice's
+ * footprint (user direction, Phase 9.2): "jaha Thinking likha hai wahi
+ * Solving bhi dikhna chahiye" and the orb must be "thinking animation ke
+ * size jitna" so the Thinking → Solving shift is smooth. The lattice is
+ * 3×6px cells + 2×2px gaps = 22px; the orb matches it 1:1, both labels
+ * share the same 8.75px gap and 14px shimmer text, so the cross-fade
+ * swaps the animation IN PLACE — no movement, no resize, no jump.
  *
  * The library is vendored 1:1 in `thinking-orbs.js` (the same module the
  * snippet loaded from the CDN) and lazy-loaded with a cached dynamic
@@ -67,8 +72,18 @@ export function loadThinkingOrbsLibrary(): Promise<ThinkingOrbsModule> {
   return orbLibPromise;
 }
 
-/** Visible canvas footprint — the reference snippet's exact 56px. */
-const VISIBLE_SIZE = 56;
+/**
+ * Visible canvas footprint — EXACTLY the Thinking lattice footprint.
+ *
+ * User direction (Phase 9.2): the Thinking header animation (the 3×3
+ * lattice) is 22px wide/tall (3×6px cells + 2×2px gaps) — the Solving orb
+ * must render at THAT size so the Thinking ⇄ Solving cross-fade happens
+ * in place with zero layout shift (same 8.75px gap, same 14px label).
+ * The library scales its internal geometry to the requested size and
+ * handles DPR itself, so 22 is passed as the real size (no 64px backing
+ * + CSS downscale trick needed).
+ */
+const VISIBLE_SIZE = 22;
 
 export function SolvingOrb({ breathing = true }: { breathing?: boolean }) {
   const hostRef = useRef<HTMLSpanElement>(null);
@@ -86,10 +101,11 @@ export function SolvingOrb({ breathing = true }: { breathing?: boolean }) {
         const host = hostRef.current;
         if (!host) return;
 
-        // The user's reference snippet, verbatim options.
+        // The user's reference snippet options — sized to the Thinking
+        // lattice footprint so the header swap is perfectly smooth.
         instance = lib.createThinkingOrb(host, {
           state: "solving",
-          size: 64,
+          size: VISIBLE_SIZE,
           theme: "dark",
           variant: "classic",
           speed: 1,

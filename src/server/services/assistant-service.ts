@@ -155,8 +155,15 @@ const STAGE_TITLES = {
   composing: "Composing response",
 } as const;
 
-/** How many top search hits are attached as repository-retrieval facts. */
-const RETRIEVAL_TOP_FILES = 5;
+/**
+ * Retrieval file scope (Phase 9.2, user direction): there is NO fixed
+ * "top 5" cap — the assistant reads whatever the real hybrid retrieval
+ * actually surfaces for the query. The retrieval window itself is the
+ * search engine call's `limit` (below), and every unique visible file in
+ * the real result set becomes a referenced/read row. Fewer matches →
+ * fewer rows; a broad query → as many rows as the engine genuinely
+ * returned. Never a hardcoded number.
+ */
 /** Minimum query length before retrieval actually runs. */
 const RETRIEVAL_MIN_QUERY = 3;
 
@@ -291,9 +298,10 @@ export interface RetrievalHit {
  * over the workspace for the user's latest query. Emits the honest search
  * activity + SEARCH_RESULT + FILE_REFERENCED events, and returns the
  * structured hits. PATHS ONLY — content still comes exclusively from
- * explicit attachments and pinned files. Refs removed by the user
- * (excludedRefs) are filtered out here, so a removed item can never
- * silently return. Any failure degrades gracefully: the run continues
+ * explicit attachments and pinned files. Every unique file in the real
+ * result set is referenced (no fixed top-N cap — Phase 9.2). Refs removed
+ * by the user (excludedRefs) are filtered out here, so a removed item can
+ * never silently return. Any failure degrades gracefully: the run continues
  * without retrieval, and the failure is reported honestly in the activity.
  */
 async function runRepositoryRetrieval(
@@ -329,7 +337,9 @@ async function runRepositoryRetrieval(
     const excluded = new Set(excludedRefs);
     const hiddenByUser = response.results.filter((h) => excluded.has(h.file)).length;
     const visible = response.results.filter((h) => !excluded.has(h.file));
-    const topFiles = [...new Set(visible.map((h) => h.file))].slice(0, RETRIEVAL_TOP_FILES);
+    // Phase 9.2: every unique file the real retrieval returned is
+    // referenced — no artificial "top N" truncation.
+    const topFiles = [...new Set(visible.map((h) => h.file))];
     onStage?.({
       type: "SEARCH_RESULT",
       query: response.query.normalized || response.query.original,
@@ -349,7 +359,7 @@ async function runRepositoryRetrieval(
             ? `0 results · ${hiddenByUser} hidden by your context filters`
             : "No relevant results",
     });
-    return visible.slice(0, RETRIEVAL_TOP_FILES).map((h) => ({
+    return visible.map((h) => ({
       file: h.file,
       score: h.score,
       symbol: h.symbol,

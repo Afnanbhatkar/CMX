@@ -1,12 +1,15 @@
 "use client";
 
 /**
- * CodeMind X V2 — Solving indicator (Phase 8D, spec B.3/B.6/B.7).
+ * CodeMind X V2 — Solving indicator (Phase 8D, spec B.3/B.6/B.7; orb
+ * resized to the Thinking footprint in Phase 9.2).
  *
  * [22px solving orb] Solving — the same compact row footprint as Thinking:
- * 22px orb + 14px label + 8.75px gap, same shimmer. NO pill, NO background,
- * NO box-shadow, NO 74px container, NO 56px visible orb — the original
- * reference pill is superseded for the production UI.
+ * 22px orb + 14px label + 8.75px gap, same shimmer, same label position —
+ * where "Thinking" reads, "Solving" reads in exactly that place (user
+ * direction: the header swap must feel like the SAME indicator changing
+ * its animation, never a move/resize). NO pill, NO background, NO
+ * box-shadow, NO 74px container.
  *
  * Reduced motion renders the static fallback orb (never the animated
  * canvas); the animated canvas loads lazily only for a genuinely solving

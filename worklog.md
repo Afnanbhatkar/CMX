@@ -993,3 +993,19 @@ Stage Summary:
 - CodeMind X V2 fully restored and LIVE: Phases 0–9c all functional in this sandbox (public site, workspace shell, ingestion APIs, explorer, Monaco editor, hybrid search, AI assistant with real-time activity chain, context inspector, approval/question flows).
 - Only loss: SQLite row data (gitignored) — schema recreated, product starts with a clean database.
 - Ready for the user's next phase.
+
+---
+Task ID: phase-9.2-orb-size-and-read-cap
+Agent: Zai Code (main)
+Task: User-reported fixes after workspace restore — (1) Solving indicator must render at EXACTLY the Thinking indicator's position with the orb sized to the Thinking animation ("jaha thinking likha hai wahi solving bhi dikhna chahiye; orb ki size thinking animation jitni") so the Thinking→Solving shift is perfectly smooth; (2) remove the hardcoded 5-file retrieval cap — the assistant must read however many files the real retrieval returns ("ai ko jitne file read karni hai karne do, 5 pe restrict mat karo").
+
+Work Log:
+- FIX 1 (header indicator): the live solving orb was still the Phase 9.1 56px display (64px backing) while the Thinking lattice is 22×22 (3×6px cells + 2×2px gaps) — the cross-fade therefore moved + resized the header. SolvingOrb.tsx now passes size: 22 to the vendored thinking-orbs library (it scales internal geometry + DPR itself — no CSS-downscale trick) and displays the canvas at 22px; activity.css `.cmx-act-orb-live` (span + canvas) 56px → 22px; SolvingIndicator.tsx header docs updated. Both indicator layers already share one grid cell (`.cmx-act-indicator-shell` grid-area 1/1, same 8.75px gap, same 14px shimmer label), so with equal footprints the swap is a pure in-place cross-fade.
+- FIX 2 (retrieval scope): assistant-service.ts removed RETRIEVAL_TOP_FILES = 5 — topFiles is now EVERY unique file in the real hybrid-search result set (the run's genuine retrieval window, limit 14, already shown honestly in the SEARCH_RESULT chip), FILE_REFERENCED is emitted for all of them, and the returned RetrievalHit[] is untruncated. Read counts now follow reality: a narrow query showed "Read 4 files", a broad one "Read 14 files" — never a fixed number.
+- Verified in Agent Browser with a same-run instrumented poll of the active chain's indicator shell: Thinking → lattice box [0,0,22,22], label offset [31,3]; Solving → orb box [0,0,22,22], label offset [31,3] — IDENTICAL boxes and label positions, zero layout shift. Canvas measured exactly 22×22. Chain runs completed (Worked for 3s/6s/7s labels persisted); Read groups verified open with all real file chips listed; Context Inspector grew with the wider retrieval (15 files · 20 items · ~372 tok · 2% of budget).
+- bun run lint: 0 errors (1 pre-existing TanStack Virtual warning); tsc: 0 errors in touched files (pre-existing baseline elsewhere); browser console + dev.log clean (runs complete on glm-4-plus).
+
+Stage Summary:
+- The Thinking ⇄ Solving header swap is now a pixel-identical in-place cross-fade: same 22×22 animation box, same label position — the indicator changes its animation, never its geometry.
+- The "Read N files" count is fully dynamic — N is whatever the real retrieval genuinely returned for the query (4, 14, …); the hardcoded 5 is gone from the backend.
+- Note: the retrieval window itself remains the search engine's limit 14 (the honest, real result depth shown in the activity chip) — reads are no longer truncated below it.

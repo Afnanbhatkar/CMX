@@ -195,16 +195,19 @@
   display: block;
 }
 
-/* Live library orb — the user's reference snippet footprint: the 64px
-   backing canvas displayed at 56px, exactly like the prototype page. */
+/* Live library orb — EXACTLY the Thinking lattice footprint (user
+   direction, Phase 9.2): the lattice is 3×6px cells + 2×2px gaps = 22px,
+   so the orb renders at 22px too. Both header animations therefore share
+   the identical box — the Thinking ⇄ Solving cross-fade swaps in place
+   (same label position, same row height) with zero layout shift. */
 .cmx-act-orb-live {
-  width: 56px;
-  height: 56px;
+  width: 22px;
+  height: 22px;
 }
 
 .cmx-act-orb-live canvas {
-  width: 56px;
-  height: 56px;
+  width: 22px;
+  height: 22px;
 }
 
 /* CSS fallback orb — same 22px footprint; no canvas, no WebGL, no
