@@ -246,6 +246,7 @@ export interface WorkspaceState {
         | "intakeAnswers"
         | "approval"
         | "approvalDecision"
+        | "structured"
       >
     >,
   ) => void;

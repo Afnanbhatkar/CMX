@@ -1,22 +1,31 @@
 "use client";
 
 /**
- * CodeMind X V2 — AI code block (Phase 6 §7/§8/§9).
+ * CodeMind X V2 — AI code block (Phase 6 §7/§8/§9; Phase 8.5 §6 upgrade).
  *
  * The ONE high-quality renderer for AI code. Header always shows the real
  * language + copy; everything else is CONTEXTUAL (never all visible):
  * - Expand/collapse for long snippets;
  * - Download;
+ * - Word-wrap toggle (8.5);
  * - Preview — only for HTML/CSS/JS/JSX, rendered inside a sandboxed iframe
  *   (sandbox="allow-scripts", no same-origin — generated code never runs in
  *   the production window);
- * - Open in Editor — with a `// file: <path>` reference opens THAT file
- *   through the EditorNavigationService; without one it opens an honest,
- *   clearly-badged GENERATED scratch tab;
+ * - Open in Editor — with a `// file: <path>` reference (or structured
+ *   filename) opens THAT file through the EditorNavigationService; without
+ *   one it opens an honest, clearly-badged GENERATED scratch tab;
  * - Review Diff — only with a file reference; shows a real Monaco diff of
  *   the loaded file content vs the snippet via the shared DiffViewer;
  * - Apply — only with a file reference; DISABLED with the honest reason
- *   (file writes + approvals arrive in a later phase). Nothing is faked.
+ *   (file writes require the visible-diff approval flow). Nothing is faked.
+ *
+ * 8.5 §6 additions:
+ * - Header carries filename · language · line range · status (Generated /
+ *   Modified + verified-file dot), sourced from the typed structured
+ *   payload — never guessed from the markdown body;
+ * - Line numbers + line highlighting (structured highlightLines);
+ * - Worker-based token highlighting for long blocks (useCodeHighlight) —
+ *   plain text fallback, code is always visible.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -29,6 +38,7 @@ import {
   FileDiff,
   FilePlus2,
   PlaySquare,
+  WrapText,
 } from "lucide-react";
 
 import { editorNavigation } from "@/features/workspace/editor-navigation";
@@ -50,10 +60,24 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useCodeHighlight } from "./use-code-highlight";
+import type { HighlightToken } from "./highlight.worker";
 
 export interface AICodeBlockProps {
   code: string;
   language?: string;
+  /* ---- 8.5 structured metadata (typed payload; absent = plain block) ---- */
+  /** Model-provided filename (may be unknown — never guessed). */
+  filename?: string | null;
+  /** 1-based range of the REFERENCED REAL FILE this snippet relates to. */
+  lineStart?: number | null;
+  lineEnd?: number | null;
+  /** generated = model-authored; modified = presented as a change to a real file. */
+  status?: "generated" | "modified" | null;
+  /** Whether the filename resolved in the real workspace (verifier truth). */
+  fileStatus?: "verified" | "unknown" | null;
+  /** Lines of the referenced real file to highlight (1-based). */
+  highlightLines?: number[];
 }
 
 const COPY_RESET_MS = 1_600;
@@ -110,10 +134,12 @@ function extractFileReference(code: string): string | null {
 function HeaderIconButton({
   label,
   onClick,
+  active,
   children,
 }: {
   label: string;
   onClick: () => void;
+  active?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -125,7 +151,10 @@ function HeaderIconButton({
           size="icon"
           aria-label={label}
           onClick={onClick}
-          className="size-6 rounded-[4px] text-[#a89f93] hover:bg-white/5 hover:text-[#d6d1c8] focus-visible:ring-ring/60"
+          className={cn(
+            "size-6 rounded-[4px] text-[#a89f93] hover:bg-white/5 hover:text-[#d6d1c8] focus-visible:ring-ring/60",
+            active && "bg-white/10 text-[#d6d1c8]",
+          )}
         >
           {children}
         </Button>
@@ -185,14 +214,95 @@ function FooterAction({
 }
 
 /* ------------------------------------------------------------------ */
+/* Highlighted body (worker tokens → React spans; never innerHTML)      */
+/* ------------------------------------------------------------------ */
+
+const TOKEN_CLASS: Record<HighlightToken["t"], string> = {
+  c: "text-[#7d8590] italic",
+  s: "text-[#a5d6a7]",
+  n: "text-[#f2cc60]",
+  k: "text-[#d2a8ff]",
+  f: "text-[#8ab4f8]",
+  p: "text-[#c9c3ba]",
+  x: "",
+};
+
+function HighlightedCode({
+  code,
+  language,
+  lineCount,
+  startLine,
+  highlightSet,
+  wrap,
+}: {
+  code: string;
+  language: string | undefined;
+  lineCount: number;
+  startLine: number;
+  highlightSet: Set<number> | null;
+  wrap: boolean;
+}) {
+  const { lines: tokens } = useCodeHighlight(code, language, lineCount);
+  const codeLines = useMemo(() => code.split("\n"), [code]);
+
+  return (
+    <div className={cn("p-2.5 font-mono text-[11.5px] leading-[1.6] text-[#d6d1c8]")}>
+      {codeLines.map((line, i) => {
+        const number = startLine + i;
+        const highlighted = highlightSet?.has(number) ?? false;
+        const runs = tokens?.[i] ?? null;
+        return (
+          <div
+            key={i}
+            className={cn(
+              "flex min-w-fit",
+              highlighted && "bg-primary/15 border-l-2 border-primary",
+            )}
+          >
+            <span className="mr-3 w-9 shrink-0 select-none text-right text-[10px] text-[#6b655c]">
+              {number}
+            </span>
+            <span
+              className={cn(
+                "min-w-0 flex-1",
+                wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre",
+                highlighted && "text-foreground",
+              )}
+            >
+              {runs
+                ? runs.map((run, j) => (
+                    <span key={j} className={TOKEN_CLASS[run.t]}>
+                      {run.v}
+                    </span>
+                  ))
+                : line || " "}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* The block                                                           */
 /* ------------------------------------------------------------------ */
 
-export function AICodeBlock({ code, language }: AICodeBlockProps) {
+export function AICodeBlock({
+  code,
+  language,
+  filename = null,
+  lineStart = null,
+  lineEnd = null,
+  status = null,
+  fileStatus = null,
+  highlightLines,
+}: AICodeBlockProps) {
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
+  const [wrap, setWrap] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
   const [diffState, setDiffState] = useState<{
     status: "idle" | "loading" | "ready" | "error";
@@ -209,9 +319,18 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
   }, []);
 
   const lineCount = useMemo(() => code.split("\n").length, [code]);
-  const fileReference = useMemo(() => extractFileReference(code), [code]);
+  const inlineFileReference = useMemo(() => extractFileReference(code), [code]);
+  const fileReference = filename ?? inlineFileReference;
   const expandable = lineCount > COLLAPSE_LINE_THRESHOLD;
   const previewable = previewKindForLanguage(language) !== "none";
+  const showLineNumbers =
+    Boolean(highlightLines && highlightLines.length > 0) ||
+    typeof lineStart === "number" ||
+    typeof status === "string";
+  const highlightSet = useMemo(
+    () => (highlightLines && highlightLines.length > 0 ? new Set(highlightLines) : null),
+    [highlightLines],
+  );
 
   const copy = useCallback(() => {
     try {
@@ -236,7 +355,9 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `snippet.${extensionForLanguage(language)}`;
+      anchor.download = filename
+        ? filename.split("/").pop() ?? `snippet.${extensionForLanguage(language)}`
+        : `snippet.${extensionForLanguage(language)}`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -244,7 +365,7 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
     } catch {
       // download unavailable — the snippet stays visible either way
     }
-  }, [code, language]);
+  }, [code, language, filename]);
 
   const openInEditor = useCallback(() => {
     if (fileReference) {
@@ -310,10 +431,47 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
 
   return (
     <div className="my-2 overflow-hidden rounded-lg border border-border-subtle bg-[#131110]" data-testid="ai-code-block">
-      <div className="flex h-8 items-center justify-between border-b border-white/5 px-2.5">
-        <span className="font-mono text-[10.5px] text-[#a89f93]">
-          {language ?? "code"}
-        </span>
+      <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-0.5 border-b border-white/5 px-2.5 py-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="truncate font-mono text-[10.5px] text-[#d6d1c8]">
+            {filename ?? language ?? "code"}
+          </span>
+          {filename && language ? (
+            <span className="font-mono text-[10px] text-[#a89f93]/70">{language}</span>
+          ) : null}
+          {typeof lineStart === "number" ? (
+            <span
+              className="font-mono text-[10px] text-[#a89f93]/70"
+              title={`Line range of the referenced file`}
+            >
+              L{lineStart}
+              {typeof lineEnd === "number" && lineEnd !== lineStart ? `–${lineEnd}` : ""}
+            </span>
+          ) : null}
+          {status === "modified" ? (
+            <span
+              className="rounded-full border border-warning/40 px-1.5 py-px text-[9px] uppercase tracking-wide text-warning"
+              title="This block proposes a change to the referenced file — nothing is applied without the approval flow."
+            >
+              Modified
+            </span>
+          ) : status === "generated" ? (
+            <span
+              className="rounded-full border border-border-subtle px-1.5 py-px text-[9px] uppercase tracking-wide text-muted-foreground"
+              title="Model-authored snippet — not present in the repository."
+            >
+              Generated
+            </span>
+          ) : null}
+          {fileStatus === "unknown" && filename ? (
+            <span
+              className="rounded-full border border-destructive/40 px-1.5 py-px text-[9px] uppercase tracking-wide text-destructive"
+              title="This filename could not be verified in the workspace — treat it as a proposal, not a real file."
+            >
+              Unknown file
+            </span>
+          ) : null}
+        </div>
         <div className="flex items-center gap-0.5">
           <HeaderIconButton label={copied ? "Copied" : "Copy code"} onClick={copy}>
             {copied ? (
@@ -321,6 +479,13 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
             ) : (
               <Copy aria-hidden="true" className="size-3.5" />
             )}
+          </HeaderIconButton>
+          <HeaderIconButton
+            label={wrap ? "No word-wrap" : "Word-wrap"}
+            active={wrap}
+            onClick={() => setWrap((v) => !v)}
+          >
+            <WrapText aria-hidden="true" className="size-3.5" />
           </HeaderIconButton>
           {expandable && (
             <HeaderIconButton
@@ -349,9 +514,25 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
           expandable && (expanded ? "max-h-96" : "max-h-64"),
         )}
       >
-        <pre className="whitespace-pre p-2.5 font-mono text-[11.5px] leading-[1.6] text-[#d6d1c8]">
-          <code>{code}</code>
-        </pre>
+        {showLineNumbers ? (
+          <HighlightedCode
+            code={code}
+            language={language}
+            lineCount={lineCount}
+            startLine={lineStart ?? 1}
+            highlightSet={highlightSet}
+            wrap={wrap}
+          />
+        ) : (
+          <pre
+            className={cn(
+              "p-2.5 font-mono text-[11.5px] leading-[1.6] text-[#d6d1c8]",
+              wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre",
+            )}
+          >
+            <code>{code}</code>
+          </pre>
+        )}
       </div>
 
       {/* Contextual footer — only RELEVANT actions render (spec §7). */}
@@ -379,7 +560,7 @@ export function AICodeBlock({ code, language }: AICodeBlockProps) {
               label="Apply"
               icon={Check}
               disabled
-              disabledReason="File writes + approval flow arrive in a later phase — nothing is written yet."
+              disabledReason="Applying requires the visible-diff approval flow — nothing is written without explicit human approval."
             />
           ) : null}
       </div>

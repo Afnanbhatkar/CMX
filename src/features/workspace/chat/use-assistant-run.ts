@@ -408,6 +408,13 @@ export function useAssistantRun(): AssistantRun {
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             approval: event.approval,
           });
+        } else if (event.type === "RESPONSE_STRUCTURED") {
+          // 8.5: the typed structured payload — the UI renders THIS, never
+          // parsed markdown. Persisted with the message like the other
+          // measured run facts.
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            structured: event.structured,
+          });
         } else if (event.type === "RUN_STARTED") {
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             runId: event.runId,
@@ -748,18 +755,25 @@ export function useAssistantRun(): AssistantRun {
 
       // Phase 8A typed wire attachments: only REAL repository files and real
       // selections go on the wire; labels without a resolvable path do not.
+      // 8.5: image attachments travel as "session-file" (the backend states
+      // the transport's image capability honestly to the model).
       const wireAttachments: ApiChatAttachment[] = (attachments ?? [])
         .filter(
-          (a): a is Attachment & { path: string } =>
-            (a.kind === "file" || a.kind === "selection") &&
-            typeof a.path === "string" &&
-            a.path.trim().length > 0,
+          (a): a is Attachment =>
+            a.kind === "image" ||
+            ((a.kind === "file" || a.kind === "selection") &&
+              typeof a.path === "string" &&
+              a.path.trim().length > 0),
         )
-        .map((a) => ({
-          kind: a.kind === "file" ? ("repository-file" as const) : ("selection" as const),
-          label: a.label,
-          path: a.path,
-        }));
+        .map((a) =>
+          a.kind === "image"
+            ? ({ kind: "session-file", label: a.label, path: null } as ApiChatAttachment)
+            : ({
+                kind: a.kind === "file" ? ("repository-file" as const) : ("selection" as const),
+                label: a.label,
+                path: a.path,
+              } as ApiChatAttachment),
+        );
 
       void runCompletion(conversationId, history, options, wireAttachments);
     },

@@ -31,6 +31,7 @@
 | **WebGL** | `local` | Browser-GPU dependent; verified working in the preview browser (Phase 1 shader). Must always ship a non-WebGL fallback. |
 | **Local LLM / Ollama** | `unavailable` | `ollama` absent, :11434 down. No local model serving. |
 | **External LLM providers** | `production` | `z-ai-web-dev-sdk` platform gateway (LLM, VLM, embeddings, search, ASR/TTS, image/video). **Backend-only** — never imported client-side. |
+| **Assistant image understanding** | `unavailable` | Phase 8.5: the chat transport's message contract is text-only (`GatewayMessage.content: string`) — no image parts. Measured by `GET /api/assistant/capabilities`; the composer image button is capability-gated with the honest reason. Flows (screenshot→diagnosis/proposal) activate when the transport gains image support. |
 | **Streaming (SSE)** | `production` | Phase 3: typed event bus (`src/server/events`) + SSE at `/api/events` (+ `/api/events/stream`) and `/api/assistant/stream` — replay buffer, heartbeats, privacy-enforced event schemas (operational labels only, `.strict()` zod). Token-level assistant streaming awaits a gateway streaming API — no fake chunking is performed. WebSocket [PLANNED]. |
 
 ## Degradation ladder (binding for future phases)

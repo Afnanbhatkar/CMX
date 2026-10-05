@@ -35,6 +35,7 @@ const TITLE_TEMPLATES: Record<ActivityViewKind, string> = {
   run_command: "Running",
   run_tests: "Running tests",
   verify: "Verifying changes",
+  verify_response: "Verifying response",
   prepare: "Preparing response",
   tool: "Working",
   waiting_approval: "Waiting for approval",
@@ -133,6 +134,7 @@ export function mapViewKind(
   if (title.startsWith("running tests")) return "run_tests";
   if (title.startsWith("checking security")) return "verify";
   if (title.startsWith("preparing preview")) return "verify";
+  if (title.startsWith("verifying")) return "verify_response";
 
   // Coarse backend categories → view kinds.
   switch (backendKind) {

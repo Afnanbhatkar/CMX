@@ -4,6 +4,59 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 8.5 — Response Engine V2 + Verified Code Rendering + Multimodal Output] — 2026-10-05
+
+### Added
+- **Response pipeline (backend)**: Draft → Structured Output (a real second
+  gateway call distills the streamed answer into typed JSON) → Reference
+  Verifier (every file path / line range / symbol checked against the Phase 7
+  search index — real files, real line counts via `contentOf`, real symbol
+  table) → Critic (rule-based completeness + consistency checks with
+  human-readable findings) → Refine (unverified "Confirmed" claims downgrade
+  to "Likely" with an honest note; overall uncertainty derived from the claim
+  set) → Render. Runs AFTER the answer streams; never alters the answer text.
+- **Typed structured contract** (`StructuredResponse`): summary, claims
+  (EvidenceBackedClaim), files/symbols (verified|unknown), code metadata,
+  actions, sources, overall uncertainty, followups, memoryUsed, verification
+  stats. New wire event `RESPONSE_STRUCTURED` (additive) + activity row
+  "Verifying response".
+- **ResponseView (UI)**: template strip (Explain TL;DR→Flow→Key files→Gotchas;
+  Debug root cause→evidence→fix→verify; Review findings→severity→fix;
+  Architecture graph→components→relationships), typed summary card, claims
+  with clickable uncertainty badges (Confirmed/Likely/Potential/Unknown — each
+  reveals its evidence), verified file chips (clickable via
+  EditorNavigationService ONLY when verified) vs "Unknown Reference" badges
+  (plain text, never a false link), verified/unknown symbol chips, followup
+  chips that load into the composer draft, overall uncertainty strip, and a
+  verification footer with critic notes.
+- **Code block v2 (AICodeBlock)**: header now carries filename · language ·
+  line range · status (Generated/Modified) + "Unknown file" badge for
+  unverified filenames; word-wrap toggle; line numbers + structured line
+  highlighting; worker-based token highlighting for long blocks
+  (`highlight.worker.ts`, dependency-free tokenizer; plain-text fallback).
+  Existing copy/download/preview/open-in-editor/diff/expand kept.
+- **Tables (MarkdownTable)**: GFM tables via `remark-gfm` (dependency
+  addition per RULES §6), sticky header, internal horizontal scroll only,
+  Copy as Markdown / Copy as CSV toolbar.
+- **Diagrams (MermaidBlock)**: `mermaid@11` (dependency addition) rendered
+  with securityLevel "strict" (static SVG, no external network, no click
+  handlers); ANY failure falls back to the real code block with an honest
+  note.
+- **Multimodal capability honesty**: new `GET /api/assistant/capabilities`
+  reports the MEASURED transport truth (image understanding: unsupported —
+  the gateway message contract is text-only today). The composer's image
+  button is capability-gated with the honest reason; session-file
+  attachments that do reach the backend produce an explicit "cannot see
+  images" instruction to the model — never a claimed analysis.
+- **Memory chip labels**: "Memory used: <scope>, <scope>" naming what was
+  used (count fallback), with the existing source/evidence popover.
+
+### Performance
+- Streaming-safe memoized block rendering; offscreen message rows skip
+  rendering via `content-visibility: auto` + `contain-intrinsic-size`
+  (render-skipping; full windowing stays with the existing scroll
+  choreography).
+
 ## [Phase 8D — Real-Time AI Thinking + Solving Activity Chain] — 2026-10-04
 
 The old assistant thought UI is replaced with a production-quality, real-time

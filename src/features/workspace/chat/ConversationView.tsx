@@ -36,6 +36,7 @@ import {
 import { useAssistantRun } from "./use-assistant-run";
 import { ApprovalCardSlot } from "./ApprovalCardSlot";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ResponseView } from "./ResponseView";
 import { MemoryUsedChip } from "./MemoryUsedChip";
 import { QuestionFlow } from "./QuestionFlow";
 import { isCasualPrompt } from "@/lib/casual-prompt";
@@ -303,10 +304,17 @@ function AssistantMessage({
       {/* Phase 9: the answer streams word by word below the live chain
           (revealed REAL gateway deltas). The chain closes into its final
           duration chip when the first token arrives, exactly like the
-          prototype; history and stopped runs keep their real content. */}
+          prototype; history and stopped runs keep their real content.
+          Phase 8.5: once the typed structured payload arrives, the message
+          renders through the ResponseView — verified references, uncertainty
+          badges and template sections around the SAME body. */}
       {message.content.trim().length > 0 &&
       (busy || message.state === "complete" || message.state === "stopped") ? (
-        <ChatMarkdown content={message.content} />
+        message.structured && !busy ? (
+          <ResponseView structured={message.structured} content={message.content} />
+        ) : (
+          <ChatMarkdown content={message.content} />
+        )
       ) : null}
 
       {/* Phase 8C: the model's proposed change awaits an explicit human
@@ -618,7 +626,7 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
         {messages.map((message, index) => {
           if (message.role === "user") {
             return (
-              <div key={message.id} data-message-id={message.id} className="min-w-0">
+              <div key={message.id} data-message-id={message.id} className="min-w-0 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
                 <UserMessage message={message} />
               </div>
             );
@@ -634,7 +642,7 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
             }
           }
           return (
-            <div key={message.id} data-message-id={message.id} className="min-w-0">
+            <div key={message.id} data-message-id={message.id} className="min-w-0 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
               <AssistantMessage
                 message={message}
                 conversationId={conversationId}

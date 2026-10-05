@@ -44,6 +44,7 @@ import {
   ChevronsUpDown,
   Code2,
   FileCode2,
+  Image as ImageIcon,
   Layers,
   Loader2,
   Paperclip,
@@ -61,7 +62,7 @@ import { selectActiveConversation, useWorkspaceStore } from "@/stores/workspace-
 import { selectLedger, useContextInspectorStore } from "@/stores/context-inspector-store";
 import type { Attachment } from "@/features/workspace/types";
 import { SELECTION_ACTION_PROMPTS } from "@/features/workspace/types";
-import type { ComposerMode } from "@/features/workspace/assistant/contracts";
+import type { ComposerMode, AssistantCapabilities } from "@/features/workspace/assistant/contracts";
 import { useRepositoryMeta } from "@/features/workspace/use-repository-meta";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
 import type { RepoTreeNode } from "@/features/workspace/types";
@@ -505,6 +506,31 @@ export function AIComposer() {
   const { meta } = useRepositoryMeta();
   const { send, stop, regenerate, isGenerating } = useAssistantRun();
 
+  /* 8.5 §9: measured transport capabilities (image understanding etc.). */
+  const [capabilities, setCapabilities] = useState<AssistantCapabilities | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await fetch("/api/assistant/capabilities", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = (await res.json().catch(() => null)) as
+          | { ok?: boolean; capabilities?: AssistantCapabilities }
+          | null;
+        if (!cancelled && data?.ok && data.capabilities) setCapabilities(data.capabilities);
+      } catch {
+        // capabilities unknown — the image button stays gated (honest default)
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, []);
+
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [openPopover, setOpenPopover] = useState<"attach" | "context" | "model" | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -803,6 +829,9 @@ export function AIComposer() {
             }
           />
 
+          {/* Image attach — capability-gated (8.5 §9) */}
+          <ImageAttachButton capabilities={capabilities} />
+
           {/* Context selection */}
           <ContextMenuPopover
             open={openPopover === "context"}
@@ -891,6 +920,43 @@ export function AIComposer() {
         Enter to send · Shift+Enter newline · Alt+1–4 mode · Alt+M cycle · Esc stop
       </p>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Image attach — capability-gated (8.5 §9). The button renders the    */
+/* MEASURED transport capability: image flows stay disabled with an    */
+/* honest reason until the LLM transport can actually read images.     */
+/* ------------------------------------------------------------------ */
+
+function ImageAttachButton({ capabilities }: { capabilities: AssistantCapabilities | null }) {
+  const supported = capabilities?.imageUnderstanding.supported === true;
+  const reason =
+    capabilities?.imageUnderstanding.reason ??
+    "Checking the transport's image capability…";
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-block">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Attach image"
+            aria-disabled={!supported}
+            disabled={!supported}
+            className="size-7 rounded-[6px] text-muted-foreground hover:bg-surface-hover hover:text-foreground"
+          >
+            <ImageIcon aria-hidden="true" className="size-3.5" />
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-60 text-[10.5px]">
+        {supported
+          ? "Attach a screenshot or image"
+          : `Image understanding unavailable — ${reason}`}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

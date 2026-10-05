@@ -43,6 +43,14 @@ const CONFIDENCE_CLASS: Record<MemoryRecord["confidence"], string> = {
 
 export function MemoryUsedChip({ memories, note, disabledIds, onToggle }: MemoryUsedChipProps) {
   const enabledCount = memories.filter((m) => !disabledIds.includes(m.id)).length;
+  /* 8.5 §10: "Memory used: Project Rules, Authentication Decision" — the
+     label names WHAT was used when it is short enough to be readable. */
+  const enabledMemories = memories.filter((m) => !disabledIds.includes(m.id));
+  const labelMemories = enabledMemories.slice(0, 2).map((m) => m.scope ?? m.id);
+  const chipLabel =
+    labelMemories.length > 0
+      ? `Memory used: ${labelMemories.join(", ")}${enabledMemories.length > 2 ? ` +${enabledMemories.length - 2}` : ""}`
+      : `Memory used: ${enabledCount}`;
 
   return (
     <Popover>
@@ -54,7 +62,7 @@ export function MemoryUsedChip({ memories, note, disabledIds, onToggle }: Memory
           title="Show the project memory this run used"
         >
           <Brain aria-hidden="true" className="size-3 shrink-0" />
-          Memory used: {enabledCount}
+          {chipLabel}
           <Eye aria-hidden="true" className="size-2.5 opacity-60" />
         </button>
       </PopoverTrigger>
@@ -149,7 +157,12 @@ export function MemoryUsedChip({ memories, note, disabledIds, onToggle }: Memory
 /** Collapsible wrapper used where vertical space is tight (inspector panel). */
 export function MemoryUsedDisclosure({ memories, note, disabledIds, onToggle }: MemoryUsedChipProps) {
   const [open, setOpen] = useState(false);
-  const enabledCount = memories.filter((m) => !disabledIds.includes(m.id)).length;
+  const enabledMemories = memories.filter((m) => !disabledIds.includes(m.id));
+  const labelMemories = enabledMemories.slice(0, 2).map((m) => m.scope ?? m.id);
+  const chipLabel =
+    labelMemories.length > 0
+      ? `Memory used: ${labelMemories.join(", ")}${enabledMemories.length > 2 ? ` +${enabledMemories.length - 2}` : ""}`
+      : `Memory used: ${enabledMemories.length}`;
 
   return (
     <div>
@@ -162,7 +175,7 @@ export function MemoryUsedDisclosure({ memories, note, disabledIds, onToggle }: 
         className="h-6 gap-1 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
       >
         <Brain aria-hidden="true" className="size-3" />
-        Memory used: {enabledCount}
+        {chipLabel}
         {open ? (
           <ChevronUp aria-hidden="true" className="size-3" />
         ) : (

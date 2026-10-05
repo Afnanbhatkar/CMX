@@ -28,8 +28,10 @@ import {
   type IntakeAnswer,
   type MemoryRecord,
   type ResponseSegment,
+  type StructuredResponse,
 } from "@/features/workspace/assistant/contracts";
 import { retrieveProjectMemories, renderMemoryPreamble } from "./memory-service";
+import { buildStructuredResponse } from "./response-engine";
 
 /**
  * CodeMind X V2 — assistant turn service (Phase 3, spec §4; Phase 8A update).
@@ -144,7 +146,8 @@ export type AssistantStageEvent =
   | { type: "CONTEXT_SNAPSHOT"; snapshot: ContextInspectorSnapshot }
   | { type: "MEMORY_USED"; memories: MemoryRecord[]; note: string | null }
   | { type: "INTAKE_QUESTIONS"; batch: IntakeQuestionBatch }
-  | { type: "APPROVAL_REQUIRED"; approval: ApprovalRequest };
+  | { type: "APPROVAL_REQUIRED"; approval: ApprovalRequest }
+  | { type: "RESPONSE_STRUCTURED"; structured: StructuredResponse };
 
 export type AssistantStageEmitter = (event: AssistantStageEvent) => void;
 
@@ -665,6 +668,31 @@ async function buildSdkMessages(
     }
   }
 
+  // Session-file attachments (images etc.): the gateway transport accepts
+  // TEXT only today (GatewayMessage.content is a string). The honest 8.5
+  // behavior is to tell the MODEL exactly that, so the answer says the
+  // image could not be read instead of pretending to understand it.
+  const sessionFiles = input.context?.attachments?.filter((a) => a.kind === "session-file") ?? [];
+  if (sessionFiles.length > 0) {
+    const names = sessionFiles.map((a) => a.label).join(", ");
+    preambleParts.push(
+      `Attached non-repository file(s): ${names}. IMPORTANT capability honesty: this transport CANNOT read image/binary content — no pixel or binary data reached you. Say plainly that you cannot see the attached file's visual content, and ask for the relevant text/code/logs instead. Never claim to have analyzed the image.`,
+    );
+    for (const file of sessionFiles) {
+      entries.push({
+        source: "attachment",
+        ref: `session-file:${file.label}`,
+        included: false,
+        reason: "attached by the user — image/binary content is NOT readable by this transport (capability-gated)",
+        label: file.label,
+        charCount: 0,
+        tokenEstimate: 0,
+        chunks: [],
+        symbols: [],
+      });
+    }
+  }
+
   // Mode contract — last in the preamble so it frames the whole turn.
   preambleParts.push(MODE_PROMPTS[mode].join("\n"));
 
@@ -880,7 +908,7 @@ function extractApprovalRequest(content: string): {
 export async function runAssistantTurn(
   input: AssistantTurnInput,
   onStage?: AssistantStageEmitter,
-): Promise<{ content: string; servedModel: string | null }> {
+): Promise<{ content: string; servedModel: string | null; structured: StructuredResponse | null }> {
   const mode = input.mode ?? DEFAULT_MODE;
   const built = await buildSdkMessages(input, onStage);
   const sdkMessages = built.sdkMessages;
@@ -996,6 +1024,24 @@ export async function runAssistantTurn(
     onStage?.({ type: "APPROVAL_REQUIRED", approval });
   }
 
+  // ---- Phase 8.5 response pipeline: structured output + reference
+  // verification + critic + refine. Runs AFTER the answer streamed (the
+  // user is already reading); emits RESPONSE_STRUCTURED when it produces
+  // a usable payload, and never alters the streamed answer text.
+  let structured: StructuredResponse | null = null;
+  if (onStage) {
+    const engine = await buildStructuredResponse({
+      runId: input.runId ?? "run-pending",
+      mode,
+      draft: cleanedContent,
+      query: built.query,
+      memories: built.memories,
+      retrievalFiles: [...new Set(built.retrievalHits.map((h) => h.file))],
+      onStage,
+    });
+    structured = engine.structured;
+  }
+
   logInfo("assistant: completion ok", {
     mode,
     servedModel: result.servedModel,
@@ -1021,7 +1067,7 @@ export async function runAssistantTurn(
   });
 
   await recordAssistantActivity(mode);
-  return { content: result.content, servedModel: result.servedModel };
+  return { content: result.content, servedModel: result.servedModel, structured };
 }
 
 /**

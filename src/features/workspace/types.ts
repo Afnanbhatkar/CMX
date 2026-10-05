@@ -21,6 +21,7 @@ import type {
   IntakeAnswer,
   IntakeQuestionBatch,
   MemoryRecord,
+  StructuredResponse,
 } from "@/features/workspace/assistant/contracts";
 
 /* ------------------------------------------------------------------ */
@@ -131,10 +132,13 @@ export type MessageState = "complete" | "generating" | "error" | "stopped";
 
 export interface Attachment {
   id: string;
-  kind: "file" | "selection" | "repository" | "tool-result";
+  /** "image" = an image attachment (8.5 — capability-gated in the composer). */
+  kind: "file" | "selection" | "repository" | "tool-result" | "image";
   label: string;
   /** Real workspace-relative path when the attachment points at a file. */
   path?: string;
+  /** Downscaled data URL for image attachments (session-scoped only). */
+  dataUrl?: string;
 }
 
 /**
@@ -202,6 +206,9 @@ export interface ChatMessage {
   approval?: ApprovalRequest | null;
   /** The recorded human decision on the approval card (never auto-applied). */
   approvalDecision?: ApprovalDecision | null;
+  /* ---- 8.5 — structured response + verified references ---- */
+  /** The typed structured payload (RESPONSE_STRUCTURED); null = plain markdown. */
+  structured?: StructuredResponse | null;
 }
 
 export interface Conversation {

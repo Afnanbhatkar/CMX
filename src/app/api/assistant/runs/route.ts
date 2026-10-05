@@ -27,8 +27,9 @@ import type {
  *
  *   RUN_STARTED → ACTIVITY_* → CONTEXT_SNAPSHOT → MEMORY_USED →
  *   SEARCH_RESULT → FILE_REFERENCED → (INTAKE_QUESTIONS_REQUIRED → …user
- *   answers via /api/assistant/runs/answers…) → RESPONSE_CHUNK → `result`
- *   frame → APPROVAL_REQUIRED → RUN_COMPLETED (or RUN_FAILED/RUN_CANCELLED).
+ *   answers via /api/assistant/runs/answers…) → RESPONSE_CHUNK →
+ *   RESPONSE_STRUCTURED (8.5) → `result` frame → APPROVAL_REQUIRED →
+ *   RUN_COMPLETED (or RUN_FAILED/RUN_CANCELLED).
  *
  * First-event latency: RUN_STARTED is written SYNCHRONOUSLY when the stream
  * opens — before any await — so the first visible activity event does not
@@ -201,6 +202,9 @@ export async function POST(req: Request): Promise<Response> {
             break;
           case "RESPONSE_CHUNK":
             writeEvent({ type: "RESPONSE_CHUNK", runId, segment: stage.segment });
+            break;
+          case "RESPONSE_STRUCTURED":
+            writeEvent({ type: "RESPONSE_STRUCTURED", runId, structured: stage.structured });
             break;
           /* ---- 8C surfaces ---- */
           case "CONTEXT_SNAPSHOT":

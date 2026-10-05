@@ -117,6 +117,7 @@ export type ActivityViewKind =
   | "run_command"
   | "run_tests"
   | "verify"
+  | "verify_response"
   | "prepare"
   | "tool"
   | "waiting_approval"

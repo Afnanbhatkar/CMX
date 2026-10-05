@@ -23,7 +23,7 @@
 /* ------------------------------------------------------------------ */
 
 /** Bumped when a sub-phase extends the contract in a breaking way. */
-export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8c";
+export const ASSISTANT_CONTRACT_VERSION = "2.1.0-phase8.5";
 
 /* ------------------------------------------------------------------ */
 /* §1 — Run pipeline (the contract, not the executor)                  */
@@ -486,6 +486,7 @@ export type AssistantStreamEvent =
   | { type: "APPROVAL_REQUIRED"; runId: string; approval: ApprovalRequest }
   | { type: "QUESTION_REQUIRED"; runId: string; question: ClarifyQuestion }
   | { type: "RESPONSE_CHUNK"; runId: string; segment: ResponseSegment }
+  | { type: "RESPONSE_STRUCTURED"; runId: string; structured: StructuredResponse }
   | { type: "RUN_COMPLETED"; runId: string; completedAt: number }
   | { type: "RUN_FAILED"; runId: string; error: string; failedAt: number }
   | { type: "RUN_CANCELLED"; runId: string; cancelledAt: number };
@@ -538,3 +539,117 @@ export const CONTEXT_BUDGET_TOKENS_ESTIMATE = Math.floor(CONTEXT_BUDGET_CHARS / 
  * emits it, no approval card appears — nothing is fabricated.
  */
 export const APPROVAL_MARKER = "codemind-approval-request";
+
+/* ------------------------------------------------------------------ */
+/* §15 (8.5) — Structured response + verified references               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Response templates (8.5 §5). The template drives the UI section flow —
+ * the UI never infers structure by parsing the markdown body.
+ */
+export const RESPONSE_TEMPLATES = [
+  "explain",
+  "debug",
+  "review",
+  "architecture",
+  "general",
+] as const;
+
+export type ResponseTemplate = (typeof RESPONSE_TEMPLATES)[number];
+
+/** One file/reference VERIFIED against repository intelligence (8.5 §3). */
+export interface StructuredReference {
+  /** The raw reference as the model produced it ("src/x.ts", "src/x.ts:12-20"). */
+  raw: string;
+  /** The path part (line stripped, whitespace trimmed). */
+  path: string;
+  line: number | null;
+  lineEnd: number | null;
+  /**
+   * verified = the path EXISTS in the real workspace AND the line range
+   * (when given) is within the file. Anything else is "unknown" — the UI
+   * shows plain text / an Unknown Reference badge and never a clickable link.
+   */
+  status: "verified" | "unknown";
+  /** Real line count of the file when the path exists (verifier evidence). */
+  lineCount: number | null;
+  /** Honest verifier note ("no such file in the workspace index", …). */
+  note: string | null;
+}
+
+/** One symbol VERIFIED against the real symbol table (8.5 §3). */
+export interface StructuredSymbol {
+  name: string;
+  status: "verified" | "unknown";
+  /** The real definition site when verified. */
+  path: string | null;
+  line: number | null;
+  /** The real construct kind (function/class/…). */
+  kind: string | null;
+}
+
+/** One code block with verified metadata (8.5 §6). The code TEXT itself
+ * always comes from the draft's own fenced blocks — never duplicated here. */
+export interface StructuredCodeBlock {
+  language: string;
+  /** Model-provided filename, when it named one. */
+  filename: string | null;
+  lineStart: number | null;
+  lineEnd: number | null;
+  /** generated = model-authored; modified = presented as a change to an existing file. */
+  status: "generated" | "modified";
+  /** 1-based lines (of the referenced real file) to highlight. */
+  highlightLines: number[];
+  /** Whether the filename resolved in the real workspace. */
+  fileStatus: "verified" | "unknown";
+}
+
+/** An action the UI may offer on the response (labels are model-provided). */
+export interface StructuredAction {
+  label: string;
+  action: string;
+}
+
+/**
+ * The typed structured response (8.5 §2). Produced by the response pipeline
+ * (draft → structured output → reference verifier → critic → refine) and
+ * consumed by the rendering pipeline. The UI NEVER parses the markdown body
+ * to determine application state — everything below is typed data.
+ */
+export interface StructuredResponse {
+  version: "8.5";
+  runId: string;
+  template: ResponseTemplate;
+  summary: string | null;
+  claims: EvidenceBackedClaim[];
+  files: StructuredReference[];
+  symbols: StructuredSymbol[];
+  /** Metadata for the draft's fenced code blocks, IN ORDER (may be shorter). */
+  code: StructuredCodeBlock[];
+  actions: StructuredAction[];
+  sources: StructuredReference[];
+  /** Overall uncertainty of THIS response, with the honest reason. */
+  uncertainty: { level: UncertaintyLevel; reason: string | null };
+  followups: string[];
+  /** The real memory records this run used (echoes the MEMORY_USED event). */
+  memoryUsed: { id: string; label: string; source: string }[];
+  verification: {
+    verifiedCount: number;
+    unknownCount: number;
+    /** Rule-based critic findings — real checks, human-readable. */
+    criticNotes: string[];
+    verifiedAt: number;
+    /** How this payload was produced ("llm-structured+rule-critic" | …). */
+    via: string;
+    /** Honest note when the structured LLM output was unusable. */
+    note: string | null;
+  };
+}
+
+/** Gateway capabilities as MEASURED by the transport (8.5 §9 — honest). */
+export interface AssistantCapabilities {
+  transport: string;
+  imageUnderstanding: { supported: boolean; reason: string | null };
+  diagramRendering: { supported: boolean; renderer: string | null };
+}
