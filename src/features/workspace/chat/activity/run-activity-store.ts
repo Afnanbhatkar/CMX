@@ -75,8 +75,8 @@ export const ACTIVITY_ROW_CAP = 200;
 const PERSISTED_ROW_CAP = 200;
 /** Consecutive same-kind rows before merging into a group (spec: 4+). */
 const GROUP_THRESHOLD = 4;
-/** Max file children rendered under one row before "+N more". */
-const CHILDREN_CAP = 8;
+/** Max file children rendered under one row (group dropdown) before "+N more". */
+const CHILDREN_CAP = 12;
 
 /* ------------------------------------------------------------------ */
 /* Internal state                                                      */
@@ -281,6 +281,30 @@ function makeChild(
   };
 }
 
+/**
+ * Merge children lists for GROUP rows (copy-on-write): every merged op's
+ * files stay listed under the group row ("Edited 5 files" → the dropdown
+ * lists all five), deduped by id, recomputing the "+N more" overflow marker.
+ */
+function mergeChildren(
+  rowId: string,
+  base: ActivityViewChild[],
+  extra: ActivityViewChild[],
+): ActivityViewChild[] {
+  const moreId = `${rowId}-more`;
+  const merged = base.filter((c) => c.id !== moreId);
+  for (const child of extra) {
+    if (merged.some((c) => c.id === child.id)) continue;
+    merged.push(child);
+  }
+  if (merged.length <= CHILDREN_CAP) return merged;
+  const overflow = merged.length - CHILDREN_CAP;
+  return [
+    ...merged.slice(0, CHILDREN_CAP),
+    { id: moreId, label: `+${overflow} more`, path: null, line: null },
+  ];
+}
+
 /** Pure appendChild with the "+N more" overflow cap. */
 function withChild(row: ActivityViewRow, child: ActivityViewChild): ActivityViewRow {
   if (row.children.some((c) => c.id === child.id)) return row;
@@ -331,7 +355,9 @@ function appendRow(state: RunActivityState, row: ActivityViewRow): void {
 
   if (isGroupable(row.kind)) {
     const last = rows[rows.length - 1];
-    // Already a group of the same kind → absorb (copy-on-write).
+    // Already a group of the same kind → absorb (copy-on-write). The
+    // merged row KEEPS every absorbed op's file children (dropdown lists
+    // all of them) and its query chip when both carry one.
     if (last && last.groupCount !== null && last.kind === row.kind) {
       const nextCount = last.groupCount + 1;
       updateRowById(state, last.id, (current) => ({
@@ -341,7 +367,8 @@ function appendRow(state: RunActivityState, row: ActivityViewRow): void {
         status: row.status,
         seq: Math.max(current.seq, row.seq),
         detail: row.detail ?? current.detail,
-        children: row.children.length > 0 ? row.children : current.children,
+        query: row.query ?? current.query ?? null,
+        children: mergeChildren(last.id, current.children, row.children),
       }));
       state.dirty = true;
       return;
@@ -359,16 +386,22 @@ function appendRow(state: RunActivityState, row: ActivityViewRow): void {
     }
 
     if (tailCount >= GROUP_THRESHOLD - 1) {
-      // Convert the tail + the incoming row into ONE group row.
+      // Convert the tail + the incoming row into ONE group row that keeps
+      // every converted op's file children (dropdown lists all of them).
+      const tailRows = rows.slice(rows.length - tailCount);
       const group: ActivityViewRow = {
         id: `group-${row.kind}-${row.id}`,
         kind: row.kind,
         title: groupTitleFor(row.kind, tailCount + 1),
-        detail: row.detail,
+        detail: tailRows.map((r) => r.detail).find(Boolean) ?? row.detail,
         status: row.status,
         seq: row.seq,
-        children: row.children,
+        children: tailRows.reduce(
+          (acc, r) => mergeChildren(`group-${row.kind}-${row.id}`, acc, r.children),
+          row.children,
+        ),
         groupCount: tailCount + 1,
+        query: row.query ?? null,
       };
       state.rows = [...rows.slice(0, rows.length - tailCount), group];
       state.dirty = true;
@@ -454,7 +487,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         .filter((child) => child && typeof child.tool === "string")
         .map((child, index) => {
           if (child.tool === "read_file") {
-            return makeChild(child.path, null, "read_file");
+            return makeChild(child.path, null, "Read");
           }
           if (child.tool === "search") {
             return {
@@ -475,9 +508,20 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
             };
           }
           const childPath = "path" in child && typeof child.path === "string" ? child.path : null;
+          /** Human file-op prefixes — raw tool ids never reach the UI.
+           * create_patch stays a bare path: the patch is composed here, not
+           * applied, so the label must not claim an edit happened. */
+          const TOOL_PREFIX: Record<string, string> = {
+            edit_file: "Edited",
+            create_file: "Created",
+            delete_file: "Deleted",
+            rename_file: "Renamed",
+            create_patch: "",
+          };
+          const prefix = TOOL_PREFIX[child.tool] ?? child.tool;
           return {
             id: `${activity.id}-child-${index}`,
-            label: redactDetail(`${child.tool}${childPath ? ` ${childPath}` : ""}`),
+            label: redactDetail(`${prefix}${childPath ? ` ${childPath}` : ""}`.trim()),
             path: childPath,
             line: null,
           };
@@ -564,6 +608,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
             ...current,
             seq: Math.max(current.seq, event.seq),
             detail: detail ?? current.detail,
+            query: safeQuery || null,
           };
           for (const file of files) {
             next = withChild(next, makeChild(file, null, ""));
@@ -580,6 +625,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
           seq: event.seq,
           children: files.map((file) => makeChild(file, null, "")),
           groupCount: null,
+          query: safeQuery || null,
         });
       }
       return;
@@ -592,7 +638,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         state.malformed += 1;
         return;
       }
-      const child = makeChild(path, typeof line === "number" ? line : null, "read_file");
+      const child = makeChild(path, typeof line === "number" ? line : null, "Read");
       const hostRow =
         [...state.rows].reverse().find((r) => r.kind === "read_file" && r.status === "running") ??
         [...state.rows].reverse().find((r) => r.kind === "read_file" || r.kind === "repo_search");
@@ -698,6 +744,9 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
     case "RUN_COMPLETED": {
       if (state.status === "final") return; // first terminal event wins
       if (state.status === "waiting") resumeRun(state, perfNow); // never finalize paused
+      // When the FIRST final-answer chunk already froze the duration, keep
+      // it frozen — the final label may never change twice.
+      const wasWorkFinalized = state.workFinalized;
       state.workFinalized = true;
       state.status = "final";
       state.finalState = "completed";
@@ -705,7 +754,9 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         typeof (event as { completedAt?: number }).completedAt === "number"
           ? (event as { completedAt: number }).completedAt
           : Date.now();
-      state.activeMs = finalizeTimer(state.timer, perfNow);
+      if (!wasWorkFinalized) {
+        state.activeMs = finalizeTimer(state.timer, perfNow);
+      }
       settleRunningRows(state, "completed");
       state.dirty = true;
       return;
@@ -714,6 +765,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
     case "RUN_FAILED": {
       if (state.status === "final") return; // first terminal event wins
       if (state.status === "waiting") resumeRun(state, perfNow); // never finalize paused
+      const wasWorkFinalized = state.workFinalized;
       state.workFinalized = true;
       state.status = "final";
       state.finalState = "failed";
@@ -721,7 +773,9 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         typeof (event as { failedAt?: number }).failedAt === "number"
           ? (event as { failedAt: number }).failedAt
           : Date.now();
-      state.activeMs = finalizeTimer(state.timer, perfNow);
+      if (!wasWorkFinalized) {
+        state.activeMs = finalizeTimer(state.timer, perfNow);
+      }
       settleRunningRows(state, "failed");
       const error = (event as { error?: string }).error;
       if (typeof error === "string" && error.trim()) {
@@ -742,6 +796,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
     case "RUN_CANCELLED": {
       if (state.status === "final") return; // first terminal event wins
       if (state.status === "waiting") resumeRun(state, perfNow); // never finalize paused
+      const wasWorkFinalized = state.workFinalized;
       state.workFinalized = true;
       state.status = "final";
       state.finalState = "cancelled";
@@ -749,7 +804,9 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         typeof (event as { cancelledAt?: number }).cancelledAt === "number"
           ? (event as { cancelledAt: number }).cancelledAt
           : Date.now();
-      state.activeMs = finalizeTimer(state.timer, perfNow);
+      if (!wasWorkFinalized) {
+        state.activeMs = finalizeTimer(state.timer, perfNow);
+      }
       settleRunningRows(state, "cancelled");
       state.dirty = true;
       return;

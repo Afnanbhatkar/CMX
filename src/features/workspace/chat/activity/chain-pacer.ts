@@ -88,6 +88,11 @@ export function createChainPacer(): ChainPacer {
   /** The FIRST RESPONSE_CHUNK is the chain-close moment — it may be queued
    * behind the story on very fast runs; later chunks are store no-ops. */
   let firstChunkSeen = false;
+  /** Release time assigned to the first chunk (null = released at once).
+   * Later chunks must never overtake a still-queued first chunk — the first
+   * one freezes the run timer, so an early release would shrink the final
+   * duration label ("Thought for <1s" instead of the story's duration). */
+  let firstChunkReleaseAt: number | null = null;
 
   const releaseOne = (event: SequencedAssistantEvent): void => {
     const now = performance.now();
@@ -149,6 +154,32 @@ export function createChainPacer(): ChainPacer {
       ? pending.reduce((max, item) => Math.max(max, item.releaseAt), 0)
       : performance.now();
 
+  /** Gap between beats once the answer has started (wrap-up compression). */
+  const WRAP_UP_GAP_MS = 140;
+
+  /**
+   * Wrap-up compression: the first answer chunk arrived while story events
+   * are still queued — shorten the remaining tail so the chain closes right
+   * after the answer begins (no "the chip lands seconds later" lag). Order
+   * is preserved; an ACTIVITY_STARTED never releases before the
+   * thinking-only period (runStartAt + FIRST_STEP_DELAY) so the "Thinking
+   * alone ≈ 1s" beat always survives the compression.
+   */
+  const compressPending = (): void => {
+    if (pending.length === 0) return;
+    let previous = performance.now();
+    for (const item of pending) {
+      const floor =
+        item.event.type === "ACTIVITY_STARTED" && runStartAt !== null
+          ? runStartAt + FIRST_STEP_DELAY_MS
+          : 0;
+      const target = Math.max(floor, previous + WRAP_UP_GAP_MS);
+      item.releaseAt = target;
+      previous = target;
+    }
+    pending.sort((a, b) => a.releaseAt - b.releaseAt);
+  };
+
   return {
     ingest(event: SequencedAssistantEvent): void {
       if (disposed) return;
@@ -173,9 +204,21 @@ export function createChainPacer(): ChainPacer {
         if (!firstChunkSeen) {
           firstChunkSeen = true;
           if (pending.length > 0) {
-            queueAt(event, lastPendingTime() + CHILD_GAP_MS);
+            // The answer is starting — wrap the remaining story up briskly
+            // so the chain closes and the final duration chip lands right
+            // behind it (never seconds later).
+            compressPending();
+            firstChunkReleaseAt = lastPendingTime() + CHILD_GAP_MS;
+            queueAt(event, firstChunkReleaseAt);
             return;
           }
+          releaseOne(event);
+          return;
+        }
+        if (firstChunkReleaseAt !== null) {
+          // Still queued behind the story — keep later chunks behind it.
+          queueAt(event, firstChunkReleaseAt + 1);
+          return;
         }
         releaseOne(event);
         return;

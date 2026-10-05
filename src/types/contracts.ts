@@ -149,6 +149,12 @@ export interface ActivityViewRow {
   children: ActivityViewChild[];
   /** When this row is a merged group: how many same-kind ops it covers. */
   groupCount: number | null;
+  /**
+   * The repository-search query this row ran (repo_search rows only;
+   * rendered as the inline chip beside "Searching repository"). Optional —
+   * persisted v1 chains predate it and simply render without the chip.
+   */
+  query?: string | null;
 }
 
 /** Why a run is (or was) waiting on the user. */

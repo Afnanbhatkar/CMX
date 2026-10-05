@@ -198,76 +198,103 @@ const ChildRow = memo(function ChildRow({ child }: { child: ActivityViewChild })
 });
 
 /**
- * Collapsible child list — the file rows under a search/read group. Open
- * by default (live steps stay visible); the chevron closes/opens the list
- * without touching the timeline rail. Per-row local state: it survives
- * re-renders while the row streams in and needs no store plumbing.
+ * Inline side chip — the real content beside the row's title chip:
+ * the repository-search query beside "Searching repository", or the target
+ * path beside a single "Editing/Creating/Removing/Renaming" row. Group rows
+ * keep the count in their title and list every file in the dropdown body.
  */
-const ChildrenSection = memo(function ChildrenSection({
-  rowId,
-  items,
-}: {
-  rowId: string;
-  items: ActivityViewChild[];
-}) {
-  const [open, setOpen] = useState(true);
-  const clipId = `${rowId}-children`;
+function sideChipFor(row: ActivityViewRow): string | null {
+  if (row.kind === "repo_search") {
+    return row.query ?? null;
+  }
+  if (
+    (row.kind === "edit_file" ||
+      row.kind === "create_file" ||
+      row.kind === "delete_file" ||
+      row.kind === "rename_file") &&
+    row.groupCount === null
+  ) {
+    return row.children.find((child) => child.path)?.path ?? null;
+  }
+  return null;
+}
 
-  return (
-    <div className="cmx-act-children">
-      <button
-        type="button"
-        className="cmx-act-children-toggle"
-        aria-expanded={open}
-        aria-controls={clipId}
-        aria-label={open ? "Hide file list" : "Show file list"}
-        title={open ? "Hide file list" : "Show file list"}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 16 16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.8}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="cmx-act-children-chevron"
-          data-open={open ? "true" : "false"}
-        >
-          <path d="M6 3l5 5-5 5" />
-        </svg>
-        <span className="cmx-act-children-count">{items.length}</span>
-      </button>
-      <div className="cmx-act-child-clip" data-open={open ? "true" : "false"} id={clipId}>
-        <div className="cmx-act-child-clip-inner">
-          <ul className="cmx-act-child-list">
-            {items.map((child) => (
-              <li key={child.id}>
-                <ChildRow child={child} />
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </div>
-  );
-});
-
+/**
+ * One timeline row: [dot] [title chip] [inline side chip] ......... [▸]
+ * with a collapsible body (detail line + file children). The chevron sits
+ * on the RIGHT of the line (same affordance as the header chevron) and
+ * hides/shows the child rows; rows without any body content render as a
+ * plain line. Open by default — live steps stay visible while they stream.
+ */
 const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow }) {
+  const side = sideChipFor(row);
+  const detailInBody = row.detail !== null && row.detail !== side;
+  const hasBody = row.children.length > 0 || detailInBody;
+  const [open, setOpen] = useState(true);
+  const bodyId = `${row.id}-body`;
+
+  const line = (
+    <>
+      <span className="cmx-act-title-chip">{row.title}</span>
+      {side !== null ? (
+        <span className="cmx-act-side-chip" title={side}>
+          {side}
+        </span>
+      ) : null}
+    </>
+  );
+
   return (
     <div className="cmx-act-item" data-status={row.status}>
       <span aria-hidden="true" className="cmx-act-dot" data-status={row.status} />
-      <div className="min-w-0">
-        <div className="cmx-act-item-title">
-          {row.title}
-          {row.groupCount !== null ? (
-            <span className="cmx-act-group-count">×{row.groupCount}</span>
-          ) : null}
-        </div>
-        {row.detail ? <div className="cmx-act-item-detail">{row.detail}</div> : null}
-        {row.children.length > 0 ? (
-          <ChildrenSection rowId={row.id} items={row.children} />
+      <div className="cmx-act-item-main">
+        {hasBody ? (
+          <button
+            type="button"
+            className="cmx-act-row-line"
+            aria-expanded={open}
+            aria-controls={bodyId}
+            data-testid="activity-row-toggle"
+            onClick={() => setOpen((current) => !current)}
+          >
+            {line}
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="cmx-act-row-chevron"
+              data-open={open ? "true" : "false"}
+            >
+              <path d="M6 3l5 5-5 5" />
+            </svg>
+          </button>
+        ) : (
+          <div className="cmx-act-row-line">{line}</div>
+        )}
+        {hasBody ? (
+          <div
+            className="cmx-act-row-clip"
+            data-open={open ? "true" : "false"}
+            id={bodyId}
+            inert={open ? undefined : true}
+          >
+            <div className="cmx-act-row-clip-inner">
+              {detailInBody ? <div className="cmx-act-item-detail">{row.detail}</div> : null}
+              {row.children.length > 0 ? (
+                <ul className="cmx-act-child-list">
+                  {row.children.map((child) => (
+                    <li key={child.id}>
+                      <ChildRow child={child} />
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </div>
         ) : null}
       </div>
     </div>

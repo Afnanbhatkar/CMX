@@ -399,8 +399,6 @@ const NEAR_BOTTOM_PX = 140;
 const ANCHOR_PAD_PX = 8;
 /** Breathing room added under a just-anchored question while generating. */
 const ANCHOR_SPACER_BUFFER_PX = 32;
-/** How far the user may drift from the anchor before it is left alone. */
-const WANDER_TOLERANCE_PX = 600;
 
 /**
  * Native scroll host (deliberately NOT Radix ScrollArea): the Radix
@@ -430,8 +428,15 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
   const prevCountRef = useRef<number | null>(null);
   /** Set by the switch effect; consumed by the anchor effect (same commit). */
   const resetAnchorContextRef = useRef(false);
-  /** Last anchor target — the re-anchor point when the spacer collapses. */
-  const lastAnchorTargetRef = useRef<number | null>(null);
+  /**
+   * Anchor hold: while TRUE the auto-follower stands down entirely — the
+   * viewport stays EXACTLY where the anchor put it while the chain and the
+   * answer grow below it (the ChatGPT behavior the user asked for: the
+   * reply appears in place, the view never shifts while it is written;
+   * the user scrolls when THEY want to). Set when a user message is
+   * anchored; reset on conversation switch.
+   */
+  const anchorHoldRef = useRef(false);
   /**
    * Generation spacer: extra scrollable room BELOW the newest message so a
    * just-sent question can anchor at the TOP of the viewport even though
@@ -498,7 +503,7 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
     if (switchSeq === 0) return; // mount — history opens via auto-follow
     nearBottomRef.current = true;
     resetAnchorContextRef.current = true;
-    lastAnchorTargetRef.current = null;
+    anchorHoldRef.current = false;
     const el = scrollerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [switchSeq]);
@@ -529,8 +534,10 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
     );
     if (!scroller || !element) return;
     nearBottomRef.current = false;
+    // The question is now the viewport's anchor: the view holds THIS
+    // position while the response is written below it.
+    anchorHoldRef.current = true;
     const target = Math.max(0, element.offsetTop - ANCHOR_PAD_PX);
-    lastAnchorTargetRef.current = target;
     const maxScroll = scroller.scrollHeight - scroller.clientHeight;
     if (target <= maxScroll) {
       // Enough room below already — anchor directly, no spacer needed.
@@ -548,23 +555,17 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
 
   /**
    * Spacer transitions — ONE owner: on growth it performs the pending
-   * anchor (pre-paint, no flicker); on shrink (run finished — the answer
-   * now occupies the reserved room) it RE-ANCHORS the question instead of
-   * letting the browser clamp-jump the view downward. If the user has
-   * scrolled far away from the anchor, their position is respected.
+   * anchor (pre-paint, no flicker). On shrink (run finished — the answer
+   * now occupies the reserved room) the view is left EXACTLY where the
+   * user has it: no re-anchor jump, the browser merely clamps if the
+   * reserved room disappears under the viewport.
    */
   useLayoutEffect(() => {
     const previous = prevSpacerRef.current;
     prevSpacerRef.current = anchorSpacer;
     const el = scrollerRef.current;
     if (!el) return;
-    if (anchorSpacer < previous) {
-      const desired = lastAnchorTargetRef.current;
-      const wandered = desired === null || el.scrollTop < desired - WANDER_TOLERANCE_PX;
-      if (!wandered) {
-        el.scrollTop = Math.min(desired, el.scrollHeight - el.clientHeight);
-      }
-    }
+    if (anchorSpacer < previous) return; // silent collapse — no view shift
     const target = pendingAnchorTargetRef.current;
     if (target === null) return;
     pendingAnchorTargetRef.current = null;
@@ -575,13 +576,15 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
   }, [anchorSpacer, prefersReduced]);
 
   /**
-   * Auto-follow the newest content — only when the user is near the bottom.
-   * At a TERMINAL state this effect stands down: the final viewport position
-   * belongs to the spacer collapse re-anchor (the layout effect above), so
-   * the two never fight over the scroll position.
+   * Auto-follow the newest content — only when the user is near the bottom
+   * AND no anchor holds the view. After a send, the question is anchored at
+   * the top and the response grows BELOW it without ever moving the view
+   * (the user scrolls when they want to — their scroll position is never
+   * fought over). At a TERMINAL state this effect also stands down.
    */
   useEffect(() => {
     if (runIsTerminal) return;
+    if (anchorHoldRef.current) return;
     if (!nearBottomRef.current) return;
     const el = scrollerRef.current;
     if (!el) return;
