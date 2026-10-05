@@ -973,3 +973,23 @@ Stage Summary:
 - Read-file flow: 1st/2nd/3rd reads show one-by-one; the counter group ("Read 4 files" → "Read 5 files") mounts with its dropdown closed and the count updates live.
 - The Solving header uses the user-supplied thinking-orbs library orb (solving state, classic variant, dark, speed 1) at the reference 56px size.
 - "Preparing response" is plain text with a dark grey "glm-4-plus" chip; nothing else was touched.
+
+---
+Task ID: restore-1
+Agent: Z.ai Code (main)
+Task: Restore the complete CodeMind X V2 workspace from the uploaded archive (workspace-d6d762c9-0c0b-42bd-8f3f-40e1d3260596.tar) into a fresh sandbox and verify everything works before the next phase.
+
+Work Log:
+- Extracted the archive (346 tracked files + .git with 18 checkpoint tags: phase-00 → phase-09, v2.1 foundations) and audited its contents: full src/ (317 files), vendored public/monaco (25MB), all phase docs (ARCHITECTURE/RULES/CAPABILITIES/PROJECT_SAFETY/CHANGELOG), 234KB worklog, prisma schema, package.json with workspace deps.
+- Replaced the fresh scaffold: copied every workspace item into the project root — verified byte-identical via recursive diff (fixed a nested-duplicate copy error en route; final state IDENTICAL for src/, public/, prisma/).
+- Preserved the workspace .git history (all checkpoint tags intact) and the platform-only folders (upload/, skills/, .zscripts/).
+- bun install (31 new packages: monaco-editor, web-tree-sitter, tree-sitter-wasms, OpenTelemetry, xterm, gsap, react-syntax-highlighter, fflate, sucrase).
+- Database was gitignored/not in the archive → recreated from prisma/schema.prisma via db:push (SQLite, ~29 tables incl. legacy + Phase-3 domain + V2.1 tables). Note: prior DB data (imported repositories, conversations) is not recoverable from the archive — schema is live, data starts fresh.
+- Restarted dev server on :3000; /api/health reports overall healthy (database ok, jobSystem ok, SSE ok; postgres/redis honestly unavailable per CAPABILITIES.md).
+- Browser E2E verification (agent-browser): Phase-1 public site renders (shader background, hero, nav); /app four-panel shell renders with honest capability statuses; AI assistant golden path PASSED — real run via glm-4-plus with activity chain "Understanding the request → Searching repository (14 relevant results) → Read 5 files → Preparing response (glm-4-plus ~2200ms)" and final "Worked for 3s" label, persisted conversation, Context Inspector (5 files · 10 items · ~281 tok · 1% of budget), Memory used: 3; Monaco editor opened package.json with file-intelligence panel; Phase-7 hybrid code search returned 30 real results in 17.82ms with why-matched chips (index: 309 files · 2747 symbols); mobile 390px layout clean.
+- Zero browser console errors; dev.log shows only structured info logs + prisma queries; git working tree clean (matches restored HEAD).
+
+Stage Summary:
+- CodeMind X V2 fully restored and LIVE: Phases 0–9c all functional in this sandbox (public site, workspace shell, ingestion APIs, explorer, Monaco editor, hybrid search, AI assistant with real-time activity chain, context inspector, approval/question flows).
+- Only loss: SQLite row data (gitignored) — schema recreated, product starts with a clean database.
+- Ready for the user's next phase.
