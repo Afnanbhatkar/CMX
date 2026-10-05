@@ -359,7 +359,7 @@ function ModeSegmented({
       ref={trackRef}
       role="radiogroup"
       aria-label="Composer mode"
-      className="relative flex w-fit max-w-full select-none items-center gap-0.5 overflow-x-auto rounded-md border border-border-subtle bg-surface p-0.5"
+      className="relative flex w-fit max-w-full select-none items-center gap-0.5 rounded-md border border-border-subtle bg-surface p-0.5"
       style={{ touchAction: "pan-y" }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

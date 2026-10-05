@@ -1060,3 +1060,18 @@ Work Log:
 Stage Summary:
 - The mode shifter is the PREVIOUS component UI — 1:1 (icons, tooltips, pills, colors, a11y) — now with the user's exact rubber-band shifter animation as the active-state highlight: it stretches, squashes, glides, and is draggable between Search / Code / Agent / Loop.
 - Clicks, drag-release, Alt shortcuts, and arrow keys all drive the same physics; the mode value still serializes into every assistant run (verified end-to-end with mode:"code").
+
+---
+Task ID: phase-9.6-rubber-overflow-visible
+Agent: Z.ai Code (main)
+Task: User-reported — during the Search→Loop rubber glide the stretching thumb created a horizontal "scroll line" (scrollbar) on the mode track. Requested fix: let the rubber animation paint OUTSIDE the container (overshoot visible while it goes out and comes back) instead of being turned into scrollable overflow.
+
+Work Log:
+- Root cause: ModeSegmented's track kept the original `overflow-x-auto` class; the absolutely-positioned rubber thumb is a child of that scroll container, so its mid-flight stretch/overshoot (which extends past the last slot) contributed to the scrollable overflow area → transient horizontal scrollbar; during Loop→Search the left overhang was also unreachable/clipped inside the scroll origin.
+- Fix: removed `overflow-x-auto` from the track (overflow now visible) — the thumb may paint outside the track box during stretch/overshoot and return, with no scrollbar possible in any state. Control is w-fit (~270px) and fits the composer row down to 320px viewports, so the narrow-screen scroll affordance is unnecessary.
+- Verified in Agent Browser: computed overflowX = "visible"; Search→Loop glide samples show the thumb overhanging the track's right edge by up to 15px and the Loop→Search return overhanging the left edge by up to 17px — both now visible outside the container with scroll overflow of 0 scrollable px (no scrollbar can render); mid-flight screenshot captured the stretched, squashed thumb spanning multiple slots with no scroll line; settled state translateX(203px) scaleY(1) on Loop, aria-checked correct; 0 page errors.
+- bun run lint: 0 errors (1 pre-existing TanStack Virtual warning).
+
+Stage Summary:
+- The rubber shifter now behaves like real rubber: the stretched thumb visibly extends beyond the Search/Code/Agent/Loop track during glides and drag overshoot, then springs back — with the scroll line completely gone (track overflow visible; no scroll container).
+- Original UI still 1:1 (icons, tooltips, pills); a11y and mode serialization untouched.
