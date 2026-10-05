@@ -1009,3 +1009,20 @@ Stage Summary:
 - The Thinking ⇄ Solving header swap is now a pixel-identical in-place cross-fade: same 22×22 animation box, same label position — the indicator changes its animation, never its geometry.
 - The "Read N files" count is fully dynamic — N is whatever the real retrieval genuinely returned for the query (4, 14, …); the hardcoded 5 is gone from the backend.
 - Note: the retrieval window itself remains the search engine's limit 14 (the honest, real result depth shown in the activity chip) — reads are no longer truncated below it.
+
+---
+Task ID: phase-9.3-orb-duplicate-fix
+Agent: Z.ai Code (main)
+Task: User-reported — TWO orbs appeared in the Solving header ("ek black color ka bhi aara hai"): the real library orb PLUS a solid grey/black ball next to it. Fix so ONLY the orb from the user's reference snippet renders (state "solving", theme "dark", variant "classic", speed 1), at the established position/size.
+
+Work Log:
+- Reproduced in Agent Browser: during the Solving phase the header rendered [grey/black CSS ball] + [library canvas] + "Solving". DOM dump showed `.cmx-act-orb-live` containing BOTH the React-managed `.cmx-act-orb-fallback` span AND the library's canvas side by side (inline-flex) — the two orbs.
+- Root cause found by instrumenting the mount lifecycle (temporary console.debug + error log): `createThinkingOrb` VALIDATES size ∈ {32, 64, 96, 128} and THROWS "ThinkingOrb size must be 32, 64, 96, or 128" AFTER it has already appended its canvas. Phase 9.2's `size: 22` therefore threw on every mount → the controller never initialized → the old silent `.catch` kept the `canvasReady` fallback ON → grey/black ball + orphaned canvas = the user's two orbs. (The user's own snippet is built around this constraint — it authors at size: 64 and CSS-displays the canvas at 56px.)
+- SolvingOrb.tsx rewritten: (1) author the orb at ORB_AUTHOR_SIZE = 64 (library-legal, snippet-verbatim: state "solving", theme "dark", variant "classic", speed 1, interactive false, ariaLabel "Solving") and DISPLAY the canvas at DISPLAY_SIZE = 22 via inline style + CSS — the exact author-64/display-small pattern of the user's snippet, adapted to the established Thinking-lattice footprint (22px, same shell, same label position — cross-fade unchanged); (2) SINGLE-ORB GUARANTEE: the loading ball is no longer a React child — it is the HOST element's own CSS background toggled imperatively via `data-fallback` (no React state to desync, canvas draws over the host box), plus the host is emptied (replaceChildren) before init and after destroy so no stray canvas can ever persist.
+- activity.css: added `.cmx-act-orb-live[data-fallback="true"]` host-background fallback (+ breathing variant); `.cmx-act-orb-fallback` child-span class kept for the reduced-motion and WaitingIndicator paths only.
+- Verified in Agent Browser across 4 fresh runs: stable Solving state = exactly 1 canvas, `data-fallback="false"`, canvas inline width 22px (backing 64); zoomed screenshots show a single particle-sphere orb before the "Solving" label (before-fix zoom vs after-fix zoom compared); runs complete ("Worked for 3s/7s"); browser console clean on a fresh run (0 errors); bun run lint: 0 errors (1 pre-existing TanStack Virtual warning); dev.log clean (glm-4-plus runs completing 4-5s).
+
+Stage Summary:
+- The Solving header now renders EXACTLY ONE orb — the user's reference library orb (solving/dark/classic/speed 1) — with the grey/black duplicate ball gone in all states (loading, live, cross-fade, teardown).
+- Root cause documented: the thinking-orbs library only accepts sizes {32, 64, 96, 128}; anything else throws post-append. Author at 64, display via CSS at the established 22px footprint — same pattern as the user's own snippet.
+- The Thinking ⇄ Solving in-place cross-fade (same 22px box, same label position) is preserved; ThinkingIndicator, WaitingIndicator, and the reduced-motion path are untouched.

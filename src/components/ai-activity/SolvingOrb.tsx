@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * CodeMind X V2 — Solving orb (Phase 9.1, user-supplied reference 1:1).
+ * CodeMind X V2 — Solving orb (user-supplied reference, verbatim engine).
  *
- * The EXACT orb from the user's reference snippet: the `thinking-orbs`
- * library's `createThinkingOrb` running state "solving" —
+ * The orb is EXACTLY the user's reference snippet — the `thinking-orbs`
+ * library's `createThinkingOrb` (vendored 1:1 in `thinking-orbs.js`, the
+ * same module the snippet loads from the CDN):
  *
  *   createThinkingOrb(target, {
  *     state: "solving",
- *     size: 22,
  *     theme: "dark",
  *     variant: "classic",
  *     speed: 1,
@@ -16,29 +16,37 @@
  *     ariaLabel: "Solving",
  *   });
  *
- * with the canvas displayed at 22px — EXACTLY the Thinking lattice's
- * footprint (user direction, Phase 9.2): "jaha Thinking likha hai wahi
- * Solving bhi dikhna chahiye" and the orb must be "thinking animation ke
- * size jitna" so the Thinking → Solving shift is smooth. The lattice is
- * 3×6px cells + 2×2px gaps = 22px; the orb matches it 1:1, both labels
- * share the same 8.75px gap and 14px shimmer text, so the cross-fade
- * swaps the animation IN PLACE — no movement, no resize, no jump.
+ * displayed at the Thinking lattice's 22px footprint (standing user
+ * direction: the orb lives exactly where "Thinking" reads, at the Thinking
+ * animation's size, so the Thinking → Solving swap is an in-place
+ * cross-fade — position and size are the established ones). The library
+ * owns the whole render lifecycle: canvas, rAF loop, DPR handling,
+ * hidden-tab/offscreen pausing, and the static frame under
+ * prefers-reduced-motion. The library APPENDS its canvas to the target.
  *
- * The library is vendored 1:1 in `thinking-orbs.js` (the same module the
- * snippet loaded from the CDN) and lazy-loaded with a cached dynamic
- * import() ONLY when a run actually transitions into Solving — thinking-
- * only runs never load it. The library owns the whole render lifecycle:
- * rAF loop, DPR handling, hidden-tab/offscreen pausing, and the static
- * frame under prefers-reduced-motion.
+ * LIBRARY SIZE CONSTRAINT (root cause of the "do do orb, ek black" bug):
+ * createThinkingOrb validates size ∈ {32, 64, 96, 128} — any other value
+ * THROWS "ThinkingOrb size must be 32, 64, 96, or 128" AFTER the canvas
+ * has already been appended, which used to leave an unpaintable canvas
+ * next to the permanently-on fallback ball (two orbs). The user's own
+ * snippet is built around this constraint: it authors the orb at
+ * size: 64 and displays the canvas smaller via CSS (64 → 56px there).
+ * The exact same pattern is used here: author at 64 (library-legal,
+ * snippet-verbatim), display at the established 22px footprint.
  *
- * Robustness:
- * - import failure → local CSS fallback orb (no canvas, no network);
- * - StrictMode-safe: double-mount never duplicates the canvas; a import
- *   resolving after unmount never initializes; cleanup destroys the orb
- *   instance (stops rAF, disconnects observers, removes the canvas).
+ * SINGLE-ORB GUARANTEE (bug fix — "do do orb, ek black"):
+ * the failure chain was: size: 22 (below) → createThinkingOrb THREW after
+ * appending its canvas → the silent catch kept the fallback ball on →
+ * grey/black CSS ball + library canvas rendered SIDE BY SIDE (two orbs).
+ * Three independent guards now make that state impossible: (1) the
+ * library-legal author size so creation succeeds at all; (2) the loading
+ * ball is the HOST element's own CSS background (data-fallback), never a
+ * React child — nothing can orphan it next to the canvas, and the canvas
+ * simply draws OVER the host box while it loads; (3) the host is emptied
+ * before init and after destroy (no stray canvases, rerun-safe).
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 /** Shape of the vendored library's controller instance (subset we use). */
 interface ThinkingOrbInstance {
@@ -73,39 +81,42 @@ export function loadThinkingOrbsLibrary(): Promise<ThinkingOrbsModule> {
 }
 
 /**
- * Visible canvas footprint — EXACTLY the Thinking lattice footprint.
+ * Authoring vs display size.
  *
- * User direction (Phase 9.2): the Thinking header animation (the 3×3
- * lattice) is 22px wide/tall (3×6px cells + 2×2px gaps) — the Solving orb
- * must render at THAT size so the Thinking ⇄ Solving cross-fade happens
- * in place with zero layout shift (same 8.75px gap, same 14px label).
- * The library scales its internal geometry to the requested size and
- * handles DPR itself, so 22 is passed as the real size (no 64px backing
- * + CSS downscale trick needed).
+ * The library only accepts {32, 64, 96, 128} (see the header comment) —
+ * the user's reference snippet authors at 64 and CSS-displays smaller;
+ * this component does the same: author 64, display at the Thinking
+ * lattice's 22px footprint so the header cross-fade never shifts.
  */
-const VISIBLE_SIZE = 22;
+const ORB_AUTHOR_SIZE = 64; // library-legal size — user snippet verbatim
+const DISPLAY_SIZE = 22; // established Thinking-lattice footprint
 
 export function SolvingOrb({ breathing = true }: { breathing?: boolean }) {
   const hostRef = useRef<HTMLSpanElement>(null);
-  /** Guards StrictMode double-mount and post-unmount import resolution. */
-  const cancelledRef = useRef(false);
-  const [canvasReady, setCanvasReady] = useState(false);
 
   useEffect(() => {
-    cancelledRef.current = false;
+    const host = hostRef.current;
+    if (!host) return;
+    /** Per-effect closure guard for remount/post-unmount resolution. */
+    let cancelled = false;
     let instance: ThinkingOrbInstance | null = null;
+
+    // Fallback ball = the host's own background (never a child element —
+    // see the single-orb guarantee in the header comment).
+    host.dataset.fallback = "true";
 
     loadThinkingOrbsLibrary()
       .then((lib) => {
-        if (cancelledRef.current) return; // resolved after unmount — never init
-        const host = hostRef.current;
-        if (!host) return;
+        if (cancelled) return; // resolved after unmount — never init
+        // The host MUST be empty before the library appends its canvas —
+        // no stray sibling can ever sit next to the real orb.
+        host.replaceChildren();
 
-        // The user's reference snippet options — sized to the Thinking
-        // lattice footprint so the header swap is perfectly smooth.
+        // The user's reference snippet options — authored at the
+        // library-legal size, displayed at the established footprint.
         instance = lib.createThinkingOrb(host, {
           state: "solving",
-          size: VISIBLE_SIZE,
+          size: ORB_AUTHOR_SIZE,
           theme: "dark",
           variant: "classic",
           speed: 1,
@@ -115,28 +126,32 @@ export function SolvingOrb({ breathing = true }: { breathing?: boolean }) {
 
         const canvas = host.querySelector("canvas");
         if (canvas) {
-          canvas.style.width = `${VISIBLE_SIZE}px`;
-          canvas.style.height = `${VISIBLE_SIZE}px`;
+          canvas.style.width = `${DISPLAY_SIZE}px`;
+          canvas.style.height = `${DISPLAY_SIZE}px`;
         }
-        setCanvasReady(true);
+        // Same element, imperative flip — the ball disappears the moment
+        // the real orb exists. No React render involved.
+        host.dataset.fallback = "false";
       })
-      .catch(() => {
-        if (!cancelledRef.current) setCanvasReady(false);
+      .catch((err: unknown) => {
+        // Honest failure signal — with library-legal options this never
+        // fires; if it ever does, the fallback ball remains (one orb).
+        console.error("[SolvingOrb] createThinkingOrb failed:", err);
+        if (!cancelled) host.dataset.fallback = "true";
       });
 
     return () => {
-      cancelledRef.current = true;
+      cancelled = true;
       try {
-        // destroy() stops the rAF loop, disconnects the library's observers
-        // and (by default) removes its canvas element.
+        // destroy() stops the rAF loop and disconnects the library's
+        // observers; replaceChildren() then removes the canvas element.
         instance?.destroy?.();
       } catch {
         // never throw during teardown
       }
       instance = null;
-      const host = hostRef.current;
-      if (host) host.replaceChildren();
-      setCanvasReady(false);
+      host.replaceChildren();
+      host.dataset.fallback = "true";
     };
   }, []);
 
@@ -146,14 +161,8 @@ export function SolvingOrb({ breathing = true }: { breathing?: boolean }) {
       className="cmx-act-orb cmx-act-orb-live"
       role="status"
       aria-label="Solving"
-    >
-      {canvasReady ? null : (
-        <span
-          aria-hidden="true"
-          className="cmx-act-orb-fallback"
-          data-breathing={breathing ? "true" : "false"}
-        />
-      )}
-    </span>
+      data-fallback="true"
+      data-breathing={breathing ? "true" : "false"}
+    />
   );
 }

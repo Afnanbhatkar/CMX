@@ -210,6 +210,22 @@
   height: 22px;
 }
 
+/* Single-orb fallback (bug fix — "do do orb, ek black"): the loading ball
+   is the HOST element's own background, shown only while the library
+   canvas loads, toggled imperatively via data-fallback. It is never a
+   child element, so the real orb canvas can never render beside a second
+   (grey/black) ball — exactly one orb, always. */
+.cmx-act-orb-live[data-fallback="true"] {
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 36% 32%, var(--cmx-ink-2), transparent 72%),
+    var(--cmx-inset);
+}
+
+.cmx-act-orb-live[data-fallback="true"][data-breathing="true"] {
+  animation: cmx-act-breathe 2.4s ease-in-out infinite;
+}
+
 /* CSS fallback orb — same 22px footprint; no canvas, no WebGL, no
    network. EXACT prototype fallback: ink core over the inset surface
    with a soft breathing under motion only. */
