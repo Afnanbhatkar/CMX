@@ -198,17 +198,19 @@ const ChildRow = memo(function ChildRow({ child }: { child: ActivityViewChild })
 });
 
 /**
- * Inline side chip — the real content beside the row's title chip:
+ * Inline side chip — the real content beside the row's title:
  * the repository-search query beside "Searching repository", or the target
- * path beside a single "Editing/Creating/Removing/Renaming" row. Group rows
- * keep the count in their title and list every file in the dropdown body.
+ * path beside a single "Reading/Editing/Creating/Removing/Renaming" row
+ * (prototype: "Reading <src/ui/Button.tsx>"). Group rows keep the count in
+ * their title and list every file in the dropdown body.
  */
 function sideChipFor(row: ActivityViewRow): string | null {
   if (row.kind === "repo_search") {
     return row.query ?? null;
   }
   if (
-    (row.kind === "edit_file" ||
+    (row.kind === "read_file" ||
+      row.kind === "edit_file" ||
       row.kind === "create_file" ||
       row.kind === "delete_file" ||
       row.kind === "rename_file") &&
@@ -220,22 +222,38 @@ function sideChipFor(row: ActivityViewRow): string | null {
 }
 
 /**
- * One timeline row: [dot] [title chip] [inline side chip] ......... [▸]
+ * One timeline row: [dot] [title] [inline content chip] ......... [▸]
  * with a collapsible body (detail line + file children). The chevron sits
  * on the RIGHT of the line (same affordance as the header chevron) and
- * hides/shows the child rows; rows without any body content render as a
- * plain line. Open by default — live steps stay visible while they stream.
+ * hides/shows the child rows. Plain file rows already carry their path on
+ * the line — a single-file dropdown would be redundant, so only GROUP rows
+ * ("Read 4 files" / "Edited 5 files") and detail-bearing rows expand.
+ * Open by default — live steps stay visible while they stream.
  */
 const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow }) {
   const side = sideChipFor(row);
+  // Plain single-file rows: the path is already ON the line — the one-file
+  // dropdown would be pure duplication. Only rows whose children carry
+  // EXTRA information (mixed children, non-file children) keep a body.
+  const singleFileChild =
+    row.children.length <= 1 && row.children.every((child) => child.path !== null);
+  const isPlainFileRow = row.groupCount === null && side !== null && singleFileChild;
   const detailInBody = row.detail !== null && row.detail !== side;
-  const hasBody = row.children.length > 0 || detailInBody;
+  const hasBody = isPlainFileRow ? detailInBody : row.children.length > 0 || detailInBody;
   const [open, setOpen] = useState(true);
   const bodyId = `${row.id}-body`;
 
   const line = (
     <>
-      <span className="cmx-act-title-chip">{row.title}</span>
+      {/* Titles are PLAIN text (user direction); the dark grey rounded
+          panels are reserved for the row's CONTENT — the query, file paths,
+          and the emphasized "Preparing response" step. */}
+      <span
+        className="cmx-act-title-chip"
+        data-emphasis={row.kind === "prepare" ? "true" : undefined}
+      >
+        {row.title}
+      </span>
       {side !== null ? (
         <span className="cmx-act-side-chip" title={side}>
           {side}
@@ -284,7 +302,7 @@ const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow 
           >
             <div className="cmx-act-row-clip-inner">
               {detailInBody ? <div className="cmx-act-item-detail">{row.detail}</div> : null}
-              {row.children.length > 0 ? (
+              {!isPlainFileRow && row.children.length > 0 ? (
                 <ul className="cmx-act-child-list">
                   {row.children.map((child) => (
                     <li key={child.id}>
@@ -309,9 +327,15 @@ const RENDER_ROW_CAP = 200;
 
 export interface ActivityChainViewProps {
   snapshot: RunActivitySnapshot;
+  /** Casual prompts ("hii", "hello", "how are you", "what's your name"):
+   * the chain stays COLLAPSED — only the Thinking/Thought chip shows. The
+   * steps are still recorded + paced one by one BEHIND the dropdown; the
+   * user opens it when THEY want to look. Non-casual (task) runs keep the
+   * visible one-by-one story. */
+  minimal?: boolean;
 }
 
-export function ActivityChainView({ snapshot }: ActivityChainViewProps) {
+export function ActivityChainView({ snapshot, minimal = false }: ActivityChainViewProps) {
   const state = headerState(snapshot);
   const controlsId = useId();
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -324,7 +348,8 @@ export function ActivityChainView({ snapshot }: ActivityChainViewProps) {
   const active = snapshot.status !== "final" && !snapshot.workFinalized;
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const [showEarlier, setShowEarlier] = useState(false);
-  const open = userOpen ?? active;
+  // Minimal runs never auto-open: the user's click is the ONLY opener.
+  const open = userOpen ?? (minimal ? false : active);
 
   const toggle = (): void => {
     setUserOpen(!open);
@@ -461,7 +486,13 @@ export function ActivityChainView({ snapshot }: ActivityChainViewProps) {
 /* Live binding (per-run store)                                        */
 /* ------------------------------------------------------------------ */
 
-export function ActivityChainLive({ runId }: { runId: string | null }) {
+export function ActivityChainLive({
+  runId,
+  minimal = false,
+}: {
+  runId: string | null;
+  minimal?: boolean;
+}) {
   const snapshot = useRunActivity(runId);
   // Before the run's first real event the chain shows nothing — nothing is
   // fabricated; RUN_STARTED arrives within milliseconds of send().
@@ -473,7 +504,7 @@ export function ActivityChainLive({ runId }: { runId: string | null }) {
       </div>
     );
   }
-  return <ActivityChainView snapshot={snapshot} />;
+  return <ActivityChainView snapshot={snapshot} minimal={minimal} />;
 }
 
 /* ------------------------------------------------------------------ */

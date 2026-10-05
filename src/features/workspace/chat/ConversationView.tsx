@@ -38,6 +38,7 @@ import { ApprovalCardSlot } from "./ApprovalCardSlot";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { MemoryUsedChip } from "./MemoryUsedChip";
 import { QuestionFlow } from "./QuestionFlow";
+import { isCasualPrompt } from "@/lib/casual-prompt";
 
 export interface ConversationViewProps {
   conversationId: string;
@@ -168,9 +169,11 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
 function RunActivityLive({
   message,
   conversationId,
+  minimal,
 }: {
   message: ChatMessage;
   conversationId: string;
+  minimal: boolean;
 }) {
   const runId = message.runId ?? null;
   const snapshot = useRunActivity(runId);
@@ -195,7 +198,7 @@ function RunActivityLive({
 
   return (
     <div className="mb-2 space-y-2" data-testid="run-activity-live">
-      <ActivityChainLive runId={runId} />
+      <ActivityChainLive runId={runId} minimal={minimal} />
       {paused && message.questionBatch ? (
         <QuestionFlow
           batch={message.questionBatch}
@@ -245,12 +248,16 @@ function AssistantMessage({
   isLast,
   isGenerating,
   onRegenerate,
+  triggerPrompt,
 }: {
   message: ChatMessage;
   conversationId: string;
   isLast: boolean;
   isGenerating: boolean;
   onRegenerate: () => void;
+  /** The user text that started THIS run — decides the casual-prompt
+   * presentation (chain collapsed, Thinking chip only). */
+  triggerPrompt: string;
 }) {
   const busy = message.state === "generating";
   const updateMessage = useWorkspaceStore((s) => s.updateMessage);
@@ -271,9 +278,15 @@ function AssistantMessage({
           old "Assistant" heading/status presentation is intentionally gone. */}
 
       {/* Phase 8D live run: per-run chain (Thinking → Solving → Waiting →
-          final duration) + the 8C question flow while paused. */}
+          final duration) + the 8C question flow while paused. Casual
+          prompts (hii / hello / how are you) keep the chain COLLAPSED —
+          the user opens the step dropdown only when they want to see it. */}
       {busy && (
-        <RunActivityLive message={message} conversationId={conversationId} />
+        <RunActivityLive
+          message={message}
+          conversationId={conversationId}
+          minimal={isCasualPrompt(triggerPrompt)}
+        />
       )}
 
       {/* Persisted chain for history (reload keeps the final timeline);
@@ -361,7 +374,7 @@ function AssistantMessage({
           ) : null}
           {message.servedModel ? (
             <span
-              className="rounded-full border border-border-subtle px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/80"
+              className="rounded-full bg-muted px-2 py-0.5 font-mono text-[9px] text-muted-foreground"
               title={`Model served by the LLM Gateway: ${message.servedModel}`}
             >
               {message.servedModel}
@@ -602,12 +615,25 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
       className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scrollbar-color:var(--border-subtle)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border-subtle [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar]:w-1.5"
     >
       <div className="relative w-full min-w-0 space-y-4 p-3" aria-live="polite">
-        {messages.map((message, index) =>
-          message.role === "user" ? (
-            <div key={message.id} data-message-id={message.id} className="min-w-0">
-              <UserMessage message={message} />
-            </div>
-          ) : (
+        {messages.map((message, index) => {
+          if (message.role === "user") {
+            return (
+              <div key={message.id} data-message-id={message.id} className="min-w-0">
+                <UserMessage message={message} />
+              </div>
+            );
+          }
+          // The user text that triggered this assistant run (nearest user
+          // message above it) — drives the casual-prompt chain behavior.
+          let triggerPrompt = "";
+          for (let i = index - 1; i >= 0; i -= 1) {
+            const candidate = messages[i];
+            if (candidate.role === "user") {
+              triggerPrompt = candidate.content;
+              break;
+            }
+          }
+          return (
             <div key={message.id} data-message-id={message.id} className="min-w-0">
               <AssistantMessage
                 message={message}
@@ -615,10 +641,11 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
                 isLast={index === messages.length - 1}
                 isGenerating={isGenerating}
                 onRegenerate={regenerate}
+                triggerPrompt={triggerPrompt}
               />
             </div>
-          ),
-        )}
+          );
+        })}
         {messages.length === 0 && (
           <p className="py-8 text-center text-[12px] text-muted-foreground">
             No messages yet — ask something to start this conversation.

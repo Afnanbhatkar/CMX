@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { isCasualPrompt } from "@/lib/casual-prompt";
 import { readWorkspaceFile } from "@/lib/server/repository-fs";
 import {
   GATEWAY_PROVIDER,
@@ -151,7 +152,6 @@ export type AssistantStageEmitter = (event: AssistantStageEvent) => void;
 const STAGE_TITLES = {
   understanding: "Understanding request",
   search: "Searching repository",
-  readingFiles: "Reading files",
   composing: "Composing response",
 } as const;
 
@@ -336,7 +336,7 @@ async function runRepositoryRetrieval(
       hits: visible.length,
       topFiles,
     });
-    for (const path of topFiles.slice(0, 3)) {
+    for (const path of topFiles) {
       onStage?.({ type: "FILE_REFERENCED", path, line: null });
     }
     onStage?.({
@@ -505,19 +505,11 @@ async function buildSdkMessages(
   ];
 
   if (filesToRead.length > 0 || excludedAttachments.length > 0) {
-    const readingId = "reading-files";
-    onStage?.({
-      type: "ACTIVITY_STARTED",
-      activity: {
-        id: readingId,
-        kind: "coding",
-        title: STAGE_TITLES.readingFiles,
-        summary: null,
-        metadata: null,
-        children: [],
-      },
-    });
-
+    /* The old "Reading files" STAGE row is intentionally GONE: every read
+       file now arrives as its OWN "Reading <path>" timeline row (emitted
+       by readAttachedFiles below), one by one — consecutive reads merge
+       into "Read N files" with the file dropdown. A container row here
+       would only break the visual grouping and duplicate the story. */
     for (const path of excludedAttachments) {
       entries.push({
         source: "attachment",
@@ -560,14 +552,6 @@ async function buildSdkMessages(
       });
     }
 
-    const okCount = reads.filter((r) => r.ok).length;
-    const total = filesToRead.length;
-    onStage?.({
-      type: "ACTIVITY_COMPLETED",
-      activityId: readingId,
-      summary: `${okCount} of ${total} file${total === 1 ? "" : "s"} read`,
-    });
-
     const blocks = reads.map((r) => r.block);
     if (blocks.length > 0) {
       preambleParts.push(
@@ -607,10 +591,18 @@ async function buildSdkMessages(
   // still comes exclusively from explicit attachments and pinned files.
   // EVERY mode runs it (loop included) so the activity chain shows the real
   // search/read work wherever it happens — no mode is a silent void.
+  // EXCEPT casual conversational prompts ("hii", "how are you", "what's
+  // your name"): hunting the workspace for a greeting is noise — the run
+  // honestly goes Understanding → Composing → answer with no search/read
+  // rows (and the chain stays in its minimal collapsed presentation).
   let retrievalHits: RetrievalHit[] = [];
   const lastUser = [...input.messages].reverse().find((m) => m.role === "user");
   const query = lastUser?.content.trim() ?? "";
-  if (onStage && query.length >= RETRIEVAL_MIN_QUERY) {
+  if (
+    onStage &&
+    query.length >= RETRIEVAL_MIN_QUERY &&
+    !isCasualPrompt(query)
+  ) {
     retrievalHits = await runRepositoryRetrieval(query, excludedRefs, onStage);
     if (retrievalHits.length > 0) {
       const topFiles = [...new Set(retrievalHits.map((h) => h.file))];

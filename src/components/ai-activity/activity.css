@@ -435,6 +435,10 @@ button.cmx-act-row-line {
 }
 
 button.cmx-act-row-line:hover .cmx-act-title-chip {
+  color: var(--cmx-ink);
+}
+
+button.cmx-act-row-line:hover .cmx-act-title-chip[data-emphasis="true"] {
   border-color: color-mix(in srgb, var(--cmx-ink-2) 26%, transparent);
 }
 
@@ -443,21 +447,19 @@ button.cmx-act-row-line:focus-visible {
   outline-offset: 1px;
 }
 
-/* Step title chip — the dark grey rounded panel behind every step name. */
+/* Step title — PLAIN TEXT (user direction: step names read like normal
+   writing, exactly like "Understanding the request"). The dark grey
+   rounded panels are reserved for the row's CONTENT: the search query,
+   file path chips, and the emphasized "Preparing response" step. */
 .cmx-act-title-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   max-width: 100%;
-  padding: 2.5px 9px;
-  border-radius: 9px;
-  background: var(--cmx-chip-bg);
-  border: 1px solid var(--cmx-chip-line);
   color: var(--cmx-ink);
-  font-size: 12.5px;
-  line-height: 1.4;
+  font-size: 13px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
-  transition: border-color 150ms ease;
 }
 
 .cmx-act-item[data-status="completed"] .cmx-act-title-chip,
@@ -465,11 +467,25 @@ button.cmx-act-row-line:focus-visible {
   color: var(--cmx-ink-2);
 }
 
-/* Inline side chip — the search query beside "Searching repository" (or
-   the target path beside a single file op). Same dark grey rounding. */
+/* Emphasized title — "Preparing response" keeps the dark grey rounded
+   panel (it is the hand-off beat right before the answer streams). */
+.cmx-act-title-chip[data-emphasis="true"] {
+  padding: 2.5px 9px;
+  border-radius: 9px;
+  background: var(--cmx-chip-bg);
+  border: 1px solid var(--cmx-chip-line);
+  font-size: 12.5px;
+}
+
+/* Inline content chip — the search query beside "Searching repository"
+   (or the target path beside a single file op). Dark grey + 9px rounding
+   per the user's spec. Width is capped so the chip stays BESIDE the title
+   on the same line (long queries ellipsize; full text in the tooltip) —
+   it only wraps below on very narrow panels. */
 .cmx-act-side-chip {
   display: inline-block;
-  max-width: min(340px, 100%);
+  max-width: min(300px, 60%);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

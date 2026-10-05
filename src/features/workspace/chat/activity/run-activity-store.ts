@@ -305,32 +305,6 @@ function mergeChildren(
   ];
 }
 
-/** Pure appendChild with the "+N more" overflow cap. */
-function withChild(row: ActivityViewRow, child: ActivityViewChild): ActivityViewRow {
-  if (row.children.some((c) => c.id === child.id)) return row;
-  if (row.children.length < CHILDREN_CAP) {
-    return { ...row, children: [...row.children, child] };
-  }
-  const moreId = `${row.id}-more`;
-  const moreIndex = row.children.findIndex((c) => c.id === moreId);
-  if (moreIndex >= 0) {
-    const previous =
-      Number(row.children[moreIndex].label.match(/\+(\d+)/)?.[1] ?? "1") || 1;
-    const children = [...row.children];
-    children[moreIndex] = {
-      id: moreId,
-      label: `+${previous + 1} more`,
-      path: null,
-      line: null,
-    };
-    return { ...row, children };
-  }
-  return {
-    ...row,
-    children: [...row.children, { id: moreId, label: "+1 more", path: null, line: null }],
-  };
-}
-
 function updateRowById(
   state: RunActivityState,
   rowId: string,
@@ -510,9 +484,11 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
           const childPath = "path" in child && typeof child.path === "string" ? child.path : null;
           /** Human file-op prefixes — raw tool ids never reach the UI.
            * create_patch stays a bare path: the patch is composed here, not
-           * applied, so the label must not claim an edit happened. */
+           * applied, so the label must not claim an edit happened.
+           * edit_file is ALSO bare: inside an "Edited N files" group the
+           * dropdown reads as a clean file list (same as the read groups). */
           const TOOL_PREFIX: Record<string, string> = {
-            edit_file: "Edited",
+            edit_file: "",
             create_file: "Created",
             delete_file: "Deleted",
             rename_file: "Renamed",
@@ -586,10 +562,9 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
     }
 
     case "SEARCH_RESULT": {
-      const { query, hits, topFiles } = event as {
+      const { query, hits } = event as {
         query: string;
         hits: number;
-        topFiles: string[];
       };
       if (state.status === "waiting") resumeRun(state, perfNow);
       const safeQuery = redactDetail(String(query ?? ""));
@@ -597,24 +572,20 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
       const detail = safeQuery
         ? `"${safeQuery}" — ${hitCount} result${hitCount === 1 ? "" : "s"}`
         : null;
-      const files = (Array.isArray(topFiles) ? topFiles : [])
-        .filter((f): f is string => typeof f === "string" && Boolean(f))
-        .slice(0, CHILDREN_CAP);
 
+      /* The searched files do NOT render as children of this row — every
+         referenced file arrives as its OWN "Reading <file>" timeline row
+         (FILE_REFERENCED below), one by one, exactly like the prototype.
+         The search row keeps the query chip on the line and the honest
+         result count in its dropdown body. */
       const hostRow = [...state.rows].reverse().find((r) => r.kind === "repo_search");
       if (hostRow) {
-        updateRowById(state, hostRow.id, (current) => {
-          let next: ActivityViewRow = {
-            ...current,
-            seq: Math.max(current.seq, event.seq),
-            detail: detail ?? current.detail,
-            query: safeQuery || null,
-          };
-          for (const file of files) {
-            next = withChild(next, makeChild(file, null, ""));
-          }
-          return next;
-        });
+        updateRowById(state, hostRow.id, (current) => ({
+          ...current,
+          seq: Math.max(current.seq, event.seq),
+          detail: detail ?? current.detail,
+          query: safeQuery || null,
+        }));
       } else {
         appendRow(state, {
           id: `search-${event.seq}`,
@@ -623,7 +594,7 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
           detail,
           status: "completed",
           seq: event.seq,
-          children: files.map((file) => makeChild(file, null, "")),
+          children: [],
           groupCount: null,
           query: safeQuery || null,
         });
@@ -638,27 +609,26 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         state.malformed += 1;
         return;
       }
-      const child = makeChild(path, typeof line === "number" ? line : null, "Read");
-      const hostRow =
-        [...state.rows].reverse().find((r) => r.kind === "read_file" && r.status === "running") ??
-        [...state.rows].reverse().find((r) => r.kind === "read_file" || r.kind === "repo_search");
-      if (hostRow) {
-        updateRowById(state, hostRow.id, (current) => {
-          const merged = withChild(current, child);
-          return { ...merged, seq: Math.max(current.seq, event.seq) };
-        });
-      } else {
-        appendRow(state, {
-          id: `read-${event.seq}`,
-          kind: "read_file",
-          title: titleForKind("read_file"),
-          detail: null,
-          status: "completed",
-          seq: event.seq,
-          children: [child],
-          groupCount: null,
-        });
+      /* Every referenced file is its OWN timeline row — "Reading" + the
+         file path chip on the line (prototype's one-by-one file loop).
+         Consecutive reads then merge into ONE "Read N files" group row
+         (appendRow's grouping) whose dropdown lists every file read — and
+         the same mechanism covers "Edited N files" for write ops. Reading
+         real files is visible work → the run is Solving (orb appears). */
+      if (!state.workFinalized && state.status !== "final") {
+        state.phase = "solving";
+        state.reachedSolving = true;
       }
+      appendRow(state, {
+        id: `read-${event.seq}`,
+        kind: "read_file",
+        title: titleForKind("read_file"),
+        detail: null,
+        status: "running",
+        seq: event.seq,
+        children: [makeChild(path, typeof line === "number" ? line : null, "")],
+        groupCount: null,
+      });
       return;
     }
 

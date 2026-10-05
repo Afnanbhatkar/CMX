@@ -8,9 +8,12 @@
  * adapter's view kind. Arbitrary model-generated strings are never rendered
  * as titles, and there is deliberately NO "reasoning" kind.
  *
- * The Solving trigger set (spec A.2): only real mutating/executing activity
- * transitions the phase machine from thinking → solving. Repository
- * reading/searching alone never does, and solving never reverts.
+ * The Solving trigger set (spec A.2, extended by explicit user direction in
+ * the Phase-9 polish pass): real mutating/executing activity — INCLUDING
+ * repository file reads — transitions the phase machine from thinking →
+ * solving. Whenever the run reads or edits anything, the user must SEE the
+ * orb + "Solving"; pure conversation (understanding + composing alone)
+ * stays Thinking. Solving never reverts.
  */
 
 import type { ActivityViewKind } from "@/types/contracts";
@@ -22,7 +25,7 @@ const TITLE_TEMPLATES: Record<ActivityViewKind, string> = {
   plan: "Planning changes",
   web_search: "Searching the web",
   repo_search: "Searching repository",
-  read_file: "Reading files",
+  read_file: "Reading",
   create_file: "Creating",
   edit_file: "Editing",
   delete_file: "Removing",
@@ -43,9 +46,11 @@ export function titleForKind(kind: ActivityViewKind): string {
 
 /**
  * Kinds whose first REAL activity transitions the run into Solving
- * (spec A.2 — mutating/executing work only).
+ * (spec A.2 + Phase-9 user direction: reading real files is visibly doing
+ * work — the orb appears the moment files are read or edited).
  */
 const SOLVING_TRIGGERS: ReadonlySet<ActivityViewKind> = new Set([
+  "read_file",
   "create_file",
   "edit_file",
   "delete_file",

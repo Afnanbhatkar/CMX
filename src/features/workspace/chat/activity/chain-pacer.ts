@@ -24,8 +24,8 @@
  *
  * Rhythm (matching the prototype scenarios):
  *   Thinking alone ≈ 0.9s → step 1 appears → each step ≥ 0.45s apart →
- *   each step visibly "runs" ≥ 0.7s before completing → result/file
- *   children cascade in ~60ms apart.
+ *   each step visibly "runs" ≥ 0.7s before completing → result/file rows
+ *   cascade in one-by-one ~170ms apart (fast, but every row is readable).
  */
 
 import type { SequencedAssistantEvent } from "../../assistant/contracts";
@@ -37,8 +37,10 @@ const FIRST_STEP_DELAY_MS = 900;
 const MIN_STEP_GAP_MS = 450;
 /** Minimum time a step row stays visibly "running" before completing. */
 const MIN_DWELL_MS = 700;
-/** Cascade gap for search-result / file-referenced child updates. */
-const CHILD_GAP_MS = 60;
+/** Cascade gap for search-result / file rows — quick (many files stay
+ *  brisk, per the user: "speed thodi zyada chalega"), but every row is
+ *  visibly its own one-by-one appearance, never a blur. */
+const CHILD_GAP_MS = 170;
 
 export interface ChainPacer {
   /** Feed one real wire event (call for EVERY event, in arrival order). */
@@ -154,8 +156,10 @@ export function createChainPacer(): ChainPacer {
       ? pending.reduce((max, item) => Math.max(max, item.releaseAt), 0)
       : performance.now();
 
-  /** Gap between beats once the answer has started (wrap-up compression). */
-  const WRAP_UP_GAP_MS = 140;
+  /** Gap between beats once the answer has started (wrap-up compression).
+   *  300ms keeps the closing rows readable one-by-one (the user rejected
+   *  the earlier 140ms blur: rows must never appear "all at once"). */
+  const WRAP_UP_GAP_MS = 300;
 
   /**
    * Wrap-up compression: the first answer chunk arrived while story events
@@ -253,9 +257,20 @@ export function createChainPacer(): ChainPacer {
         const activityId =
           (event as { activityId?: string }).activityId ?? "";
         const visibleAt = startVisibleAt.get(activityId);
+        // ORDERING GUARD: the completion must never release before its own
+        // start row is visible. If the start is still queued (fast backend),
+        // the completion would find no row and be swallowed — so floor it
+        // just behind the queued start.
+        const queuedStart = pending.find(
+          (item) =>
+            item.event.type === "ACTIVITY_STARTED" &&
+            (item.event as { activity?: { id?: unknown } }).activity?.id ===
+              activityId,
+        );
         releaseAt = Math.max(
           releaseAt,
           visibleAt !== undefined ? visibleAt + MIN_DWELL_MS : now,
+          queuedStart ? queuedStart.releaseAt + 60 : 0,
         );
       } else {
         // child — cascades right after whatever precedes it: after the last
