@@ -60,6 +60,21 @@ import {
   registerCodeIntelligenceProviders,
   type TextSymbol,
 } from "./code-intelligence";
+import {
+  attachInlineAIEditor,
+  registerInlineAICompletion,
+  retryInlineAICompletion,
+} from "./inline-ai/inline-completion";
+import { InlineEditController } from "./inline-ai/inline-edit-controller";
+import {
+  HinglishPeek,
+  registerHinglishHover,
+  setActiveHinglishCommand,
+} from "./inline-ai/hinglish-hover";
+import {
+  recordEditorEdit,
+  registerActiveInlineAIEditor,
+} from "./inline-ai/inline-ai-context";
 
 ensureMonacoLoaderConfigured();
 exposePerfTooling();
@@ -208,6 +223,19 @@ export function MonacoCodeEditor({
   const [ready, setReady] = useState(false);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
 
+  /* Current path/language at ACTION time (mount happens once per pane; the
+     path prop changes as tabs switch — controllers must read the live one). */
+  const pathRef = useRef(path);
+  const languageRef = useRef(language);
+  useEffect(() => {
+    pathRef.current = path;
+    languageRef.current = language;
+  }, [path, language]);
+
+  /* Phase 8.75 controllers (per pane). */
+  const inlineEditRef = useRef<InlineEditController | null>(null);
+  const hinglishPeekRef = useRef<HinglishPeek | null>(null);
+
   /* Dirty-buffer continuity across remounts: when the model manager tracks a
      dirty buffer for this path, the editor must NOT clobber it with the
      (stale) loaded content prop — passing `undefined` keeps the live model. */
@@ -231,11 +259,17 @@ export function MonacoCodeEditor({
       if (model && !model.isDisposed()) editorModelManager.release(model);
       modelRef.current = null;
       editorRef.current = null;
+      inlineEditRef.current?.dispose();
+      inlineEditRef.current = null;
+      hinglishPeekRef.current?.dispose();
+      hinglishPeekRef.current = null;
+      registerActiveInlineAIEditor(null);
     };
   }, []);
 
   /* Focus routing: the app dispatches commands to the active pane. */
   const focusPane = useCallback(() => {
+    registerActiveInlineAIEditor(editorRef.current);
     const store = useWorkspaceStore.getState();
     if (store.splitEditor && store.activeEditorPane !== paneId) {
       store.setActiveEditorPane(paneId);
@@ -502,12 +536,18 @@ export function MonacoCodeEditor({
         if (toolbar) repositionToolbar();
       });
       // In-memory dirty flag through the model manager (single source).
-      editor.onDidChangeModelContent(() => {
+      editor.onDidChangeModelContent((event) => {
         const currentModel = editor.getModel();
         if (!currentModel) return;
         editorModelManager.noteModelChanged(currentModel);
         const dirty = editorModelManager.isDirty(currentModel);
         useWorkspaceStore.getState().setTabDirty(path, dirty);
+        // Phase 8.75: real recent-edits context for inline completion.
+        const inserted = event.changes.reduce(
+          (sum, change) => sum + (change.text.length > 0 ? change.text.length : 0),
+          0,
+        );
+        if (inserted > 0) recordEditorEdit(pathRef.current, inserted);
       });
 
       // Explicit in-editor keybindings (Monaco also has native ones; these
@@ -517,6 +557,51 @@ export function MonacoCodeEditor({
       });
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO, () => {
         void editor.getAction("editor.action.quickOutline")?.run();
+      });
+
+      /* Phase 8.75 — inline AI surfaces.
+         - completion provider + counted accept keybindings (once per monaco
+           instance; per-editor bindings attach here),
+         - Ctrl/Cmd+K inline edit on selections (AIWorkspace yields Ctrl+K
+           inside Monaco so this binding wins),
+         - Hinglish explanation hover + peek, with a per-editor command id
+           for the hover command link,
+         - an honest "Inline AI: Retry Completion" palette action. */
+      registerInlineAICompletion(monaco);
+      attachInlineAIEditor(editor, monaco);
+      registerHinglishHover(monaco);
+      registerActiveInlineAIEditor(editor);
+      const inlineEdit = new InlineEditController(
+        editor,
+        monaco,
+        () => pathRef.current,
+        () => languageRef.current,
+      );
+      inlineEditRef.current = inlineEdit;
+      const hinglishPeek = new HinglishPeek(editor, monaco);
+      hinglishPeekRef.current = hinglishPeek;
+      const explainCommandId = editor.addCommand(
+        0,
+        (_accessor, payload?: { path: string; line: number; symbol: string; kind: string }) => {
+          if (payload) hinglishPeek.show(payload);
+        },
+      );
+      if (explainCommandId) setActiveHinglishCommand(explainCommandId);
+      editor.addAction({
+        id: "cmx.inlineAI.editSelection",
+        label: "Inline AI: Edit Selection (describe the change)",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK],
+        precondition: "editorHasSelection",
+        contextMenuGroupId: "9_cmxai",
+        contextMenuOrder: 1,
+        run: () => inlineEdit.startFromSelection(),
+      });
+      editor.addAction({
+        id: "cmx.inlineAI.retryCompletion",
+        label: "Inline AI: Retry Completion",
+        contextMenuGroupId: "9_cmxai",
+        contextMenuOrder: 2,
+        run: () => retryInlineAICompletion(editor),
       });
 
       // Kick a parse-worker pass so the capability engine state is real for
@@ -547,6 +632,7 @@ export function MonacoCodeEditor({
       occurrencesHighlight: "singleFile",
       quickSuggestions: false,
       suggestOnTriggerCharacters: true,
+      inlineSuggest: { enabled: true },
       bracketPairColorization: { enabled: true },
       padding: { top: 8, bottom: 24 },
       cursorBlinking: largeFile ? "solid" : "smooth",

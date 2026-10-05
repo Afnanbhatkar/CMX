@@ -33,6 +33,7 @@
 | **External LLM providers** | `production` | `z-ai-web-dev-sdk` platform gateway (LLM, VLM, embeddings, search, ASR/TTS, image/video). **Backend-only** — never imported client-side. |
 | **Assistant image understanding** | `unavailable` | Phase 8.5: the chat transport's message contract is text-only (`GatewayMessage.content: string`) — no image parts. Measured by `GET /api/assistant/capabilities`; the composer image button is capability-gated with the honest reason. Flows (screenshot→diagnosis/proposal) activate when the transport gains image support. |
 | **Streaming (SSE)** | `production` | Phase 3: typed event bus (`src/server/events`) + SSE at `/api/events` (+ `/api/events/stream`) and `/api/assistant/stream` — replay buffer, heartbeats, privacy-enforced event schemas (operational labels only, `.strict()` zod). Token-level assistant streaming awaits a gateway streaming API — no fake chunking is performed. WebSocket [PLANNED]. |
+| **Editor inline AI (completion / Ctrl+K edit / Hinglish hover)** | `production` | Phase 8.75: Monaco inline completions + Cmd/Ctrl+K inline edit + Hinglish hover, all through LLMGateway. HONEST latency: the chat-model transport serves ghost text at **measured p50 ≈ 0.8–1.0 s** in this environment (window.__cmxInlineAI.stats()) — the 300 ms IDE-grade target is NOT met here and is NOT claimed; it activates only where the environment supports it. Cancellation/stale-guard make slow responses safe (obsolete completions are never inserted). |
 
 ## Degradation ladder (binding for future phases)
 

@@ -336,7 +336,15 @@ export function AIWorkspace() {
       if (!(event.metaKey || event.ctrlKey)) return;
       const key = event.key.toLowerCase();
       // Palette keys are store-driven and bind even inside inputs.
+      // Phase 8.75: INSIDE a Monaco editor, Ctrl/Cmd+K belongs to the inline
+      // AI edit action (editorHasSelection precondition) — yield to Monaco
+      // here so both bindings never fight. The palette stays available via
+      // its button and everywhere outside the editor.
       if (key === "k") {
+        const insideMonacoEditor =
+          event.target instanceof Element &&
+          event.target.closest(".monaco-editor") !== null;
+        if (insideMonacoEditor) return;
         event.preventDefault();
         setPaletteFilesMode(false);
         useWorkspaceStore.getState().setPaletteOpen(true);

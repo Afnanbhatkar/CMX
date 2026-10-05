@@ -4,6 +4,57 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 8.75 — AI-Native Inline Completion + Cmd/Ctrl+K Inline Edit] — 2026-10-05
+
+### Added
+- **Inline completion (§1/§2/§6)**: a real Monaco `InlineCompletionsProvider`
+  (`inline-ai/inline-completion.ts`) connected to the LLM Gateway via
+  `POST /api/ai/inline-complete`. Context = current file around the cursor,
+  nearby text-scan symbols, open tabs, real recent-edit records, current
+  selection, and a real RULES.md excerpt read server-side. Tab accept +
+  word-by-word partial accept (Ctrl/Cmd+Right) + Escape hide are deterministic
+  (re-bound native commands), every request is cancellable (provider token +
+  AbortController + typing aborts the superseded request), a strict
+  stale-guard (model version id) guarantees an obsolete completion is NEVER
+  inserted after the buffer changed, LRU cache keyed by (model, version) with
+  in-flight dedup, short negative window on gateway failures, retry via the
+  "Inline AI: Retry Completion" palette action. Large files skip the feature
+  (perf budget). Honest measurement: user-perceived latency (request → ghost
+  text) recorded per show — `window.__cmxInlineAI.stats()` reports
+  counts + p50/p95. MEASURED in this environment: p50 ≈ 0.8–1.0 s (chat-model
+  transport) — the 300 ms target is NOT claimed; per §6 it holds only where
+  the environment supports it.
+- **Cmd/Ctrl+K inline edit (§3/§4)**: select code → Ctrl/Cmd+K → instruction
+  input (content widget) → `POST /api/ai/inline-edit` → proposed edit rendered
+  as an INLINE LINE DIFF in a view zone below the selection with
+  Accept / Reject. SHADOW BUFFER: the proposal is preview-only; Accept writes
+  to the IN-MEMORY Monaco model via executeEdits — and this build has no
+  disk-write path at all (verified: zero write endpoints + post-accept reload
+  shows the original file). Escape rejects, Ctrl/Cmd+Enter accepts, any
+  buffer change invalidates a stale proposal. Ctrl/Cmd+K inside the editor
+  now routes to this action (the app-level palette handler yields inside
+  Monaco; palette stays available outside).
+- **Hinglish hover (§5)**: an honest text-scan hover (kind/name/line, labeled
+  "not a language server") with an "Explain in Hinglish" command link for
+  text-scan symbols; opens an overlay peek that explains the symbol via
+  `POST /api/ai/explain` through the SAME gateway/context infrastructure.
+  Close button + Escape; never edits the buffer.
+- **Latency honesty (§6)**: p50/p95 measured from real shows; per-response
+  gateway latency surfaced by the service; CAPABILITIES.md row states the
+  measured reality.
+
+### Verified
+- agent-browser E2E (real gateway runs): automatic triggers on real typing
+  (triggerKind Automatic ×N), ghost text shown ×4, Tab accept inserted the
+  suggestion (accepts=1), Ctrl+Right partial accept (partialAccepts=1, ghost
+  continues), Escape dismissed, typing invalidated in-flight requests
+  (cancellations climbing, superseded guard in code), cache hit on
+  same-version re-invocation (cacheHits=1); Ctrl+K flow twice (Reject →
+  buffer unchanged; Accept → comment applied to the in-memory buffer, tab
+  shows "unsaved (in-memory)"); reload restored the ORIGINAL file (no disk
+  write anywhere); hover → "Explain in Hinglish" → peek with a real Hinglish
+  explanation; retry + edit actions present; 360px clean; zero page errors.
+
 ## [Hotfix 8.5.1 — Restore "Pin User Message to Top / Scrolling Anchoring"] — 2026-10-05
 
 ### Fixed
