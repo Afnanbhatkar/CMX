@@ -20,7 +20,11 @@
  *   always wins when it is larger;
  * - RESPONSE_CHUNK, intake/approval, and terminal events are NEVER delayed
  *   — a pending queue is flushed first so the chain is complete and
- *   consistent before the answer streams or the run pauses/ends.
+ *   consistent before the answer streams or the run pauses/ends;
+ * - CONTEXT_SNAPSHOT / MEMORY_USED are chain no-ops (metadata only): they
+ *   ingest immediately but NEVER flush the queue — flushing them would dump
+ *   the whole queued story in one frame and kill the one-by-one entrance
+ *   rhythm (they arrive right after the read events on every real run).
  *
  * Rhythm (matching the prototype scenarios):
  *   Thinking alone ≈ 0.9s → step 1 appears → each step ≥ 0.45s apart →
@@ -53,7 +57,7 @@ export interface ChainPacer {
   dispose(): void;
 }
 
-type EventTiming = "start" | "settle" | "child" | "immediate";
+type EventTiming = "start" | "settle" | "child" | "metadata" | "immediate";
 
 function timingOf(event: SequencedAssistantEvent): EventTiming {
   switch (event.type) {
@@ -65,9 +69,17 @@ function timingOf(event: SequencedAssistantEvent): EventTiming {
     case "SEARCH_RESULT":
     case "FILE_REFERENCED":
       return "child";
+    case "CONTEXT_SNAPSHOT":
+    case "MEMORY_USED":
+      // Chain no-ops (consumed by the Context Inspector / memory chip, not
+      // rows). They arrive mid-story on EVERY real run — right after the
+      // read events — so they must pass through WITHOUT flushing the queued
+      // story; flushing here dumped Understanding+Searching+Read N files in
+      // a single frame and erased the one-by-one entrance animation.
+      return "metadata";
     default:
-      // RESPONSE_CHUNK, RUN_*, intake, approval, context, memory — immediate
-      // (ingest flushes any pending queue first, keeping global order).
+      // RESPONSE_CHUNK, RUN_*, intake, approval — immediate (ingest flushes
+      // any pending queue first, keeping global order).
       return "immediate";
   }
 }
@@ -234,6 +246,14 @@ export function createChainPacer(): ChainPacer {
 
       const timing = timingOf(event);
 
+      if (timing === "metadata") {
+        // Pass-through: the store treats these as no-ops for rows, so
+        // releasing them ahead of the still-queued story is order-safe —
+        // and the story keeps its paced one-by-one entrance.
+        releaseOne(event);
+        return;
+      }
+
       if (timing === "immediate") {
         // The chain must be consistent before the run pauses or ends —
         // flush first, then ingest now.
@@ -251,6 +271,12 @@ export function createChainPacer(): ChainPacer {
           runStartAt !== null ? runStartAt + FIRST_STEP_DELAY_MS : now,
           lastStartReleaseAt + MIN_STEP_GAP_MS,
           lastQueuedStartAt + MIN_STEP_GAP_MS,
+          // ORDERING GUARD: a start must never release ahead of story rows
+          // that are still queued — on fast backends "Preparing response"
+          // otherwise jumps in FRONT of the still-cascading file rows and
+          // the timeline reads Reading → Preparing → Reading … instead of
+          // the backend's true order (all file ops, then composing).
+          pending.length > 0 ? lastPendingTime() + CHILD_GAP_MS : 0,
         );
         lastQueuedStartAt = releaseAt;
       } else if (timing === "settle") {

@@ -8,12 +8,14 @@
  * adapter's view kind. Arbitrary model-generated strings are never rendered
  * as titles, and there is deliberately NO "reasoning" kind.
  *
- * The Solving trigger set (spec A.2, extended by explicit user direction in
- * the Phase-9 polish pass): real mutating/executing activity — INCLUDING
- * repository file reads — transitions the phase machine from thinking →
- * solving. Whenever the run reads or edits anything, the user must SEE the
- * orb + "Solving"; pure conversation (understanding + composing alone)
- * stays Thinking. Solving never reverts.
+ * The Solving trigger set (spec A.2, narrowed by explicit user direction in
+ * the Phase-9 feedback rounds): Solving (orb) shows ONLY while file work is
+ * actually IN FLIGHT — a read/create/edit/delete/rename row is running.
+ * Everything else (understanding, searching, preparing, running commands or
+ * tests) shows the Thinking lattice. The header follows the live rows:
+ * when the last file row settles and nothing file-based is running, the
+ * header reverts to Thinking (reachedSolving stays latched so the final
+ * label still remembers real file work happened — "Worked for").
  */
 
 import type { ActivityViewKind } from "@/types/contracts";
@@ -45,9 +47,9 @@ export function titleForKind(kind: ActivityViewKind): string {
 }
 
 /**
- * Kinds whose first REAL activity transitions the run into Solving
- * (spec A.2 + Phase-9 user direction: reading real files is visibly doing
- * work — the orb appears the moment files are read or edited).
+ * Kinds whose row RUNNING IN FLIGHT means the run is Solving right now
+ * (user direction: the Solving text + orb appear exactly while file edit/
+ * read work is happening — never at any other time).
  */
 const SOLVING_TRIGGERS: ReadonlySet<ActivityViewKind> = new Set([
   "read_file",
@@ -55,8 +57,6 @@ const SOLVING_TRIGGERS: ReadonlySet<ActivityViewKind> = new Set([
   "edit_file",
   "delete_file",
   "rename_file",
-  "run_command",
-  "run_tests",
 ]);
 
 export function triggersSolving(kind: ActivityViewKind): boolean {

@@ -13,9 +13,12 @@
  *   (reconnect) deliveries never duplicate timeline rows;
  * - stale events never overwrite newer row state (per-row seq guard);
  * - malformed events are dropped at the boundary;
- * - phase machine: default thinking; first mutating/executing activity →
- *   solving (never back); waiting pauses the ACTIVE-WORK timer; the first
- *   final-answer chunk closes the work phase; the first terminal event
+ * - phase machine: default thinking; a file read/create/edit/delete/rename
+ *   row RUNNING IN FLIGHT → solving, and back to thinking the moment no
+ *   file row is running anymore (user direction: Solving text + orb show
+ *   exactly while file work is happening, never otherwise); waiting pauses
+ *   the ACTIVE-WORK timer; the first final-answer chunk closes the work
+ *   phase; the first terminal event
  *   finalizes the run;
  * - ONE run-level active-work timer per run (performance.now() + explicit
  *   paused accumulator; server timestamps kept for history);
@@ -413,7 +416,32 @@ function settleRunningRows(
 /* Reducer — one real wire event → chain state                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * THE phase rule (single source of truth, recomputed after every event):
+ * the header shows Solving exactly while a file read/create/edit/delete/
+ * rename row is visibly running — the moment the last file row settles
+ * (and no other file row is in flight), the header reverts to Thinking.
+ * reachedSolving is the LATCH for the final label only ("Worked for" vs
+ * "Thought for") — it never drives the live header.
+ */
+function syncPhase(state: RunActivityState): void {
+  if (state.workFinalized || state.status !== "running") return;
+  state.phase = state.rows.some(
+    (row) => row.status === "running" && triggersSolving(row.kind),
+  )
+    ? "solving"
+    : "thinking";
+}
+
 function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): void {
+  applyEventReducer(state, event);
+  syncPhase(state);
+}
+
+function applyEventReducer(
+  state: RunActivityState,
+  event: SequencedAssistantEvent,
+): void {
   const perfNow = performance.now();
 
   switch (event.type) {
@@ -450,8 +478,13 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
         String(activity.kind ?? "tool"),
         String(activity.title ?? ""),
       );
-      if (triggersSolving(kind) && !state.workFinalized && state.status !== "final") {
-        state.phase = "solving";
+      if (
+        triggersSolving(kind) &&
+        !state.workFinalized &&
+        state.status !== "final"
+      ) {
+        // Latch for the FINAL label only — the live header is owned by
+        // syncPhase (Solving strictly while the file row is in flight).
         state.reachedSolving = true;
       }
       // Defensive: real activity implicitly resumes a paused run.
@@ -612,11 +645,10 @@ function applyEvent(state: RunActivityState, event: SequencedAssistantEvent): vo
       /* Every referenced file is its OWN timeline row — "Reading" + the
          file path chip on the line (prototype's one-by-one file loop).
          Consecutive reads then merge into ONE "Read N files" group row
-         (appendRow's grouping) whose dropdown lists every file read — and
-         the same mechanism covers "Edited N files" for write ops. Reading
-         real files is visible work → the run is Solving (orb appears). */
+         (appendRow's grouping) whose dropdown lists every file read. The
+         running read rows drive the LIVE header (syncPhase → Solving while
+         they are in flight); the latch only feeds the final label. */
       if (!state.workFinalized && state.status !== "final") {
-        state.phase = "solving";
         state.reachedSolving = true;
       }
       appendRow(state, {
