@@ -4,6 +4,25 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Hotfix 8.5.1 — Restore "Pin User Message to Top / Scrolling Anchoring"] — 2026-10-05
+
+### Fixed
+- **Send anchoring restored (user-mandated protected feature, RULES.md §15)**.
+  Phase 8.5's `content-visibility: auto` + `contain-intrinsic-size` on chat
+  message wrappers reported placeholder heights (320px) for off-screen rows,
+  silently corrupting the anchor math (`offsetTop` / `scrollHeight`) in long
+  conversations — the just-sent question landed 793px below the viewport top
+  instead of the designed 8px, so the pin-to-top behavior appeared removed.
+  The placeholder sizing is REVERTED: message wrappers keep real layout again.
+  Verified: `questionVisualY = 8px` after send, anchor-hold during generation
+  (view never moves while the answer grows below), designed silent spacer
+  collapse at terminal, spacer path on fresh conversations, instant-bottom
+  conversation-switch rebase.
+- **Never again**: the scroll choreography block now carries an in-code
+  PROTECTED banner, and RULES.md §15 (Protected UX Features) forbids removing
+  or altering the anchoring contract and forbids placeholder-sizing/virtualized
+  rows on chat message wrappers without re-running the anchoring probe.
+
 ## [Phase 8.5 — Response Engine V2 + Verified Code Rendering + Multimodal Output] — 2026-10-05
 
 ### Added
@@ -52,10 +71,9 @@ is phase-based during the V2 build-out.
   used (count fallback), with the existing source/evidence popover.
 
 ### Performance
-- Streaming-safe memoized block rendering; offscreen message rows skip
-  rendering via `content-visibility: auto` + `contain-intrinsic-size`
-  (render-skipping; full windowing stays with the existing scroll
-  choreography).
+- Streaming-safe memoized block rendering. (The `content-visibility: auto`
+  render-skipping added here was REVERTED in Hotfix 8.5.1 — it corrupted the
+  protected send-anchoring math; see the hotfix entry above.)
 
 ## [Phase 8D — Real-Time AI Thinking + Solving Activity Chain] — 2026-10-04
 

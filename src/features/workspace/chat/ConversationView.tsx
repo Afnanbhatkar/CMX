@@ -421,6 +421,21 @@ const ANCHOR_PAD_PX = 8;
 /** Breathing room added under a just-anchored question while generating. */
 const ANCHOR_SPACER_BUFFER_PX = 32;
 
+/* ───────────────────────────────────────────────────────────────────
+ * PROTECTED FEATURE — DO NOT REMOVE, DISABLE, OR ALTER (user mandate,
+ * RULES.md §15): "Pin User Message to Top / Scrolling Anchoring".
+ * On send, the new user message MUST anchor to the TOP of the viewport
+ * (offsetTop − 8px) and the view MUST hold that position (anchor-hold)
+ * while the answer grows below it. The generation spacer, the silent
+ * spacer collapse, the conversation-switch rebase and the auto-follower
+ * stand-down are all part of this contract. Message wrappers MUST keep
+ * REAL layout — no content-visibility / contain-intrinsic-size /
+ * virtualization that reports placeholder heights (Phase 8.5's perf
+ * tweak did exactly that, silently corrupting the anchor math in long
+ * conversations; reverted in hotfix 8.5.1). Any change here requires
+ * the browser probe: after a send, questionVisualY ≈ 8px.
+ * ─────────────────────────────────────────────────────────────────── */
+
 /**
  * Native scroll host (deliberately NOT Radix ScrollArea): the Radix
  * viewport wraps content in a `display: table` sizing element which makes
@@ -626,7 +641,9 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
         {messages.map((message, index) => {
           if (message.role === "user") {
             return (
-              <div key={message.id} data-message-id={message.id} className="min-w-0 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
+              // PROTECTED anchor contract (RULES §15): wrappers keep REAL
+              // layout — placeholder sizing breaks the offsetTop math.
+              <div key={message.id} data-message-id={message.id} className="min-w-0">
                 <UserMessage message={message} />
               </div>
             );
@@ -642,7 +659,9 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
             }
           }
           return (
-            <div key={message.id} data-message-id={message.id} className="min-w-0 [content-visibility:auto] [contain-intrinsic-size:auto_320px]">
+            // PROTECTED anchor contract (RULES §15): wrappers keep REAL
+            // layout — placeholder sizing breaks the offsetTop math.
+            <div key={message.id} data-message-id={message.id} className="min-w-0">
               <AssistantMessage
                 message={message}
                 conversationId={conversationId}

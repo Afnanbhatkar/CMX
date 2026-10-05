@@ -1099,3 +1099,21 @@ Stage Summary:
 - Self-check (12/12 exercised): code ✓ copy ✓ download ✓ preview ✓ open editor ✓ diff ✓ unknown reference ✓ uncertainty ✓ memory chip ✓ table ✓ diagram ✓ image capability ✓.
 - Dependency additions (RULES §6, in CHANGELOG): remark-gfm, mermaid@11.
 - Phase 8.75 (ghost text) NOT started, per the phase boundary.
+
+---
+Task ID: hotfix-08.5.1-restore-send-anchoring
+Agent: Z.ai Code (main)
+Task: RESTORE "Pin User Message to Top / Scrolling Anchoring" — user reported the feature was accidentally removed; revert the change and guarantee it is never removed or altered again.
+
+Work Log:
+- Investigated git history + worklog: the anchoring code (Phase 8D+ send anchoring, phase-9 anchor-hold) was never deleted from ConversationView.tsx — all effects, constants and the spacer were intact at HEAD.
+- Root cause found (measured, not guessed): Phase 8.5 added `[content-visibility:auto] [contain-intrinsic-size:auto_320px]` to BOTH message wrappers. Off-screen rows report the 320px placeholder height instead of real layout, so the anchor effect's `element.offsetTop` / `scroller.scrollHeight` are wrong in long conversations. Live baseline (before fix): sent a message in the long conversation → question landed at questionVisualY = 793px below the viewport top (designed: 8px); one wrapper measured exactly h=320 (placeholder). The phase-8.5 worklog claim "the custom scroll choreography stays intact" was wrong — honest correction recorded.
+- Fix: removed content-visibility/contain-intrinsic-size from both message wrappers (wrappers back to real layout `min-w-0`, exactly as pre-8.5). Anchoring choreography code untouched — the feature is restored by removing the interference, not by rewriting it.
+- Protection so it can never happen again: (1) in-code PROTECTED banner comment above the scroll choreography block in ConversationView.tsx naming the contract (anchor at offsetTop−8, anchor-hold, spacer, silent collapse, switch rebase, wrappers keep REAL layout); (2) RULES.md new §15 "Protected UX Features (never remove or alter)" with the acceptance probe (questionVisualY ≈ 8px) required for any future phase touching this file; (3) CHANGELOG Hotfix 8.5.1 entry + honest correction of the phase-8.5 Performance section.
+- Browser E2E (agent-browser, real conversation): A) long conversation send → questionVisualY = 8 EXACTLY (was 793 broken); B) anchor-hold — view held at 8px while the answer grew below (scrollTop unchanged during generation); C) terminal → designed silent spacer collapse (small clamp drift is the documented phase-9 behavior, no re-anchor jump); D) fresh short conversation → spacer path anchors the question at 12px (8px pad + margin) — pinned at top; E) conversation switch → opens instantly at bottom (scrollTop 4011 = maxScroll 4011). Zero page errors.
+- bun run lint: 0 errors (1 pre-existing TanStack Virtual warning). bunx tsc: no errors mentioning ConversationView. dev.log: clean tail.
+
+Stage Summary:
+- The protected "Pin User Message to Top / Scrolling Anchoring" behavior is back and verified numerically: the just-sent question pins to the viewport top (8px) and the view holds there while the answer streams below.
+- Root cause was a Phase 8.5 perf tweak, now reverted; CHANGELOG corrected honestly.
+- Guardrails added: in-code PROTECTED banner + RULES.md §15 (protected feature + forbidden placeholder-sizing/virtualization on chat wrappers + mandatory anchoring probe).

@@ -147,3 +147,28 @@ execution, and at least one evaluation case.
 - Errors surface actionable messages; silent catch blocks are prohibited.
 - `dev.log` is checked after every development session; runtime errors fixed
   before completion claims.
+
+## 15. Protected UX Features (never remove or alter)
+
+User-mandated features. Any phase, refactor, or perf pass that touches them
+must preserve the exact behavior and re-verify the listed probe before the
+phase may be reported complete.
+
+- **Pin User Message to Top / Scrolling Anchoring** (introduced Phase 8D+;
+  implementation: `src/features/workspace/chat/ConversationView.tsx`).
+  On send, the new user message anchors to the TOP of the viewport
+  (`offsetTop − 8px`) and the view HOLDS there (anchor-hold) while the answer
+  grows below it — the view never shifts on its own. Parts of the contract:
+  generation-spacer reservation when the document is too short, pre-paint
+  anchor on spacer growth, SILENT spacer collapse at terminal state (no
+  re-anchor jump), auto-follower stand-down while anchored, and instant-bottom
+  + anchor-context rebase on conversation switch.
+  - Message wrappers must keep REAL layout: `content-visibility:auto`,
+    `contain-intrinsic-size`, and row virtualization are FORBIDDEN on chat
+    message wrappers — placeholder heights corrupt the anchor math in long
+    conversations (this exact regression shipped in Phase 8.5 and was
+    reverted in hotfix 8.5.1).
+  - Acceptance probe (agent-browser): after a send in a long conversation,
+    `questionVisualY ≈ 8px`; during generation the scroll position does not
+    move; at terminal state no jump occurs; conversation switch opens at the
+    bottom instantly.
