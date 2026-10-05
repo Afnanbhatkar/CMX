@@ -1043,3 +1043,20 @@ Stage Summary:
 - The Search / Code / Agent / Loop shifter is now the user's RubberSegment with the EXACT rubber-band animation — stretching, squashing, gliding, draggable thumb — identical math to the provided source.
 - Keyboard shortcuts (Alt+1..4 / Alt+M) and clicks both animate the thumb; mode descriptions survive as native slot tooltips; a11y radiogroup/radio roles + arrow/Home/End keys preserved.
 - The mode value still serializes into every assistant run (verified mode:"code" end-to-end); no other controls were changed.
+
+---
+Task ID: phase-9.5-rubber-thumb-original-ui
+Agent: Z.ai Code (main)
+Task: User correction on phase-9.4 — "apply this rubber animation on the PREVIOUS component, not replace the full component." The Search / Code / Agent / Loop mode shifter must keep its EXACT previous UI (lucide icons, shadcn Tooltips with honest descriptions + Alt hints, compact pills, primary/15 active tint) and only gain the rubber-band shifter animation.
+
+Work Log:
+- Reverted the phase-9.4 replacement: deleted src/components/ui/rubber-segment.tsx; restored ModeDescriptor.icon + lucide imports (Search/Code2/Workflow/Repeat/LucideIcon) and the full previous ModeSegmented markup (radiogroup, per-slot Tooltip with description + Alt+N, original classNames, aria-labels).
+- Ported the user's RubberSegment spring engine INTO ModeSegmented (AIComposer.tsx), numerically identical (preset "periods": stretch 100, squash 3, speed 1, glide 75; same semi-implicit spring integrator, settle epsilon, dt clamp, substeps): the previous active pill (bg-primary/15, rounded-[5px]) is now an absolutely-positioned THUMB rendered BEHIND the buttons (buttons get `relative`, stay later in DOM so icons/labels paint above), animating translateX + width + scaleY squash exactly per the user's apply().
+- Behaviors kept from the user's component: pointer drag from the thumb with pointer-capture, 3px drag threshold, snap-to-nearest-slot on release with click-suppress timeout, clamp to first/last slot bounds, ResizeObserver re-measure, prefers-reduced-motion snap, Arrow/Home/End keyboard selection, track select-none + touchAction pan-y.
+- External sync: mode changes from Alt+1..4 / Alt+M glide the thumb via a guarded useEffect (no-ops when targets already match — clicks stay authoritative). SSR/pre-hydration pill: thumbReady state renders the CSS bg-primary/15 on the active button until the thumb snaps in after mount (same geometry → seamless swap, no flash).
+- Verification (Agent Browser): original structure confirmed (4 slots with icons + "… mode" aria-labels + thumb div); click Loop → 29 samples, 29 unique transforms, translateX 2px → 202.9px with 22 squash samples (scaleY < 1) — rubber glide + squash live on the original UI; Alt+M → 23 unique spring positions back to Search, aria-checked follows; zoomed screenshot shows the EXACT previous look (icons, primary/15 pill with primary text on Code, dark track + border); golden-path run in Code mode → dev.log "assistant run completed" with "mode":"code", reply visible; 0 page errors, console clean.
+- bun run lint: 0 errors (1 pre-existing TanStack Virtual warning); tsc --noEmit: no errors in touched files; standalone RubberSegment file removed (no dead code).
+
+Stage Summary:
+- The mode shifter is the PREVIOUS component UI — 1:1 (icons, tooltips, pills, colors, a11y) — now with the user's exact rubber-band shifter animation as the active-state highlight: it stretches, squashes, glides, and is draggable between Search / Code / Agent / Loop.
+- Clicks, drag-release, Alt shortcuts, and arrow keys all drive the same physics; the mode value still serializes into every assistant run (verified end-to-end with mode:"code").

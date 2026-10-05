@@ -7,9 +7,9 @@
  *
  * Phase 8A contract implemented here:
  * - Four REAL modes (Search / Code / Agent / Loop) selected through a
- *   rubber-band segmented control (RubberSegment: spring-physics thumb with
- *   stretch/squash/glide, draggable) integrated INTO the text input (not
- *   four dashboard cards) and serialized on every request (typed contract).
+ *   segmented control with a rubber-band physics thumb (stretch / squash /
+ *   glide, draggable) integrated INTO the text input (not four dashboard
+ *   cards) and serialized on every request (typed backend contract).
  * - Multiline input; send / stop / cancel / regenerate.
  * - Attachments render BELOW the text field; repository-file attachments
  *   come from the REAL workspace tree and open through the shared
@@ -31,23 +31,30 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   Braces,
   Check,
   ChevronsUpDown,
+  Code2,
   FileCode2,
   Layers,
   Loader2,
   Paperclip,
+  Repeat,
   RotateCcw,
+  Search,
   SendHorizontal,
   Square,
+  Workflow,
   X,
+  type LucideIcon,
 } from "lucide-react";
 
 import { selectActiveConversation, useWorkspaceStore } from "@/stores/workspace-store";
@@ -58,7 +65,6 @@ import type { ComposerMode } from "@/features/workspace/assistant/contracts";
 import { useRepositoryMeta } from "@/features/workspace/use-repository-meta";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
 import type { RepoTreeNode } from "@/features/workspace/types";
-import RubberSegment from "@/components/ui/rubber-segment";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
@@ -81,7 +87,8 @@ const FILES_TTL_MS = 60_000;
 interface ModeDescriptor {
   id: ComposerMode;
   label: string;
-  /** One-line honest contract (slot tooltip). */
+  icon: LucideIcon;
+  /** One-line honest contract (tooltip). */
   description: string;
 }
 
@@ -89,21 +96,25 @@ const MODES: ModeDescriptor[] = [
   {
     id: "search",
     label: "Search",
+    icon: Search,
     description: "Query / retrieval task — ask about the repository.",
   },
   {
     id: "code",
     label: "Code",
+    icon: Code2,
     description: "Propose an implementation or change (nothing is written).",
   },
   {
     id: "agent",
     label: "Agent",
+    icon: Workflow,
     description: "Controlled multi-step plan — single-turn until the execution engine lands.",
   },
   {
     id: "loop",
     label: "Loop",
+    icon: Repeat,
     description: "Autonomous controlled loop — not connected yet; runs single-turn and says so.",
   },
 ];
@@ -143,12 +154,17 @@ function parseSelectionLabel(
 }
 
 /* ------------------------------------------------------------------ */
-/* Mode segmented control — rubber-band physics thumb (RubberSegment)  */
-/* integrated into the input surface. Same items + honest tooltips as  */
-/* before; the thumb now stretches, squashes and glides between modes  */
-/* and is draggable. Alt+1..4 / Alt+M stay in sync via controlled      */
-/* `value` (external changes animate the thumb with the same physics). */
+/* Mode segmented control — the ORIGINAL composer UI (icons + honest   */
+/* tooltips + compact pills) now driven by the user's RubberSegment    */
+/* spring engine: the active pill became a physics THUMB that          */
+/* stretches, squashes and glides between modes. Pointer-draggable;    */
+/* Alt+1..4 / Alt+M animate it too; prefers-reduced-motion snaps.      */
 /* ------------------------------------------------------------------ */
+
+/** Rubber preset "periods" — the user-provided default feel. */
+const RUBBER = { stretch: 100, squash: 3, speed: 1, glide: 75 };
+
+const useIso = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 function ModeSegmented({
   mode,
@@ -157,25 +173,243 @@ function ModeSegmented({
   mode: ComposerMode;
   onChange: (mode: ComposerMode) => void;
 }) {
-  const items = MODES.map((descriptor) => descriptor.label);
-  const activeIndex = Math.max(0, MODES.findIndex((descriptor) => descriptor.id === mode));
-  const activeItem = items[activeIndex] ?? items[0] ?? "Search";
+  const index = Math.max(0, MODES.findIndex((descriptor) => descriptor.id === mode));
+  const idxRef = useRef(index);
+  idxRef.current = index;
+
+  /* SSR/pre-hydration: the active pill renders as a plain CSS background on
+     the active button; after mount the thumb snaps into the same spot and
+     takes over (same geometry — seamless swap, no flash). */
+  const [thumbReady, setThumbReady] = useState(false);
+
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const thumbRef = useRef<HTMLDivElement | null>(null);
+  const slotsRef = useRef<(HTMLButtonElement | null)[]>([]);
+  const simRef = useRef({
+    L: 0, R: 0, vL: 0, vR: 0, tL: 0, tR: 0, raf: 0, last: 0,
+    pending: false, drag: false, suppress: false, startX: 0, grab: 0,
+  });
+
+  const apply = () => {
+    const s = simRef.current;
+    const th = thumbRef.current;
+    if (!th) return;
+    const baseW = Math.max(1, s.tR - s.tL);
+    const w = Math.max(baseW * 0.4, s.R - s.L);
+    const grow = Math.max(0, w / baseW - 1);
+    const H = th.offsetHeight || 1;
+    const sy = 1 - (RUBBER.squash * Math.min(1.5, grow * 2.5)) / H;   // rubber squash
+    th.style.width = `${w}px`;
+    th.style.transform = `translateX(${s.L}px) scaleY(${sy})`;
+  };
+
+  const setTargets = (i: number) => {
+    const b = slotsRef.current[i];
+    if (!b) return;
+    simRef.current.tL = b.offsetLeft;
+    simRef.current.tR = b.offsetLeft + b.offsetWidth;
+  };
+
+  const snap = () => {
+    const s = simRef.current;
+    s.L = s.tL; s.R = s.tR; s.vL = s.vR = 0;
+    apply();
+  };
+
+  const step = (now: number) => {
+    const s = simRef.current;
+    const dt = Math.min(0.05, (now - s.last) / 1000);
+    s.last = now;
+    const dir = Math.sign((s.tL + s.tR) / 2 - (s.L + s.R) / 2);
+    const omega = 14 * RUBBER.speed;
+    const zeta = 1 - 0.55 * (RUBBER.glide / 100);                 // 1 (no bounce) to 0.45 (bouncy)
+    const ratio = 1 / (1 + (RUBBER.stretch / 100) * 1.4);          // trailing edge is softer: the rubber stretch
+    const kL = omega * omega * (dir > 0 ? ratio : 1);
+    const kR = omega * omega * (dir < 0 ? ratio : 1);
+    const n = Math.max(1, Math.ceil(dt * 240)), h = dt / n;
+    for (let i = 0; i < n; i++) {
+      s.vL += (kL * (s.tL - s.L) - 2 * zeta * Math.sqrt(kL) * s.vL) * h;
+      s.vR += (kR * (s.tR - s.R) - 2 * zeta * Math.sqrt(kR) * s.vR) * h;
+      s.L += s.vL * h;
+      s.R += s.vR * h;
+    }
+    const settled =
+      Math.abs(s.tL - s.L) < 0.05 && Math.abs(s.tR - s.R) < 0.05 && Math.abs(s.vL) < 0.05 && Math.abs(s.vR) < 0.05;
+    if (settled && !s.drag) { snap(); s.raf = 0; return; }
+    apply();
+    s.raf = requestAnimationFrame(step);
+  };
+
+  const reducedMotion = () =>
+    typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const kick = () => {
+    const s = simRef.current;
+    if (reducedMotion()) { snap(); return; }
+    if (!s.raf) { s.last = performance.now(); s.raf = requestAnimationFrame(step); }
+  };
+
+  const select = (i: number) => {
+    if (i < 0 || i >= MODES.length) return;
+    setTargets(i);
+    kick();
+    if (i !== idxRef.current) {
+      idxRef.current = i;
+      const descriptor = MODES[i];
+      if (descriptor) onChange(descriptor.id);
+    }
+  };
+
+  /* Measure + keep the thumb aligned through resizes. */
+  useIso(() => {
+    const tr = trackRef.current;
+    if (!tr) return;
+    const measure = () => { setTargets(idxRef.current); snap(); };
+    measure();
+    setThumbReady(true);
+    const ro = new ResizeObserver(measure);
+    ro.observe(tr);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(simRef.current.raf);
+      simRef.current.raf = 0;
+    };
+  }, []);
+
+  /* External mode changes (Alt+1..4 / Alt+M) glide the thumb too. Clicks
+     already set the same targets — this no-ops for them. */
+  useEffect(() => {
+    const s = simRef.current;
+    const b = slotsRef.current[index];
+    if (!b) return;
+    const tL = b.offsetLeft;
+    const tR = tL + b.offsetWidth;
+    if (s.tL === tL && s.tR === tR) return;
+    setTargets(index);
+    kick();
+  }, [index]);
+
+  const nearest = (center: number) => {
+    let best = 0, bd = Infinity;
+    slotsRef.current.forEach((b, i) => {
+      if (!b) return;
+      const d = Math.abs(b.offsetLeft + b.offsetWidth / 2 - center);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  };
+
+  const onPointerDown = (e: ReactPointerEvent) => {
+    const tr = trackRef.current;
+    if (e.button !== 0 || !tr) return;
+    const s = simRef.current;
+    const x = e.clientX - tr.getBoundingClientRect().left;
+    if (x < s.L || x > s.R) return;                           // drag starts on the thumb only
+    s.pending = true; s.drag = false; s.startX = e.clientX;
+    s.grab = x - (s.L + s.R) / 2;
+  };
+
+  const onPointerMove = (e: ReactPointerEvent) => {
+    const s = simRef.current, tr = trackRef.current;
+    if (!s.pending || !tr) return;
+    if (!s.drag && Math.abs(e.clientX - s.startX) > 3) {
+      s.drag = true;
+      tr.setPointerCapture(e.pointerId);
+    }
+    if (!s.drag) return;
+    const first = slotsRef.current[0], last = slotsRef.current[MODES.length - 1], cur = slotsRef.current[idxRef.current];
+    if (!first || !last || !cur) return;
+    const w = cur.offsetWidth;
+    const x = e.clientX - tr.getBoundingClientRect().left - s.grab;
+    const minL = first.offsetLeft, maxR = last.offsetLeft + last.offsetWidth;
+    s.tL = Math.min(Math.max(x - w / 2, minL), maxR - w);
+    s.tR = s.tL + w;
+    kick();
+  };
+
+  const endDrag = (e: ReactPointerEvent, cancelled: boolean) => {
+    const s = simRef.current, tr = trackRef.current;
+    if (!s.pending) return;
+    const wasDrag = s.drag;
+    s.pending = false; s.drag = false;
+    if (!wasDrag) return;                                      // plain click is handled by the button
+    if (tr?.hasPointerCapture(e.pointerId)) tr.releasePointerCapture(e.pointerId);
+    s.suppress = true;
+    setTimeout(() => { s.suppress = false; }, 0);
+    select(cancelled ? idxRef.current : nearest((s.tL + s.tR) / 2));
+    setTargets(idxRef.current);
+    kick();
+  };
+
+  const onKeyDown = (e: ReactKeyboardEvent) => {
+    const k = e.key;
+    let n = idxRef.current;
+    if (k === "ArrowRight" || k === "ArrowDown") n = Math.min(MODES.length - 1, n + 1);
+    else if (k === "ArrowLeft" || k === "ArrowUp") n = Math.max(0, n - 1);
+    else if (k === "Home") n = 0;
+    else if (k === "End") n = MODES.length - 1;
+    else return;
+    e.preventDefault();
+    select(n);
+    slotsRef.current[n]?.focus();
+  };
+
   return (
-    <RubberSegment
-      items={items}
-      defaultValue={activeItem}
-      value={activeItem}
-      ariaLabel="Composer mode"
-      itemTitles={MODES.map(
-        (descriptor) =>
-          `${descriptor.label} — ${descriptor.description} (Alt+${MODE_ORDER.indexOf(descriptor.id) + 1})`,
-      )}
-      onChange={(_value, index) => {
-        const descriptor = MODES[index];
-        if (descriptor) onChange(descriptor.id);
-      }}
-      size="sm"
-    />
+    <div
+      ref={trackRef}
+      role="radiogroup"
+      aria-label="Composer mode"
+      className="relative flex w-fit max-w-full select-none items-center gap-0.5 overflow-x-auto rounded-md border border-border-subtle bg-surface p-0.5"
+      style={{ touchAction: "pan-y" }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={(e) => endDrag(e, false)}
+      onPointerCancel={(e) => endDrag(e, true)}
+      onKeyDown={onKeyDown}
+    >
+      {/* Rubber thumb — the previous active pill (bg-primary/15, rounded-[5px]),
+          now spring-animated BEHIND the buttons (buttons are positioned + later
+          in DOM, so icons/labels paint above it). */}
+      <div
+        ref={thumbRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-y-0.5 left-0 w-0 rounded-[5px] bg-primary/15"
+        style={{ willChange: "transform,width", transformOrigin: "center" }}
+      />
+      {MODES.map((descriptor, i) => {
+        const active = i === index;
+        return (
+          <Tooltip key={descriptor.id}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={active}
+                aria-label={`${descriptor.label} mode`}
+                ref={(el) => { slotsRef.current[i] = el; }}
+                onClick={() => { if (!simRef.current.suppress) select(i); }}
+                className={cn(
+                  "relative flex shrink-0 items-center gap-1 rounded-[5px] px-2 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  active
+                    ? cn(!thumbReady && "bg-primary/15", "text-primary")
+                    : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
+                )}
+              >
+                <descriptor.icon aria-hidden="true" className="size-3" />
+                <span>{descriptor.label}</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-56">
+              <p className="font-medium">{descriptor.label}</p>
+              <p className="text-[11px] text-muted-foreground">{descriptor.description}</p>
+              <p className="mt-1 text-[10px] text-muted-foreground/70">
+                Alt+{MODE_ORDER.indexOf(descriptor.id) + 1}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </div>
   );
 }
 
