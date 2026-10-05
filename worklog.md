@@ -1026,3 +1026,20 @@ Stage Summary:
 - The Solving header now renders EXACTLY ONE orb — the user's reference library orb (solving/dark/classic/speed 1) — with the grey/black duplicate ball gone in all states (loading, live, cross-fade, teardown).
 - Root cause documented: the thinking-orbs library only accepts sizes {32, 64, 96, 128}; anything else throws post-append. Author at 64, display via CSS at the established 22px footprint — same pattern as the user's own snippet.
 - The Thinking ⇄ Solving in-place cross-fade (same 22px box, same label position) is preserved; ThinkingIndicator, WaitingIndicator, and the reduced-motion path are untouched.
+
+---
+Task ID: phase-9.4-rubber-mode-shifter
+Agent: Z.ai Code (main)
+Task: User provided their RubberSegment component (spring-physics segmented control — stretch/squash/glide thumb, draggable, keyboard + reduced-motion aware) and asked for "this exact same animation" on the Search / Code / Agent / Loop mode shifter in the AI composer.
+
+Work Log:
+- Target located: `ModeSegmented` in src/features/workspace/chat/AIComposer.tsx (the composer's four-mode control, previously a flat tinted-button row with shadcn Tooltips).
+- Vendored the user's component VERBATIM into src/components/ui/rubber-segment.tsx — spring integrator, periods/snappy/jelly/smooth presets, stretch/squash/glide math, drag-with-pointer-capture, overlay-label technique, ensureCss, reduced-motion snap: all byte-identical. Repo-mandated adjustments only: (1) "use client" directive; (2) ref renames per this repo's react-hooks/immutability rule (idx→idxRef, sim→simRef, cfg→cfgRef, slots→slotsRef — logic untouched); (3) three additive integration props that do not touch the animation: `value` (controlled sync — when mode changes OUTSIDE the control via Alt+1..4 / Alt+M, the thumb animates to the new slot with the same physics), `itemTitles` (native slot tooltips preserving the honest mode descriptions + Alt+N hints), `ariaLabel` ("Composer mode" radiogroup name).
+- AIComposer: ModeSegmented now renders RubberSegment (items Search/Code/Agent/Loop, size sm, default periods preset + default zinc/white colors = the user's exact look); removed the icon field + now-unused lucide imports (Code2/Search/Workflow/Repeat/LucideIcon); header comment updated.
+- Verification (Agent Browser): radiogroup renders with 4 slots + tooltips; click Loop → 29 sampled thumb transforms in ~1s, ALL unique (continuous spring, translateX 3px → 199px with scaleY(0.9947) mid-flight = squash active, glide settle); Alt+M dispatch → mode cycled Loop→Search with 23 unique spring positions (external sync animates, aria-checked follows); UI click Code → thumb to slot 2, aria-checked correct; control measured 267×36 above the textarea, fits the composer row; zoomed screenshot confirms the user's exact look (dark zinc track, white pill thumb, dark active label); golden path re-run in Code mode → dev.log shows assistant run completed with "mode":"code" and reply visible; 0 page errors, console clean.
+- bun run lint: 0 errors (1 pre-existing TanStack Virtual warning); tsc --noEmit: no errors in touched files; dev.log clean (two transient Fast-Refresh full reloads occurred only mid-edit during development, followed by successful compiles).
+
+Stage Summary:
+- The Search / Code / Agent / Loop shifter is now the user's RubberSegment with the EXACT rubber-band animation — stretching, squashing, gliding, draggable thumb — identical math to the provided source.
+- Keyboard shortcuts (Alt+1..4 / Alt+M) and clicks both animate the thumb; mode descriptions survive as native slot tooltips; a11y radiogroup/radio roles + arrow/Home/End keys preserved.
+- The mode value still serializes into every assistant run (verified mode:"code" end-to-end); no other controls were changed.

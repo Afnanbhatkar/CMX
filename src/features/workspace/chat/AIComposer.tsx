@@ -7,8 +7,9 @@
  *
  * Phase 8A contract implemented here:
  * - Four REAL modes (Search / Code / Agent / Loop) selected through a
- *   segmented control integrated INTO the text input (not four dashboard
- *   cards) and serialized on every request (typed backend contract).
+ *   rubber-band segmented control (RubberSegment: spring-physics thumb with
+ *   stretch/squash/glide, draggable) integrated INTO the text input (not
+ *   four dashboard cards) and serialized on every request (typed contract).
  * - Multiline input; send / stop / cancel / regenerate.
  * - Attachments render BELOW the text field; repository-file attachments
  *   come from the REAL workspace tree and open through the shared
@@ -39,19 +40,14 @@ import {
   Braces,
   Check,
   ChevronsUpDown,
-  Code2,
   FileCode2,
   Layers,
   Loader2,
   Paperclip,
-  Repeat,
   RotateCcw,
-  Search,
   SendHorizontal,
   Square,
-  Workflow,
   X,
-  type LucideIcon,
 } from "lucide-react";
 
 import { selectActiveConversation, useWorkspaceStore } from "@/stores/workspace-store";
@@ -62,6 +58,7 @@ import type { ComposerMode } from "@/features/workspace/assistant/contracts";
 import { useRepositoryMeta } from "@/features/workspace/use-repository-meta";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
 import type { RepoTreeNode } from "@/features/workspace/types";
+import RubberSegment from "@/components/ui/rubber-segment";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
@@ -84,8 +81,7 @@ const FILES_TTL_MS = 60_000;
 interface ModeDescriptor {
   id: ComposerMode;
   label: string;
-  icon: LucideIcon;
-  /** One-line honest contract (tooltip). */
+  /** One-line honest contract (slot tooltip). */
   description: string;
 }
 
@@ -93,25 +89,21 @@ const MODES: ModeDescriptor[] = [
   {
     id: "search",
     label: "Search",
-    icon: Search,
     description: "Query / retrieval task — ask about the repository.",
   },
   {
     id: "code",
     label: "Code",
-    icon: Code2,
     description: "Propose an implementation or change (nothing is written).",
   },
   {
     id: "agent",
     label: "Agent",
-    icon: Workflow,
     description: "Controlled multi-step plan — single-turn until the execution engine lands.",
   },
   {
     id: "loop",
     label: "Loop",
-    icon: Repeat,
     description: "Autonomous controlled loop — not connected yet; runs single-turn and says so.",
   },
 ];
@@ -151,7 +143,11 @@ function parseSelectionLabel(
 }
 
 /* ------------------------------------------------------------------ */
-/* Mode segmented control — integrated into the input surface          */
+/* Mode segmented control — rubber-band physics thumb (RubberSegment)  */
+/* integrated into the input surface. Same items + honest tooltips as  */
+/* before; the thumb now stretches, squashes and glides between modes  */
+/* and is draggable. Alt+1..4 / Alt+M stay in sync via controlled      */
+/* `value` (external changes animate the thumb with the same physics). */
 /* ------------------------------------------------------------------ */
 
 function ModeSegmented({
@@ -161,45 +157,25 @@ function ModeSegmented({
   mode: ComposerMode;
   onChange: (mode: ComposerMode) => void;
 }) {
+  const items = MODES.map((descriptor) => descriptor.label);
+  const activeIndex = Math.max(0, MODES.findIndex((descriptor) => descriptor.id === mode));
+  const activeItem = items[activeIndex] ?? items[0] ?? "Search";
   return (
-    <div
-      role="radiogroup"
-      aria-label="Composer mode"
-      className="flex w-fit max-w-full items-center gap-0.5 overflow-x-auto rounded-md border border-border-subtle bg-surface p-0.5"
-    >
-      {MODES.map((descriptor) => {
-        const active = descriptor.id === mode;
-        return (
-          <Tooltip key={descriptor.id}>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={active}
-                aria-label={`${descriptor.label} mode`}
-                onClick={() => onChange(descriptor.id)}
-                className={cn(
-                  "flex shrink-0 items-center gap-1 rounded-[5px] px-2 py-0.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                  active
-                    ? "bg-primary/15 text-primary"
-                    : "text-muted-foreground hover:bg-surface-hover hover:text-foreground",
-                )}
-              >
-                <descriptor.icon aria-hidden="true" className="size-3" />
-                <span>{descriptor.label}</span>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-56">
-              <p className="font-medium">{descriptor.label}</p>
-              <p className="text-[11px] text-muted-foreground">{descriptor.description}</p>
-              <p className="mt-1 text-[10px] text-muted-foreground/70">
-                Alt+{MODE_ORDER.indexOf(descriptor.id) + 1}
-              </p>
-            </TooltipContent>
-          </Tooltip>
-        );
-      })}
-    </div>
+    <RubberSegment
+      items={items}
+      defaultValue={activeItem}
+      value={activeItem}
+      ariaLabel="Composer mode"
+      itemTitles={MODES.map(
+        (descriptor) =>
+          `${descriptor.label} — ${descriptor.description} (Alt+${MODE_ORDER.indexOf(descriptor.id) + 1})`,
+      )}
+      onChange={(_value, index) => {
+        const descriptor = MODES[index];
+        if (descriptor) onChange(descriptor.id);
+      }}
+      size="sm"
+    />
   );
 }
 
