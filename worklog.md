@@ -1137,3 +1137,25 @@ Work Log:
 Stage Summary:
 - The editor is now AI-native end-to-end: ghost-text completion with full context, deterministic Tab/word-accept/cancel/cache/retry, stale-proof cancellation, Ctrl+K inline edit with a real inline diff and a true shadow buffer, and a Hinglish hover explanation — all through the LLM Gateway with measured, honestly-reported latency (no claimed 300 ms).
 - Non-goals respected: no multi-file live editing, no autonomous Loop, no CodeLens overlays. Phase 9 NOT started.
+
+---
+Task ID: baseline-working-file4
+Agent: Z.ai Code (main)
+Task: Import the user-uploaded "Codemindx working file4.tar" as the new project baseline ("is project ko baseline lo, acche extract karo, fir is par aage kaam karenge").
+
+Work Log:
+- Inspected the uploaded tar: 21.7 MB, 2262 entries, a FULL project snapshot including its own `.git/` (no node_modules/.next/db). Extracted to /tmp/cmx-f4 and audited.
+- Lineage finding: the tar's git HEAD is 17c5a16 = exactly `codemind-v2/phase-08.75-inline-ai`, with a CLEAN worktree (0 uncommitted changes) — i.e. the tar is a byte-exact snapshot of the project at the Phase 8.75 tag. Its history is shared with this repo (17c5a16 is an ancestor of the previous HEAD 1530c1e).
+- Delta audit before import: only 3 source files differed (chain-pacer.ts, answer-pacer.ts, use-assistant-run.ts — the post-8.75 chain experiments), plus RULES.md/worklog.md additions from those commits. package.json, bun.lock, prisma/schema.prisma and .env were IDENTICAL; full-tree diff showed only sandbox-infra dirs (.zscripts, skills, tool-results, next-env.d.ts) that are not part of the project.
+- Safety: created /home/z/backup-pre-working-file4.bundle (full git bundle, all refs) and tag `codemind-v2/archive-chain-experiments` on 1530c1e so the discarded chain-experiment commits stay reachable by name.
+- Stopped the dev server, then `git reset --hard 17c5a16` — the worktree now matches the tar byte-for-byte (verified: `diff -rq` project vs extracted tar, excluding sandbox infra, exit 0 / zero diffs). Sandbox infra (node_modules, .next, db/, upload/, dev.log) untouched.
+- bun install: 976 packages, no changes needed (package.json + bun.lock identical). Prisma schema unchanged → no db push needed; existing db preserved.
+- Dev server restarted: Ready in 2.3s, GET / 200. Lint: 0 errors (1 pre-existing TanStack Virtual warning).
+- Browser E2E on the baseline (real gateway run, glm-4-plus): landing page renders → Workspace → Assistant → sent "What does this project do? Answer in one short sentence." → AI run: thinking → chain revealed one-by-one (Understanding the request → Searching repository 14 results → Read 14 files with real paths → Preparing response 740ms → Verifying 9 verified · 1 unknown) → chain collapsed to "Worked for 6 seconds, show details" → answer rendered through Response Engine V2 (EXPLAIN / TL;DR / Flow / Key files / Gotchas, TL;DR text correct). Zero page errors, zero console errors.
+- Honest note (flagged to user): this baseline snapshot CONTAINS the c5112dc-era chain-pacer (compressPending/firstChunkReleaseAt present). Per the user's standing directive, the chain behavior was NOT touched during the import — the baseline is installed verbatim. RULES.md §15 now carries the thought-chain freeze as a protected feature so no future phase alters it without an explicit user instruction. The archived direct-collapse variants remain reachable via `codemind-v2/archive-chain-experiments` if the user ever asks for them.
+- Governance carried forward: RULES.md §15 gained the "Thought Chain — behavior frozen at the working-file4 baseline" entry (user mandate); this worklog entry appended.
+
+Stage Summary:
+- NEW BASELINE = 17c5a16 (phase-08.75-inline-ai), installed byte-identically to the user's working file4 tar, verified running end-to-end with zero errors. Backup bundle: /home/z/backup-pre-working-file4.bundle; discarded experiments archived at tag `codemind-v2/archive-chain-experiments`.
+- All Phase 8/8.5/8.75 features (anchoring, response engine, inline AI, chain) are present in their 8.75-era form. Phase 9 (Multi-Agent Orchestrator V2) NOT started — queued as the next phase on this baseline, per the user's plan ("fir is par aage kaam karenge").
+

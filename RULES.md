@@ -172,3 +172,12 @@ phase may be reported complete.
     `questionVisualY ≈ 8px`; during generation the scroll position does not
     move; at terminal state no jump occurs; conversation switch opens at the
     bottom instantly.
+- **Thought Chain — behavior frozen at the working-file4 baseline**
+  (`src/features/workspace/chat/activity/chain-pacer.ts`,
+  `answer-pacer.ts`, `src/features/workspace/chat/use-assistant-run.ts`).
+  Standing user directive (re-issued across sessions, most recently during the
+  working-file4 baseline import): the thought chain's pacing, reveal and
+  collapse behavior must NOT be changed by any phase, hotfix, or refactor
+  without an explicit new user instruction for that exact change. The baseline
+  state of these three files is the reference; read them before any work that
+  comes near the chat activity pipeline.
