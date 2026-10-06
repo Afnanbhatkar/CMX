@@ -210,3 +210,33 @@ phase may be reported complete.
   else about the chain (pacing, one-by-one reveal rhythm) stays frozen per
   the baseline rule above. Never change without an explicit new user
   instruction.
+- **Thought Chain Working Phase — the AI response starts ONLY after the
+  chain fully closes** (user mandate, this session; the user named the
+  whole send→scroll→chain→close→answer choreography the
+  "Thought Chain Working Phase" and ordered it stored here and never
+  changed until they say so; explicit authorization to touch the frozen
+  chain for THIS exact change; implementation: `use-assistant-run.ts` +
+  `chat/activity/chain-close-gate.ts` (new) + the `ActivityChain.tsx`
+  close machine).
+  The complete mandated sequence for every assistant run is:
+  1. send → smooth scroll to the pinned question ("Scroll on Message
+     Send", above); the chain starts only on arrival;
+  2. the chain reveals one-by-one (frozen baseline pacing);
+  3. the last row completes → 1.5s loader on that row ("Thought Chain
+     Close", above);
+  4. the loader ends → the chain closes FULLY in one shot;
+  5. and ONLY NOW the AI response starts — never during the story, never
+     during the 1.5s loader, never during the close itself.
+  Mechanism: the first streamed answer chunk is buffered honestly (real
+  received text, never invented) and `ActivityChain`'s close machine
+  releases `chain-close-gate` at the exact fullClose moment
+  (`setFullClose(true)`); `use-assistant-run` holds the buffer until that
+  release, then begins the word-by-word reveal with the frozen
+  answer-pacer rhythm (answer-pacer.ts untouched). The wait is
+  safety-bounded at 2.5s so an unmounted/hidden view can never stall a
+  real answer. Errors, stops and empty responses stay blunt and immediate
+  (never gated). Acceptance probe (agent-browser): during the loader
+  window the assistant message shows NO answer text; the first answer
+  content appears only at/after the frame where the chain collapses
+  (`data-full-close="true"`). Never change without an explicit new user
+  instruction.

@@ -46,6 +46,7 @@ import { editorNavigation } from "@/features/workspace/editor-navigation";
 import type { ChatActivityStep } from "@/features/workspace/types";
 import { formatActiveDuration } from "@/features/workspace/chat/activity/duration";
 import { snapshotFromPersistedChain } from "@/features/workspace/chat/activity/run-activity-store";
+import { releaseChainCloseGate, logChainGate } from "@/features/workspace/chat/activity/chain-close-gate";
 import { useRunActivity } from "@/features/workspace/chat/activity/use-run-activity";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { SolvingIndicator, WaitingIndicator } from "./SolvingIndicator";
@@ -387,25 +388,48 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
   const [closingLoader, setClosingLoader] = useState(false);
   /** Loader ended → FULL one-shot close (CSS transition disabled). */
   const [fullClose, setFullClose] = useState(false);
-  /** Loader only on the LIVE active→final transition, never on history. */
-  const wasActiveRef = useRef(active);
-  useEffect(() => {
-    const was = wasActiveRef.current;
-    wasActiveRef.current = active;
+  /* Transition detection — the sanctioned render-phase adjustment pattern
+   * ("You might not need an effect"): the previous `active` value lives in
+   * state, and flipping it here schedules the close machine's state changes
+   * during render. A mount that is ALREADY final (history) initializes
+   * prevActive to false → no transition → no loader, exactly as mandated.
+   * (The previous effect-based version tripped the react-hooks
+   * "setState synchronously within an effect" rule after a lint toolchain
+   * update; behavior is identical — same transitions, same 1.5s timer.) */
+  const [prevActive, setPrevActive] = useState(active);
+  if (prevActive !== active) {
+    setPrevActive(active);
     if (active) {
       // A new active phase — reset the close machine.
       setClosingLoader(false);
       setFullClose(false);
-      return;
+    } else {
+      // LIVE active→final transition — the mandated loader phase begins.
+      setClosingLoader(true);
     }
-    if (!was) return; // mounted already-final (history) — no loader
-    setClosingLoader(true);
+  }
+  /* The loader's 1.5s timer is the effect's external-system work; the state
+   * changes inside its callback are async (allowed). It arms only after the
+   * render-phase adjustment above set closingLoader, and the cleanup keeps
+   * the close tied to this exact loader phase. */
+  useEffect(() => {
+    if (!closingLoader) return;
+    logChainGate("loader-start");
     const timer = setTimeout(() => {
       setClosingLoader(false);
       setFullClose(true); // FULL close — one shot, no animation
+      logChainGate("full-close");
+      /* USER MANDATE (RULES.md §15 "Thought Chain Working Phase"): the AI
+       * response starts ONLY now — after the loader ended and the chain has
+       * fully closed. Release the gate use-assistant-run holds the buffered
+       * answer on. No-op when nothing is armed (history/error paths). */
+      releaseChainCloseGate();
     }, CHAIN_CLOSE_LOADER_MS);
-    return () => clearTimeout(timer);
-  }, [active]);
+    return () => {
+      clearTimeout(timer);
+      logChainGate("loader-cleanup");
+    };
+  }, [closingLoader]);
 
   // Minimal runs never auto-open: the user's click is the ONLY opener.
   // The loader phase keeps the timeline open until the full close fires.

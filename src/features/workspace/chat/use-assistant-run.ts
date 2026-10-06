@@ -58,6 +58,12 @@ import {
 } from "./activity/run-activity-store";
 import { createChainPacer } from "./activity/chain-pacer";
 import { createAnswerPacer } from "./activity/answer-pacer";
+import {
+  armChainCloseGate,
+  logChainGate,
+  resetChainCloseGate,
+  waitForChainFullyClosed,
+} from "./activity/chain-close-gate";
 
 /* Verification tooling (window.__cmxAssistant, read-only observation). */
 exposeAssistantTooling();
@@ -312,8 +318,21 @@ export function useAssistantRun(): AssistantRun {
        * thought chain completes — streamed deltas are buffered honestly
        * until the chain pacer releases the first chunk (the chain-close
        * moment, right as "Thought for Xs" lands), then the reveal begins.
-       * Nothing is invented: the buffer only ever holds real received text. */
+       * Nothing is invented: the buffer only ever holds real received text.
+       *
+       * Phase 9.2 GATE (user mandate, RULES.md §15 "Thought Chain Working
+       * Phase"): the response starts ONLY after the chain has FULLY closed —
+       * the last row's 1.5s loader ended AND the one-shot close landed. The
+       * close machine in ActivityChain releases chain-close-gate at exactly
+       * that moment; until then the real text stays buffered (never shown
+       * early), then reveals word-by-word with the frozen answer rhythm.
+       * Errors, stops and empty responses stay blunt and immediate. */
       let answerRevealStarted = false;
+      /** startAnswerReveal armed the chain-close wait (runs at most once). */
+      let revealWaitStarted = false;
+      /** A terminal error/stop path flushed everything — a late gate release
+       * must never feed the pacer after that. */
+      let terminalFlushed = false;
       let answerBuffer = "";
       let deferredSyncFull: string | null = null;
       let pendingDrain: (() => void) | null = null;
@@ -326,9 +345,10 @@ export function useAssistantRun(): AssistantRun {
         });
       });
 
-      /** The chain finished → start revealing the buffered real answer. */
-      const startAnswerReveal = (): void => {
-        if (answerRevealStarted) return;
+      /** Feed the buffered real answer into the pacer + settle the drain. */
+      const beginAnswerReveal = (): void => {
+        logChainGate("answer-begin", answerBuffer.length);
+        if (answerRevealStarted || terminalFlushed) return;
         answerRevealStarted = true;
         if (answerBuffer) answerPacer.push(answerBuffer);
         answerBuffer = "";
@@ -341,6 +361,20 @@ export function useAssistantRun(): AssistantRun {
         if (drain) answerPacer.drain(drain);
       };
 
+      /**
+       * The chain story released its first chunk → hold the buffered answer
+       * until the chain has FULLY closed (9.2 mandate: loader ended + one-
+       * shot close — ActivityChain releases the gate at that exact moment),
+       * then start the reveal. Bounded wait: a missing/unmounted view can
+       * never stall a real answer.
+       */
+      const startAnswerReveal = (): void => {
+        if (answerRevealStarted || revealWaitStarted) return;
+        revealWaitStarted = true;
+        armChainCloseGate();
+        void waitForChainFullyClosed().then(beginAnswerReveal);
+      };
+
       const chainPacer = createChainPacer({ onAnswerReady: startAnswerReveal });
 
       /** Drain AFTER the reveal has started (terminal states). */
@@ -349,16 +383,12 @@ export function useAssistantRun(): AssistantRun {
           answerPacer.drain(onDone);
           return;
         }
-        if (sawAnswerChunk) {
-          // The chain story is still playing — the reveal (and this drain)
-          // starts the moment the chain releases the first chunk.
-          pendingDrain = onDone;
-          return;
-        }
-        // Defensive: no chunk ever arrived — nothing to reveal; settle now
-        // (drain fires immediately on an empty buffer, never hangs).
+        // The reveal is gated on the chain's FULL close (9.2 mandate) — the
+        // terminal drain fires right after the gated reveal feeds the pacer
+        // (startAnswerReveal is idempotent; the chain pacer's onAnswerReady
+        // may arm the same wait first).
+        pendingDrain = onDone;
         startAnswerReveal();
-        answerPacer.drain(onDone);
       };
 
       /** Terminal chain export — persists the completed timeline (8D). */
@@ -553,6 +583,9 @@ export function useAssistantRun(): AssistantRun {
         if (errorMessage !== null) {
           // The engine already applied RUN_FAILED from the wire; mirror the
           // terminal state on the message with the backend's real error.
+          // Failures stay blunt and immediate — never gated on the close.
+          terminalFlushed = true;
+          resetChainCloseGate();
           chainPacer.flushAll();
           answerPacer.flushAll();
           persistActivityChain();
@@ -622,6 +655,8 @@ export function useAssistantRun(): AssistantRun {
           } else {
             const error =
               "The assistant returned an empty response.";
+            terminalFlushed = true;
+            resetChainCloseGate();
             if (!sawWireRunStart) {
               const localRunId = createRunId();
               runStarted(localRunId, conversationId);
@@ -655,7 +690,10 @@ export function useAssistantRun(): AssistantRun {
         if (isAbortError(error)) {
           // Client cancel: the run is honestly cancelled in the engine.
           // The answer stays EXACTLY as revealed — nothing received-but-hidden
-          // is flushed in after the user stopped.
+          // is flushed in after the user stopped. Cancels stay blunt and
+          // immediate — never gated on the chain close (9.2 hygiene).
+          terminalFlushed = true;
+          resetChainCloseGate();
           if (!sawWireRunStart) {
             const localRunId = createRunId();
             runStarted(localRunId, conversationId);
@@ -688,7 +726,10 @@ export function useAssistantRun(): AssistantRun {
               ? error.message
               : "The assistant service is unreachable right now.";
           // Unreachable service: the request may never have been read — no
-          // activity is fabricated, and the run fails honestly.
+          // activity is fabricated, and the run fails honestly. Failures
+          // stay blunt and immediate — never gated on the chain close.
+          terminalFlushed = true;
+          resetChainCloseGate();
           if (!sawWireRunStart) {
             const localRunId = createRunId();
             runStarted(localRunId, conversationId);
@@ -727,7 +768,17 @@ export function useAssistantRun(): AssistantRun {
         // success path) and the chain pacer may still hold the story tail;
         // the drain callbacks above flush + dispose both when finished.
         if (!chainPacer.isBusy()) chainPacer.dispose();
-        if (!answerPacer.isDraining()) answerPacer.dispose();
+        // 9.2 (chain-close gate): the answer pacer may also still be WAITING
+        // for the chain's full close — the reveal begins only AFTER the
+        // 1.5s loader + one-shot close, which lands long after this finally.
+        // Disposing here would silently drop the buffered real answer at the
+        // close moment (push/syncFull become no-ops and the terminal drain
+        // degenerates into an instant full-content write). Dispose only when
+        // no gated reveal is still owed — a terminal (error/stop) path has
+        // already reset the gate, so its reveal will never begin.
+        if ((!revealWaitStarted || terminalFlushed) && !answerPacer.isDraining()) {
+          answerPacer.dispose();
+        }
       }
     },
     [],

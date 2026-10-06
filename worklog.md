@@ -1200,3 +1200,23 @@ Work Log:
 
 Stage Summary:
 - Phase 9.1 COMPLETE: Scroll-on-Send with arrival-gated chain start + mandated chain close (1.5s last-row loader → full instant close) implemented, stored as RULES.md §15 protected features, and browser-verified frame-by-frame against the real gateway. Chain pacing/reveal, anchoring contract, response engine and all other protected surfaces untouched.
+
+---
+Task ID: phase-9.2-answer-after-chain-close
+Agent: Z.ai Code (main)
+Task: User mandate — the previous change is named "Thought Chain Working Phase"; ONE change inside it: after the 1.5s loader ends and the thought chain closes, ONLY THEN the AI response starts. Store the change in the Thought Chain Working Phase (RULES.md §15) and never change until the user says so.
+
+Work Log:
+- Confirmed Phase 9.1 (85eb097) already delivered scroll-on-send + chain close; this phase completes the mandated sequence's final gate.
+- Root-caused the old behavior: the chain pacer fired onAnswerReady at the first chunk's release — the SAME moment the 1.5s last-row loader started — so the word-by-word answer revealed DURING the mandated loader window (user: response must start only AFTER the close).
+- NEW `chat/activity/chain-close-gate.ts` (mirror of the send-scroll-gate handshake): arm/wait/release/reset, safety-bounded at 2.5s so a hidden/unmounted view can never stall a real answer; includes a read-only `window.__cmxChainGate` probe (same pattern as __cmxAssistant) logging arm/loader-start/full-close/release/answer-begin for permanent verification of the protected behavior.
+- `use-assistant-run.ts`: startAnswerReveal now arms the gate and holds the honestly-buffered real text until the close machine releases it (beginAnswerReveal feeds push/syncFull/drain); revealThenDrain attaches the terminal drain behind the same wait; error/stop/empty paths set terminalFlushed + resetChainCloseGate (failures stay blunt and immediate, never gated).
+- `ActivityChain.tsx` close machine: releases the gate at the exact fullClose moment (setFullClose(true) tick). Fixed a lint error that appeared at HEAD after a toolchain update (react-hooks "setState synchronously within an effect") by moving the transition detection to the sanctioned render-phase adjustment pattern (prevActive state) — behavior identical, verified by probe.
+- REAL BUG FOUND BY THE PROBE + FIXED: the run hook's finally block disposed the answer pacer while the reveal was still gate-held (isDraining() is false until the gate releases) — push/syncFull at the close moment became no-ops and the answer dumped in one frame, destroying the frozen word-by-word rhythm (this also explains the earlier anomalous run). Fix: dispose only when `(!revealWaitStarted || terminalFlushed)`.
+- Frozen surfaces respected: chain-pacer.ts and answer-pacer.ts byte-identical to the baseline (verified — pacing/reveal rhythm untouched); anchoring contract untouched.
+- E2E (agent-browser, real gateway glm-4-plus, sent from scrolled-to-top position): scroll-on-send intact (11 eased frames, questionVisualY lands exactly 8); probe: arm → loader-start (+77–146ms) → full-close (+1501ms — the mandated 1.5s) → release + answer-begin on the same ms; DOM: ZERO answer text during the story AND the entire loader window; first answer chars 126ms AFTER the close, growing word-by-word (3→13→22→…→247 → 1169 terminal); zero page errors; lint 0 errors (1 pre-existing baseline warning); tsc clean on touched files.
+- Gateway 429 rate limits hit during verification (runs 4–6) — degraded honestly (error state + error row in the chain; no fabricated answers); probe confirmed failed runs never gate (blunt immediate errors).
+- Stored as RULES.md §15 protected entry "Thought Chain Working Phase — the AI response starts ONLY after the chain fully closes" (umbrella naming per the user's words, never change until they say so); CHANGELOG Phase 9.2 entry.
+
+Stage Summary:
+- Phase 9.2 COMPLETE: the Thought Chain Working Phase sequence is now send → smooth scroll → chain starts on arrival → one-by-one reveal (frozen) → last row 1.5s loader → FULL one-shot close → ONLY THEN the AI response starts (word-by-word, frozen rhythm). Implemented via the new chain-close-gate handshake; a real gate-held-dispose bug was caught by the new probe and fixed; all frozen surfaces untouched; stored as a RULES.md §15 protected feature per the user's standing directive.

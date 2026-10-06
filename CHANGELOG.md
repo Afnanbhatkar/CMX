@@ -4,6 +4,57 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 9.2 — Thought Chain Working Phase: answer starts after the full close] — 2026-10-06
+
+### Added
+- **AI response starts ONLY after the chain fully closes** (user mandate,
+  stored RULES.md §15 "Thought Chain Working Phase"; the user named the full
+  send→scroll→chain→close→answer choreography and ordered it never changed
+  until they say so): previously the word-by-word answer reveal began at the
+  chain-close moment — i.e. DURING the mandated 1.5s last-row loader. Now
+  the first streamed chunk is buffered honestly (real received text, never
+  invented) until `ActivityChain`'s close machine fires the FULL one-shot
+  close (`setFullClose(true)`), which releases the new
+  `chat/activity/chain-close-gate.ts`; `use-assistant-run` then begins the
+  reveal with the frozen answer-pacer rhythm. Safety-bounded at 2.5s so an
+  unmounted/hidden view can never stall an answer; errors, stops and empty
+  responses stay blunt and immediate (never gated).
+- Full mandated run sequence now: send → smooth scroll to the pinned
+  question → chain starts only on arrival → one-by-one reveal (frozen
+  pacing) → last row completes → 1.5s loader → FULL one-shot close → THEN
+  the AI response starts.
+
+### Fixed
+- **Answer pacer prematurely disposed while the reveal was gate-held** (found
+  by the E2E gate probe): the run hook's `finally` block ran when the
+  transport ended — BEFORE the chain's 1.5s loader + full close — and saw
+  `isDraining() === false` (the drain is only invoked once the gate
+  releases), so it disposed the answer pacer. At the close moment the
+  buffered text's `push`/`syncFull` became no-ops and the terminal drain
+  degenerated into an instant full-content write, destroying the frozen
+  word-by-word reveal. The finally now disposes only when no gated reveal
+  is still owed (`(!revealWaitStarted || terminalFlushed)`).
+- `ActivityChain` close machine now uses the React-sanctioned render-phase
+  adjustment pattern (previous `active` value in state) instead of
+  synchronous setState inside an effect, which a lint toolchain update
+  started rejecting at HEAD. Behavior is identical: same transitions, same
+  1.5s loader timer, same full one-shot close, history views still skip the
+  loader.
+
+### Verification (probe)
+- New read-only `window.__cmxChainGate` probe (same pattern as
+  `__cmxAssistant`) logs arm → loader-start → full-close → release →
+  answer-begin from the source of truth. Measured on a real gateway run:
+  loader-start → full-close = **1501ms** (the mandated 1.5s); release and
+  answer-begin land on the same ms as the full close; the assistant message
+  shows ZERO answer text during the story and the entire loader window;
+  the first visible answer characters appear only after the close and grow
+  word-by-word (frozen rhythm).
+
+### Unchanged (protected)
+- `chain-pacer.ts` and `answer-pacer.ts` byte-identical to the frozen
+  baseline — pacing, reveal rhythm and anchoring untouched.
+
 ## [Phase 9.1 — Scroll on Send + Mandated Chain Close] — 2026-10-06
 
 ### Added
