@@ -34,6 +34,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAssistantRun } from "./use-assistant-run";
+import { releaseSendScrollGate } from "./activity/send-scroll-gate";
 import { ApprovalCardSlot } from "./ApprovalCardSlot";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ResponseView } from "./ResponseView";
@@ -434,7 +435,68 @@ const ANCHOR_SPACER_BUFFER_PX = 32;
  * tweak did exactly that, silently corrupting the anchor math in long
  * conversations; reverted in hotfix 8.5.1). Any change here requires
  * the browser probe: after a send, questionVisualY ≈ 8px.
+ *
+ * USER MANDATE (this session, stored in RULES.md §15):
+ * "Scroll on Message Send" — the send anchor is performed by a
+ * CONTROLLED smooth scroll (distance-tuned ≈320–650ms easeOutCubic
+ * rAF animation): fast, natural, ChatGPT-like. It is NEVER a jump to
+ * the absolute bottom and NEVER a hard cut, and it works even when
+ * the user was scrolled far up. The run — the thought chain with it —
+ * starts ONLY when this scroll has ARRIVED (send-scroll-gate):
+ *   send() arms the gate → this effect scrolls + releases on arrival
+ *   → runCompletion starts the chain. User wheel/touch input cancels
+ *   the animation (their scroll wins) and releases the gate.
  * ─────────────────────────────────────────────────────────────────── */
+
+/**
+ * Controlled smooth scroll for the send anchor (user mandate, RULES.md
+ * §15): distance-tuned ≈320–650ms easeOutCubic — fast, natural, and it
+ * NEVER targets the bottom; the new question lands pinned at the top.
+ * Real user input (wheel/touch) cancels the animation mid-flight — the
+ * user's scroll always wins. Returns the finish/cancel handle.
+ */
+function animateScrollerTo(
+  el: HTMLElement,
+  top: number,
+  onDone: () => void,
+): () => void {
+  const start = el.scrollTop;
+  const delta = top - start;
+  if (Math.abs(delta) < 1) {
+    onDone();
+    return () => {};
+  }
+  const distance = Math.abs(delta);
+  const duration = Math.min(650, Math.max(320, distance * 0.35));
+  const t0 = performance.now();
+  let raf = 0;
+  let finished = false;
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    cancelAnimationFrame(raf);
+    el.removeEventListener("wheel", finish);
+    el.removeEventListener("touchstart", finish);
+    onDone();
+  };
+  el.addEventListener("wheel", finish, { passive: true });
+  el.addEventListener("touchstart", finish, { passive: true });
+  const step = (now: number): void => {
+    if (finished) return;
+    if (!el.isConnected) {
+      // The view went away mid-flight — never keep mutating a dead node.
+      finish();
+      return;
+    }
+    const progress = Math.min(1, (now - t0) / duration);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    el.scrollTop = start + delta * eased;
+    if (progress < 1) raf = requestAnimationFrame(step);
+    else finish();
+  };
+  raf = requestAnimationFrame(step);
+  return finish;
+}
 
 /**
  * Native scroll host (deliberately NOT Radix ScrollArea): the Radix
@@ -550,6 +612,10 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
    * generation spacer is reserved below so the anchor lands exactly; the
    * spacer collapses (scroll-compensated) once the run finishes. History
    * on mount/conversation-switch never anchors.
+   *
+   * User mandate (RULES.md §15): the anchor scroll is CONTROLLED and
+   * SMOOTH (never a bottom jump, never a hard cut) and the send-scroll
+   * gate is released on arrival — the thought chain starts only then.
    */
   useEffect(() => {
     const previous = prevCountRef.current;
@@ -578,10 +644,12 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
     if (target <= maxScroll) {
       // Enough room below already — anchor directly, no spacer needed.
       pendingAnchorTargetRef.current = null;
-      scroller.scrollTo({
-        top: target,
-        behavior: prefersReduced ? "auto" : "smooth",
-      });
+      if (prefersReduced) {
+        scroller.scrollTop = target;
+        releaseSendScrollGate();
+        return;
+      }
+      animateScrollerTo(scroller, target, releaseSendScrollGate);
       return;
     }
     // Reserve the missing room, then anchor once it exists (layout effect).
@@ -605,10 +673,12 @@ export function ConversationView({ conversationId }: ConversationViewProps) {
     const target = pendingAnchorTargetRef.current;
     if (target === null) return;
     pendingAnchorTargetRef.current = null;
-    el.scrollTo({
-      top: target,
-      behavior: prefersReduced ? "auto" : "smooth",
-    });
+    if (prefersReduced) {
+      el.scrollTop = target;
+      releaseSendScrollGate();
+      return;
+    }
+    animateScrollerTo(el, target, releaseSendScrollGate);
   }, [anchorSpacer, prefersReduced]);
 
   /**

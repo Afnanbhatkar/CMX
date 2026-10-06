@@ -1178,3 +1178,25 @@ Stage Summary:
 - Phase 9 COMPLETE: a production-oriented multi-agent orchestrator with contract-driven agents, code-enforced tool permissions, untrusted-data prompt fencing, parallel wave execution, engine-level timeout/retry/cancel/approval-gate, a working critic loop (incl. one re-retrieval), persistent observability (agent_runs + orchestrator_agent_spans), and a console UI exposing only high-level trace — 11/11 acceptance scenarios verified against the REAL gateway and REAL repository services. No protected surface touched; no disk-write path added (coding agent proposes change-sets only; approval records the human decision).
 - Committed as `codemind-v2/phase-09-orchestrator`. PHASE 10 NOT STARTED — stopping here per directive.
 
+
+---
+Task ID: phase-9.1-scroll-on-send-chain-close
+Agent: Z.ai Code (main)
+Task: User mandates — (1) "Scroll on Message Send": sending from ANY scroll position smoothly scrolls the new question to its pinned TOP spot (never a bottom jump), and the run/thought-chain starts ONLY on arrival; (2) chain close = last row completes → loader on last row for exactly 1.5s → FULL instant one-shot close. Store both as protected features; never change without explicit user instruction.
+
+Work Log:
+- Read the frozen surfaces first (chain-pacer.ts, answer-pacer.ts, use-assistant-run.ts, ActivityChain.tsx, ConversationView anchoring block + RULES.md §15). The user's message is the explicit authorization for the close-behavior change; pacing/reveal rhythm untouched (chain-pacer.ts and answer-pacer.ts byte-identical to baseline).
+- NEW `src/features/workspace/chat/activity/send-scroll-gate.ts`: arm/release/wait handshake; wait bounded at 1.5s so a hidden view can never stall a run.
+- `use-assistant-run.ts`: send() arms the gate BEFORE the user message enters the store and starts runCompletion only after waitForSendScrollArrival(); module-scoped pendingRunStart blocks double-send and regenerate during the wait; append-failure path stands the gate down.
+- `ConversationView.tsx`: send-anchor now uses animateScrollerTo() — distance-tuned ≈320–650ms easeOutCubic rAF animation (cancel on real wheel/touch, dead-node guard) in BOTH the direct path and the spacer layout-effect path; prefersReduced jumps instantly; gate released on arrival; PROTECTED banner extended with the mandate.
+- `ActivityChain.tsx` (authorized): close machine in ActivityChainView — on the LIVE active→final transition: closingLoader=true (timeline stays open, header keeps Thinking/Solving indicator + live-region announcement), last rendered row gets showLoader (chain-close-loader spinner); after exactly 1500ms → closingLoader=false + fullClose=true → data-full-close disables the 300ms grid transition (activity.css) for a full one-shot close. History views mounting already-final skip the loader (wasActiveRef). Fixed a TS2451 (duplicate `state`) found by tsc.
+- Stored in RULES.md §15 (two new protected entries: "Scroll on Message Send", "Thought Chain Close — last-row loader, then full one-shot close"), CHANGELOG.md Phase 9.1 entry.
+- Lint 0 errors (1 pre-existing baseline warning); tsc clean on touched files.
+- E2E (agent-browser, real gateway, 6752px conversation in a 306px viewport, user scrolled to scrollTop=0 then send):
+  * Scroll: 39 recorded intermediate scrollTop values 0→6732 over ~850ms — a real eased multi-frame animation, NOT a jump; questionVisualY=8 exactly; msgCount 6→8.
+  * Gate: chain (run-activity-live) absent for EVERY animation frame (t=21..865 all chain:false); first chain sample at t=960 — strictly after arrival.
+  * Close: rows grow 12→265px (one-by-one story); loader appears at story completion (t≈3380); still showing at t=4182; close at t≈4800 with open="false", full="true", h=0; ZERO intermediate height frames between 265 and 0 (recorder pushes on every change — a 300ms transition would have produced ~18 rows) → full single-frame close, ~1.42–1.5s loader window.
+  * Zero page errors throughout; dev.log clean; protected anchoring probe (questionVisualY≈8) re-verified.
+
+Stage Summary:
+- Phase 9.1 COMPLETE: Scroll-on-Send with arrival-gated chain start + mandated chain close (1.5s last-row loader → full instant close) implemented, stored as RULES.md §15 protected features, and browser-verified frame-by-frame against the real gateway. Chain pacing/reveal, anchoring contract, response engine and all other protected surfaces untouched.

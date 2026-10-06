@@ -237,7 +237,15 @@ function sideChipFor(row: ActivityViewRow): string | null {
  * Open by default EXCEPT counter groups ("Read N files", Phase 9.1) which
  * mount collapsed — the live count is the point, not the file list.
  */
-const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow }) {
+const ActivityItem = memo(function ActivityItem({
+  row,
+  showLoader = false,
+}: {
+  row: ActivityViewRow;
+  /** User mandate (RULES.md §15): while the chain is closing, the LAST row
+   * carries a loader for 1.5s — the close fires only after it ends. */
+  showLoader?: boolean;
+}) {
   const side = sideChipFor(row);
   // Plain single-file rows: the path is already ON the line — the one-file
   // dropdown would be pure duplication. Only rows whose children carry
@@ -266,6 +274,13 @@ const ActivityItem = memo(function ActivityItem({ row }: { row: ActivityViewRow 
         <span className="cmx-act-side-chip" title={side}>
           {side}
         </span>
+      ) : null}
+      {showLoader ? (
+        <span
+          className="cmx-act-row-loader"
+          aria-hidden="true"
+          data-testid="chain-close-loader"
+        />
       ) : null}
     </>
   );
@@ -344,7 +359,6 @@ export interface ActivityChainViewProps {
 }
 
 export function ActivityChainView({ snapshot, minimal = false }: ActivityChainViewProps) {
-  const state = headerState(snapshot);
   const controlsId = useId();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -356,8 +370,46 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
   const active = snapshot.status !== "final" && !snapshot.workFinalized;
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const [showEarlier, setShowEarlier] = useState(false);
+
+  /* ─────────────────────────────────────────────────────────────────
+   * USER MANDATE (stored RULES.md §15) — "Thought chain close": the
+   * chain closes ONLY after its last row completes; the last row then
+   * shows a LOADER for exactly 1.5s; when the loader ends the chain
+   * closes FULLY and INSTANTLY in one shot — never the gradual 300ms
+   * collapse, never a half-closed state. The header keeps its live
+   * indicator (Thinking/Solving) until the close fires, so the final
+   * duration label lands exactly at the close moment. Views that are
+   * ALREADY final at mount (history) skip the loader — the mandate
+   * governs the live transition, not history rendering.
+   * ───────────────────────────────────────────────────────────────── */
+  const CHAIN_CLOSE_LOADER_MS = 1500;
+  /** Last row completed → loader phase (timeline still open). */
+  const [closingLoader, setClosingLoader] = useState(false);
+  /** Loader ended → FULL one-shot close (CSS transition disabled). */
+  const [fullClose, setFullClose] = useState(false);
+  /** Loader only on the LIVE active→final transition, never on history. */
+  const wasActiveRef = useRef(active);
+  useEffect(() => {
+    const was = wasActiveRef.current;
+    wasActiveRef.current = active;
+    if (active) {
+      // A new active phase — reset the close machine.
+      setClosingLoader(false);
+      setFullClose(false);
+      return;
+    }
+    if (!was) return; // mounted already-final (history) — no loader
+    setClosingLoader(true);
+    const timer = setTimeout(() => {
+      setClosingLoader(false);
+      setFullClose(true); // FULL close — one shot, no animation
+    }, CHAIN_CLOSE_LOADER_MS);
+    return () => clearTimeout(timer);
+  }, [active]);
+
   // Minimal runs never auto-open: the user's click is the ONLY opener.
-  const open = userOpen ?? (minimal ? false : active);
+  // The loader phase keeps the timeline open until the full close fires.
+  const open = userOpen ?? (minimal ? false : active || closingLoader);
 
   const toggle = (): void => {
     setUserOpen(!open);
@@ -378,8 +430,25 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
 
   /* One polite live region for meaningful state changes only — derived
      text: identical strings never touch the DOM, so nothing is
-     re-announced while events merely add rows. */
-  const announcement = deriveAnnouncement(snapshot);
+     re-announced while events merely add rows. During the mandated
+     close-loader the chain has not closed yet — the header state and
+     announcement stay on the live indicator; the final label lands
+     exactly at the close moment (after the 1.5s loader). */
+  const rawState = headerState(snapshot);
+  const state: HeaderState =
+    closingLoader && rawState.kind === "final"
+      ? {
+          kind: snapshot.phase === "solving" ? "solving" : "thinking",
+          label: snapshot.phase === "solving" ? "Solving" : "Thinking",
+          aria: snapshot.phase === "solving" ? "Solving" : "Thinking",
+          outcome: null,
+        }
+      : rawState;
+  const announcement = closingLoader
+    ? snapshot.phase === "solving"
+      ? "Solving"
+      : "Thinking"
+    : deriveAnnouncement(snapshot);
 
   /* Cross-fade: the previous header state stays mounted (hidden via
      aria-hidden + CSS) until the next change — render-phase adjustment,
@@ -452,7 +521,11 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
         </svg>
       </button>
 
-      <div className="cmx-act-timeline-grid" data-open={open ? "true" : "false"}>
+      <div
+        className="cmx-act-timeline-grid"
+        data-open={open ? "true" : "false"}
+        data-full-close={fullClose ? "true" : "false"}
+      >
         <div className="cmx-act-timeline-clip">
           <div
             id={controlsId}
@@ -475,8 +548,12 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
                   <div className="cmx-act-earlier">Earlier steps ({hiddenCount})</div>
                 )
               ) : null}
-              {visibleRows.map((row) => (
-                <ActivityItem key={row.id} row={row} />
+              {visibleRows.map((row, index) => (
+                <ActivityItem
+                  key={row.id}
+                  row={row}
+                  showLoader={closingLoader && index === visibleRows.length - 1}
+                />
               ))}
             </div>
           </div>

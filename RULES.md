@@ -181,3 +181,32 @@ phase may be reported complete.
   without an explicit new user instruction for that exact change. The baseline
   state of these three files is the reference; read them before any work that
   comes near the chat activity pipeline.
+- **Scroll on Message Send** (user mandate, this session; implementation:
+  `ConversationView.tsx` + `chat/activity/send-scroll-gate.ts` +
+  `use-assistant-run.ts send()`).
+  Whenever the user sends a message — from ANY scroll position, even from
+  far up the conversation — the view must SMOOTHLY scroll the newly sent
+  user message to its pinned TOP position (a controlled ≈320–650ms
+  easeOutCubic rAF animation; distance-tuned; cancelled by real user
+  wheel/touch input). It must NEVER be a jump to the absolute bottom and
+  never a hard cut, and the result must still satisfy the anchoring probe
+  (`questionVisualY ≈ 8px`). The run — the thought chain with it — starts
+  ONLY when this scroll has ARRIVED at the pinned question
+  (send-scroll-gate: send() arms → view releases on arrival; the wait is
+  safety-bounded at 1.5s so a hidden view can never stall a run).
+  Never change without an explicit new user instruction.
+- **Thought Chain Close — last-row loader, then full one-shot close**
+  (user mandate, this session; explicit authorization to change the close
+  behavior of the frozen chain for THIS exact change; implementation:
+  `src/components/ai-activity/ActivityChain.tsx` + `activity.css`).
+  The chain closes ONLY after its last row completes; the last row then
+  shows a LOADER for exactly 1.5 seconds; when the loader ends, the chain
+  closes FULLY and INSTANTLY in one shot (`data-full-close` disables the
+  300ms grid transition for that frame) — never a gradual collapse, never
+  a half-closed state. The header keeps its live Thinking/Solving
+  indicator until the close fires, so the final duration label lands
+  exactly at the close moment. History views that mount already-final skip
+  the loader (the mandate governs the live transition only). Everything
+  else about the chain (pacing, one-by-one reveal rhythm) stays frozen per
+  the baseline rule above. Never change without an explicit new user
+  instruction.

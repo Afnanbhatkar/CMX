@@ -317,6 +317,14 @@
   transition: grid-template-rows 300ms ease-out;
 }
 
+/* USER MANDATE (RULES.md §15) — "Thought chain close": when the mandated
+   1.5s last-row loader ends, the chain closes FULLY and INSTANTLY in one
+   shot — the transition is disabled for that exact frame so there is no
+   gradual collapse and never a half-closed state. */
+.cmx-act-timeline-grid[data-full-close="true"] {
+  transition: none;
+}
+
 .cmx-act-timeline-grid[data-open="true"] {
   grid-template-rows: 1fr;
 }
@@ -529,6 +537,27 @@ button.cmx-act-row-line:focus-visible {
 
 .cmx-act-row-chevron[data-open="true"] {
   transform: rotate(90deg);
+}
+
+/* USER MANDATE (RULES.md §15) — "Thought chain close": the loader the
+   LAST row carries for exactly 1.5s after the chain completes its story.
+   A small accent spinner in the row's content — the visible promise that
+   the close is coming, so the full one-shot close reads as intentional. */
+.cmx-act-row-loader {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-left: 2px;
+  border-radius: 999px;
+  border: 2px solid var(--cmx-line);
+  border-top-color: var(--cmx-accent, var(--cmx-ink));
+  animation: cmx-act-row-loader-spin 0.8s linear infinite;
+}
+
+@keyframes cmx-act-row-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Collapsible row body (detail + file children) — grid-rows collapse,

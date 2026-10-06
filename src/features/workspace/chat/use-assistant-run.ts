@@ -47,6 +47,11 @@ import {
   runStarted,
 } from "../assistant";
 import {
+  armSendScrollGate,
+  releaseSendScrollGate,
+  waitForSendScrollArrival,
+} from "./activity/send-scroll-gate";
+import {
   exportPersistedChain,
   ingestLocalRunActivityEvent,
   resumeRunActivity,
@@ -156,6 +161,15 @@ interface ChatMessageLike {
  * assistant runs (runPhase is global), so at most one controller exists.
  */
 let activeController: AbortController | null = null;
+
+/**
+ * Scroll-on-send handshake (user mandate, RULES.md §15): a send has armed
+ * the scroll gate and is waiting for ConversationView to arrive at the
+ * newly pinned question before the run — and with it the thought chain —
+ * starts. Module-scoped like activeController so EVERY hook instance
+ * respects the pending start (double-send and regenerate are blocked).
+ */
+let pendingRunStart = false;
 
 export interface AssistantRun {
   send: (
@@ -727,7 +741,23 @@ export function useAssistantRun(): AssistantRun {
       options?: AssistantSendOptions,
     ) => {
       const trimmed = typeof content === "string" ? content.trim() : "";
-      if (!trimmed || generatingRef.current || activeController) return;
+      if (
+        !trimmed ||
+        generatingRef.current ||
+        activeController ||
+        pendingRunStart
+      ) {
+        return;
+      }
+
+      /* Scroll on Message Send (user mandate, RULES.md §15): arm the gate
+       * BEFORE the message enters the store so ConversationView's anchor
+       * effect takes the controlled smooth scroll, and hold the run — the
+       * thought chain starts ONLY after the view has arrived at the newly
+       * pinned question (never while the scroll is still travelling). The
+       * wait is safety-bounded inside waitForSendScrollArrival. */
+      armSendScrollGate();
+      pendingRunStart = true;
 
       const userMsgId = useWorkspaceStore
         .getState()
@@ -737,7 +767,12 @@ export function useAssistantRun(): AssistantRun {
           attachments:
             attachments && attachments.length > 0 ? attachments : undefined,
         });
-      if (userMsgId === null) return;
+      if (userMsgId === null) {
+        // Nothing to anchor — stand the gate down, the run must not stall.
+        releaseSendScrollGate();
+        pendingRunStart = false;
+        return;
+      }
 
       // Re-read fresh state: appendMessage replaced the conversations array.
       const conversation = useWorkspaceStore
@@ -775,7 +810,12 @@ export function useAssistantRun(): AssistantRun {
               } as ApiChatAttachment),
         );
 
-      void runCompletion(conversationId, history, options, wireAttachments);
+      // The run (chain + answer) begins only at scroll ARRIVAL — the wait
+      // is bounded, so the view can never stall a real send.
+      void waitForSendScrollArrival().then(() => {
+        pendingRunStart = false;
+        void runCompletion(conversationId, history, options, wireAttachments);
+      });
     },
     [runCompletion],
   );
@@ -841,7 +881,7 @@ export function useAssistantRun(): AssistantRun {
    * to the last user message.
    */
   const regenerate = useCallback(() => {
-    if (generatingRef.current || activeController) return;
+    if (generatingRef.current || activeController || pendingRunStart) return;
     const conversation = selectActiveConversation(useWorkspaceStore.getState());
     if (!conversation || conversation.messages.length === 0) return;
 

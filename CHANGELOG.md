@@ -4,6 +4,41 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 9.1 — Scroll on Send + Mandated Chain Close] — 2026-10-06
+
+### Added
+- **Scroll on Message Send** (user mandate, RULES.md §15): sending a message
+  from ANY scroll position — even from far up a long conversation — now
+  performs a CONTROLLED smooth scroll (distance-tuned ≈320–650ms easeOutCubic
+  rAF animation, cancelled by real user wheel/touch input) that lands the
+  newly sent question pinned at the viewport TOP. It is never a jump to the
+  absolute bottom and never a hard cut; the anchoring probe
+  (`questionVisualY ≈ 8px`) still applies. New
+  `chat/activity/send-scroll-gate.ts`: `send()` arms the gate BEFORE the
+  message enters the store and the run — the thought chain with it — starts
+  ONLY when ConversationView's anchor effect has ARRIVED (wait bounded at
+  1.5s so a hidden view can never stall a run); double-send and regenerate
+  are blocked while a start is pending.
+- **Thought chain close — last-row loader, then full one-shot close** (user
+  mandate, RULES.md §15; explicit authorization to touch the frozen chain
+  close for exactly this change): the chain now closes only after its last
+  row completes; the last row carries a spinner loader for exactly 1.5s;
+  when it ends the timeline closes FULLY and INSTANTLY in one shot
+  (`data-full-close` disables the 300ms grid transition for that frame) —
+  no gradual collapse, no half-closed state. The header keeps its live
+  Thinking/Solving indicator until the close fires, so the final duration
+  label lands exactly at the close moment. History views that mount
+  already-final skip the loader. Chain PACING/reveal rhythm untouched.
+
+### Verified
+- agent-browser E2E against the real gateway: scrolled-to-top send in a long
+  conversation → per-frame rAF samples show a smooth multi-frame scrollTop
+  animation (not a jump) landing at `questionVisualY ≈ 8px`; the live
+  activity chain is absent during the animation and appears only after
+  arrival (gate holds); on chain completion the last-row loader shows for
+  ~1.5s and the close is a single-frame height drop to 0 (no intermediate
+  frames); zero page errors.
+
 ## [Phase 9 — Multi-Agent Orchestrator V2] — 2026-10-06
 
 ### Added
