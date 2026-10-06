@@ -4,6 +4,78 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 9 — Multi-Agent Orchestrator V2] — 2026-10-06
+
+### Added
+- **Orchestration engine** (`src/server/orchestrator/engine.ts`): the full
+  spec §2 flow — Intent → Plan → Select agents → Build context → Execute →
+  Validate → Critic → Response/change. Selective execution only (the plan
+  decides which agents run — never every agent per question), topological
+  waves with PARALLEL execution inside a wave (verified: Security +
+  Dependency + Graph concurrently after Retrieval), engine-enforced
+  per-agent timeouts, registry retry policies (attempt counts recorded
+  honestly in spans), a global abort path for user-facing cancel, an
+  approval GATE that pauses the run until a human decision (with honest
+  15-minute expiry), a critic loop with ONE re-retrieval round on weak
+  evidence, and start-time recovery that marks runs orphaned by a server
+  restart as failed instead of leaving zombies.
+- **Agent contracts + registry** (`contracts.ts`, `registry.ts`): every
+  agent carries name/version/status/input+output schema/allowed tools/
+  timeout/approval policy/retry policy; every execution returns the same
+  AgentResult (agent, status, findings, evidence, confidence, sources,
+  next_action). HONEST capability status: planner, retrieval, code-analyst,
+  graph, dependency, security, git (read-only), reasoning, coding
+  (propose-only) and critic are `implemented` (real tools, real persisted
+  state, structured outputs, acceptance-verified); testing, documentation,
+  debugger, architecture, performance, refactoring, migration, release and
+  sandbox are `planned` and are NEVER silently executed (a plan that names
+  them records an honest `skipped` span).
+- **Tool permission layer** (`tools.ts`): every tool call passes a code
+  check against the agent's registry grants (spec §4 tiers — search
+  read-only, analyst read/analyze, coding read+propose, security
+  static-analysis, git read-only with NO mutating grant issued to anyone).
+  Violations raise `OrchestratorToolError` and surface as failed spans.
+  Tools are thin adapters over the REAL services: hybrid search, workspace
+  fs, read-only git service, import-graph scanner, dependency scanner.
+- **Security agent static scanner** (`security-scan.ts`): pattern scan
+  (hardcoded secrets, eval/Function, shell exec, SQL concat, HTML sinks,
+  weak hash, CORS wildcard, insecure transport, JWT none) with exact
+  path:line evidence, honestly labeled "pattern-based, not a full
+  SAST/taint engine".
+- **Prompt-injection defense** (`fence.ts`): ALL repository content, tool
+  output and the user request enter LLM prompts inside
+  `<<<UNTRUSTED_REPO_DATA>>>` fences with binding security rules; tool
+  results can never elevate permissions (permissions are code-enforced).
+- **Critic verification** (agents.ts + reference-verifier reuse): file
+  references in answers are verified against the real workspace index,
+  claims must cite existing support paths, an LLM cross-check flags
+  unsupported claims/contradictions/incorrect assumptions; weak evidence
+  triggers one re-retrieval, then the answer says plainly what could not
+  be verified.
+- **Observability** (Prisma): `OrchestratorAgentSpan` model (agent id, run
+  id, wave, attempts, tool count, findings count, confidence, sources,
+  error, timing) + reuse of `AgentRun` (kind "orchestrator") and
+  `Approval`. Metadata only — never tokens, credentials, or repository
+  content in logs.
+- **API**: `POST /api/orchestrator/run`, `GET /api/orchestrator/runs/[id]`
+  (poll full state), `POST .../cancel`, `POST .../approve` (records the
+  human decision — applying a change-set does NOT exist on disk in this
+  phase), `GET /api/orchestrator/runs` (recent runs).
+- **Orchestrator console UI** (`OrchestratorPanel.tsx` + workspace nav
+  entry): one-click acceptance presets, live trace chips (Planner ✓
+  Retrieval ✓ … — high-level status only, NEVER internal reasoning),
+  per-agent findings/evidence accordions, critic verdict card, approval
+  banner with Approve/Reject, final answer + proposed change-set view,
+  honest agent registry table (implemented/planned), recent-runs list.
+- **Verified (11/11 acceptance scenarios)**: simple question, search
+  question, architecture question, security question, coding task,
+  multi-agent task (parallel waves confirmed in span data), failed agent
+  (drill), timeout (drill), retry (drill — attempts=2 recorded), cancel
+  (mid-run), approval (approve → recorded + change-set stays proposed;
+  reject → change-set discarded; disk untouched in both cases). Gateway
+  429 outage during testing degraded honestly (planner heuristic fallback,
+  failed spans recorded, no fabricated results). Lint: 0 errors.
+
 ## [Phase 8.75 — AI-Native Inline Completion + Cmd/Ctrl+K Inline Edit] — 2026-10-05
 
 ### Added

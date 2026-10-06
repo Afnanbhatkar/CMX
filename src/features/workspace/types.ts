@@ -94,6 +94,7 @@ export interface PanelCollapseState {
 export type WorkspaceSectionId =
   | "overview"
   | "assistant"
+  | "orchestrator"
   | "repository"
   | "search"
   | "architecture"

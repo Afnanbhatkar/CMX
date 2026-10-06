@@ -1,0 +1,830 @@
+/**
+ * CodeMind X V2 — Phase 9 orchestration engine.
+ *
+ * Flow (spec §2): Intent → Plan → Select agents → Build context → Execute →
+ * Validate → Critic → Response/change. The engine NEVER calls every agent:
+ * only the plan's selected agents run, as topological waves — independent
+ * agents in one wave execute in PARALLEL (Promise.all), dependent ones wait.
+ *
+ * Guarantees:
+ * - Per-agent timeout + registry retry policy, engine-enforced.
+ * - Global AbortController per run → user-facing cancel at any moment.
+ * - No repository mutation exists in this phase; the only "mutating" agent
+ *   (coding) writes PROPOSED change-set rows and then BLOCKS on a human
+ *   approval gate. Parallel agents therefore cannot race on repo state.
+ * - Observability (spec §8): one OrchestratorAgentSpan per agent execution
+ *   (agent id, run id, status, attempts, tool count, duration, error) —
+ *   never tokens, credentials, or repository content.
+ * - Critic weak evidence → ONE re-retrieval + re-reasoning + re-critic,
+ *   then an honest "could not be verified" answer (spec §7).
+ */
+
+import { randomUUID } from "node:crypto";
+
+import { db } from "@/lib/db";
+import { logError, logInfo, logWarn } from "@/server/security/logger";
+
+import {
+  runAgentOnce,
+  type AgentCall,
+  type ReasoningClaim,
+} from "./agents";
+import {
+  type AgentName,
+  type AgentResult,
+  type CriticIssue,
+  type CriticVerdict,
+  type OrchestratorRunInput,
+  type OrchestrationPlan,
+  type OrchestrationRunState,
+} from "./contracts";
+import { AGENT_SPECS, implementedAgents } from "./registry";
+
+/* ------------------------------------------------------------------ */
+/* Active-run registry (in-memory gates for cancel + approval)         */
+/*                                                                     */
+/* Dev-mode Turbopack compiles per-route module copies; the registry     */
+/* MUST be a globalThis singleton so every route copy shares ONE map    */
+/* (cancel/approve gates) and ONE recovery flag — otherwise a fresh     */
+/* route copy's recovery would mark another copy's live run as failed.  */
+/* ------------------------------------------------------------------ */
+
+interface ActiveRun {
+  controller: AbortController;
+  call: AgentCall;
+  approvalGates: Map<string, (decision: "approved" | "rejected" | "expired") => void>;
+  approvalTimer: ReturnType<typeof setTimeout> | null;
+}
+
+interface OrchestratorGlobalState {
+  activeRuns: Map<string, ActiveRun>;
+  recovered: boolean;
+}
+
+const GLOBAL_STATE = ((globalThis as Record<string, unknown>).__cmxOrchestratorState ??=
+  { activeRuns: new Map<string, ActiveRun>(), recovered: false }) as OrchestratorGlobalState;
+
+const ACTIVE_RUNS = GLOBAL_STATE.activeRuns;
+
+/** Approval gate budget — honest expiry instead of an infinite wait. */
+const APPROVAL_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * One-time recovery: cancel/approval gates live in MEMORY, so a server
+ * restart orphans queued/running/waiting-approval runs. Mark them honestly
+ * failed instead of leaving zombie rows (same pattern as the jobs pump).
+ */
+let recovered = GLOBAL_STATE.recovered;
+async function recoverStaleRuns(): Promise<void> {
+  if (recovered) return;
+  recovered = true;
+  GLOBAL_STATE.recovered = true;
+  await db.agentRun
+    .updateMany({
+      where: {
+        kind: "orchestrator",
+        status: { in: ["queued", "running", "waiting-approval"] },
+      },
+      data: {
+        status: "failed",
+        error: "server restarted mid-run — in-memory gates lost",
+        completedAt: new Date(),
+      },
+    })
+    .catch(() => undefined);
+}
+
+/* ------------------------------------------------------------------ */
+/* Wave scheduling                                                     */
+/* ------------------------------------------------------------------ */
+
+interface ExecutableStep {
+  id: string;
+  agent: AgentName;
+  instruction: string;
+  dependsOn: string[];
+  /** Wave index (0-based) in the topological order. */
+  wave: number;
+}
+
+function assignWaves(plan: OrchestrationPlan): ExecutableStep[] {
+  const byId = new Map(plan.steps.map((s) => [s.id, s]));
+  const waveOf = new Map<string, number>();
+  const resolved: ExecutableStep[] = [];
+
+  const waveFor = (id: string, seen: Set<string>): number => {
+    if (waveOf.has(id)) return waveOf.get(id)!;
+    if (seen.has(id)) return 0; // dependency cycle guard — treat as root
+    seen.add(id);
+    const step = byId.get(id);
+    if (!step) return 0;
+    const wave = step.dependsOn.length
+      ? Math.max(...step.dependsOn.map((d) => (byId.has(d) ? waveFor(d, seen) : 0))) + 1
+      : 0;
+    waveOf.set(id, wave);
+    return wave;
+  };
+
+  for (const step of plan.steps) {
+    const wave = waveFor(step.id, new Set());
+    waveOf.set(step.id, wave);
+    resolved.push({ ...step, wave });
+  }
+  return resolved;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fault injection (acceptance drills)                                 */
+/* ------------------------------------------------------------------ */
+
+async function runWithFaultInjection(
+  agent: AgentName,
+  call: AgentCall,
+  fault: OrchestratorRunInput["fault"],
+  attempt: number,
+): Promise<AgentResult> {
+  if (fault && fault.agent === agent) {
+    if (fault.mode === "error" || (fault.mode === "error-once" && attempt === 1)) {
+      throw new Error(`drill fault: injected failure for agent "${agent}" (mode ${fault.mode})`);
+    }
+    if (fault.mode === "timeout") {
+      await new Promise((resolve) => setTimeout(resolve, 10 * 60_000));
+      // unreachable in practice — engine timeout fires first
+    }
+  }
+  return runAgentOnce(agent, call);
+}
+
+/* ------------------------------------------------------------------ */
+/* Agent execution with timeout + retry                                */
+/* ------------------------------------------------------------------ */
+
+async function executeAgent(
+  step: ExecutableStep,
+  call: AgentCall,
+  fault: OrchestratorRunInput["fault"],
+): Promise<AgentResult> {
+  const spec = AGENT_SPECS[step.agent];
+  const startedAt = Date.now();
+  const maxAttempts = Math.max(1, spec.retry.maxAttempts);
+  let lastError = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (call.signal.aborted) {
+      return {
+        agent: step.agent,
+        status: "cancelled",
+        findings: [],
+        evidence: [],
+        confidence: "weak",
+        sources: [],
+        nextAction: null,
+        attempts: attempt,
+        toolCount: 0,
+        durationMs: Date.now() - startedAt,
+        error: "run cancelled",
+      };
+    }
+    try {
+      const raced = await Promise.race([
+        runWithFaultInjection(step.agent, call, fault, attempt),
+        new Promise<"engine-timeout">(
+          (resolve) => setTimeout(() => resolve("engine-timeout"), spec.timeoutMs),
+        ),
+      ]);
+      if (raced === "engine-timeout") {
+        lastError = `agent exceeded its ${spec.timeoutMs}ms deadline`;
+        logWarn("orchestrator: agent timeout", { agent: step.agent, attempt });
+        continue; // retry per policy
+      }
+      return { ...raced, attempts: attempt };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      logWarn("orchestrator: agent attempt failed", { agent: step.agent, attempt });
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, spec.retry.backoffMs));
+      }
+    }
+  }
+
+  return {
+    agent: step.agent,
+    status: lastError.includes("deadline") ? "timeout" : "failed",
+    findings: [],
+    evidence: [],
+    confidence: "weak",
+    sources: [],
+    nextAction: null,
+    attempts: maxAttempts,
+    toolCount: 0,
+    durationMs: Date.now() - startedAt,
+    error: lastError || "agent failed",
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Observability persistence                                           */
+/* ------------------------------------------------------------------ */
+
+async function persistSpan(
+  runInternalId: string,
+  step: ExecutableStep,
+  result: AgentResult,
+): Promise<void> {
+  try {
+    await db.orchestratorAgentSpan.create({
+      data: {
+        runId: runInternalId,
+        agentName: result.agent,
+        agentVersion: AGENT_SPECS[result.agent].version,
+        status: result.status,
+        wave: step.wave,
+        attempts: result.attempts,
+        toolCount: result.toolCount,
+        findingsCount: result.findings.length,
+        confidence: result.confidence,
+        sourcesJson: JSON.stringify(result.sources.slice(0, 12)),
+        error: result.error,
+        startedAt: new Date(Date.now() - result.durationMs),
+        endedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    logError("orchestrator: span persist failed", {
+      run: runInternalId,
+      agent: result.agent,
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Run execution                                                       */
+/* ------------------------------------------------------------------ */
+
+async function executeRun(runInternalId: string, runPublicId: string, input: OrchestratorRunInput): Promise<void> {
+  const active = ACTIVE_RUNS.get(runPublicId);
+  if (!active) return;
+  const { controller, call } = active;
+  const signal = controller.signal;
+
+  const spans: (AgentResult & { wave: number })[] = [];
+  let retrievedAgain = false;
+
+  const persistStatus = async (status: string, patch: Record<string, unknown> = {}) => {
+    await db.agentRun
+      .update({
+        where: { id: runInternalId },
+        data: { status, ...patch },
+      })
+      .catch(() => undefined);
+  };
+
+  try {
+    await persistStatus("running", { startedAt: new Date() });
+
+    // ---- Stage 1: planner (the only mandatory wave-0 agent) ----
+    const plannerStep: ExecutableStep = {
+      id: "planner",
+      agent: "planner",
+      instruction: input.request,
+      dependsOn: [],
+      wave: 0,
+    };
+    const plannerResult = await executeAgent(plannerStep, call, input.fault ?? null);
+    spans.push({ ...plannerResult, wave: 0 });
+    await persistSpan(runInternalId, plannerStep, plannerResult);
+
+    const plan = call.plan;
+    if (!plan || plan.steps.length === 0) {
+      throw new Error("planner produced no plan");
+    }
+
+    // ---- Selection: only IMPLEMENTED agents may execute ----
+    const implemented = new Set(implementedAgents().map((s) => s.name));
+    let steps = assignWaves(plan).filter((s) => s.agent !== "planner");
+
+    // Honest skip records for planned agents the model selected.
+    for (const step of steps.filter((s) => !implemented.has(s.agent))) {
+      const skipped: AgentResult = {
+        agent: step.agent,
+        status: "skipped",
+        findings: [`${AGENT_SPECS[step.agent].label} is 'planned' in the registry — not executed (spec V2.1 capability rule)`],
+        evidence: [],
+        confidence: "weak",
+        sources: [],
+        nextAction: null,
+        attempts: 0,
+        toolCount: 0,
+        durationMs: 0,
+        error: "planned agent — never silently executed",
+      };
+      spans.push({ ...skipped, wave: step.wave });
+      await persistSpan(runInternalId, step, skipped);
+    }
+    steps = steps.filter((s) => implemented.has(s.agent));
+
+    // Guarantee the critic always runs last (spec §2 Validate → Critic),
+    // and that question-like intents get a synthesized answer.
+    const needsAnswer = plan.intent.kind !== "coding";
+    const hasReasoning = steps.some((s) => s.agent === "reasoning");
+    const lastExistingWave = steps.length ? Math.max(...steps.map((s) => s.wave)) : 0;
+    if (needsAnswer && !hasReasoning) {
+      steps.push({
+        id: "reasoning-guarantee",
+        agent: "reasoning",
+        instruction: "Synthesize the answer from the gathered evidence.",
+        dependsOn: [],
+        wave: lastExistingWave + 1,
+      });
+    }
+    const criticStep = steps.find((s) => s.agent === "critic");
+    if (criticStep) {
+      // The critic must run after EVERYTHING else, always.
+      criticStep.wave = Math.max(
+        ...steps.map((s) => s.wave),
+        lastExistingWave,
+      ) + 1;
+    } else {
+      steps.push({
+        id: "critic",
+        agent: "critic",
+        instruction: "Verify the run's claims against gathered evidence.",
+        dependsOn: [],
+        wave: lastExistingWave + (needsAnswer && !hasReasoning ? 2 : 1),
+      });
+    }
+
+    // ---- Execute waves (parallel within a wave, ordered across waves) ----
+    const maxWave = Math.max(...steps.map((s) => s.wave));
+    for (let wave = 0; wave <= maxWave && !signal.aborted; wave += 1) {
+      const waveSteps = steps.filter((s) => s.wave === wave);
+      if (waveSteps.length === 0) continue;
+
+      // Concurrency guard: waves run in parallel ONLY for read-only agents.
+      // (Every implemented agent is read-only except coding, which persists
+      // proposals and then blocks on the approval gate — no repo mutation
+      // exists, so parallel execution cannot race on repository state.)
+      const results = await Promise.all(
+        waveSteps.map(async (step) => {
+          const result = await executeAgent(step, call, input.fault ?? null);
+          await persistSpan(runInternalId, step, result);
+          return { ...result, wave };
+        }),
+      );
+      spans.push(...results);
+
+      // Approval gate: the run PAUSES here until a human decides (spec §4).
+      const awaiting = results.find((r) => r.status === "awaiting-approval");
+      if (awaiting) {
+        await persistStatus("waiting-approval");
+        const decision = await waitForApproval(runPublicId, signal);
+        if (decision === "expired") {
+          spans.push({
+            agent: "critic",
+            status: "skipped",
+            wave,
+            findings: ["approval expired before a decision — run finalized without verification"],
+            evidence: [],
+            confidence: "weak",
+            sources: [],
+            nextAction: null,
+            attempts: 0,
+            toolCount: 0,
+            durationMs: 0,
+            error: "approval expired",
+          });
+          break;
+        }
+        if (signal.aborted) break;
+      }
+    }
+
+    if (signal.aborted) {
+      await persistStatus("cancelled", { completedAt: new Date() });
+      logInfo("orchestrator: run cancelled", { run: runPublicId });
+      ACTIVE_RUNS.delete(runPublicId);
+      return;
+    }
+
+    // ---- Critic loop: one honest re-retrieval round on weak evidence ----
+    const firstCritic = spans.find((s) => s.agent === "critic");
+    if (
+      firstCritic?.nextAction === "retrieve-again" &&
+      !retrievedAgain &&
+      !signal.aborted
+    ) {
+      retrievedAgain = true;
+      const reSteps: ExecutableStep[] = [
+        { id: "re-retrieval", agent: "retrieval", instruction: input.request, dependsOn: [], wave: 90 },
+        { id: "re-reasoning", agent: "reasoning", instruction: "Re-answer with the refreshed evidence.", dependsOn: ["re-retrieval"], wave: 91 },
+        { id: "re-critic", agent: "critic", instruction: "Re-verify after re-retrieval.", dependsOn: ["re-reasoning"], wave: 92 },
+      ];
+      for (const step of reSteps) {
+        if (signal.aborted) break;
+        const result = await executeAgent(step, call, input.fault ?? null);
+        spans.push({ ...result, wave: step.wave });
+        await persistSpan(runInternalId, step, result);
+      }
+    }
+
+    // ---- Finalize: honest answer composition ----
+    const finalCritic = [...spans].reverse().find((s) => s.agent === "critic");
+    const verdict: CriticVerdict | null = parseVerdict(finalCritic);
+    const issues: CriticIssue[] = parseIssues(finalCritic);
+    const answer = composeAnswer(call, spans, verdict, retrievedAgain);
+
+    const output = JSON.stringify({
+      answer,
+      criticVerdict: verdict,
+      criticIssues: issues,
+      retrievedAgain,
+      plan,
+      spans: spans.map(({ agent, status, confidence, durationMs, attempts, toolCount, wave }) => ({
+        agent,
+        status,
+        confidence,
+        durationMs,
+        attempts,
+        toolCount,
+        wave,
+      })),
+    });
+
+    await db.agentRun
+      .update({
+        where: { id: runInternalId },
+        data: {
+          status: "completed",
+          output,
+          error: null,
+          completedAt: new Date(),
+        },
+      })
+      .catch(() => undefined);
+
+    logInfo("orchestrator: run completed", {
+      run: runPublicId,
+      agents: spans.length,
+      verdict: verdict ?? "none",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await persistStatus("failed", {
+      error: message.slice(0, 400),
+      completedAt: new Date(),
+    }).catch(() => undefined);
+    logError("orchestrator: run failed", { run: runPublicId });
+  } finally {
+    if (active.approvalTimer) clearTimeout(active.approvalTimer);
+    ACTIVE_RUNS.delete(runPublicId);
+  }
+}
+
+function parseVerdict(criticSpan: (AgentResult & { wave: number }) | undefined): CriticVerdict | null {
+  if (!criticSpan) return null;
+  const line = criticSpan.findings.find((f) => f.startsWith("verdict:"));
+  if (!line) return null;
+  const value = line.slice("verdict:".length).trim();
+  return value === "supported" || value === "weak-evidence" || value === "unverified" ? value : null;
+}
+
+function parseIssues(criticSpan: (AgentResult & { wave: number }) | undefined): CriticIssue[] {
+  if (!criticSpan) return [];
+  const line = criticSpan.findings.find((f) => f.startsWith("verdict:"));
+  const issueLine = criticSpan.findings[1] ?? "";
+  if (!issueLine || issueLine.startsWith("0 issue")) return [];
+  return issueLine
+    .replace(/^\d+ issue\(s\): /, "")
+    .split("; ")
+    .filter((part) => part && part !== "none")
+    .map((part) => {
+      const [kind, pathPart] = part.split(" (");
+      return {
+        kind: (kind as CriticIssue["kind"]) ?? "missing-evidence",
+        detail: part,
+        path: pathPart ? pathPart.replace(/\)$/, "").replace(/^no path$/, "") || null : null,
+      };
+    });
+}
+
+function composeAnswer(
+  call: AgentCall,
+  spans: (AgentResult & { wave: number })[],
+  verdict: CriticVerdict | null,
+  retrievedAgain: boolean,
+): string {
+  const codingSpan = spans.find((s) => s.agent === "coding");
+  const reasoningAnswer = call.reasoning?.answer ?? null;
+
+  if (reasoningAnswer) {
+    const suffix: string[] = [];
+    if (verdict === "weak-evidence" || verdict === "unverified") {
+      suffix.push(
+        retrievedAgain
+          ? "\n\n> ⚠️ The critic could not fully verify this answer against repository evidence even after a re-retrieval. Treat unverified parts with caution."
+          : "\n\n> ⚠️ The critic flagged weak evidence. Parts of this answer could not be verified.",
+      );
+    }
+    return reasoningAnswer + suffix.join("");
+  }
+
+  if (codingSpan && codingSpan.status !== "failed") {
+    return [
+      "## Proposed change-set",
+      "",
+      ...codingSpan.findings.map((f) => `- ${f}`),
+      "",
+      verdict && verdict !== "supported"
+        ? "> ⚠️ Critic verdict: the proposal could not be fully verified."
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  // Nothing synthesized — report honestly what the run produced.
+  const executed = spans.filter((s) => s.status === "completed");
+  return [
+    "The run finished without a synthesized answer.",
+    "",
+    `Agents executed: ${executed.length ? executed.map((s) => `${s.agent} (${s.status})`).join(", ") : "none completed"}.`,
+    verdict ? `Critic verdict: ${verdict}.` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Approval gate                                                       */
+/* ------------------------------------------------------------------ */
+
+function waitForApproval(runPublicId: string, signal: AbortSignal): Promise<"approved" | "rejected" | "expired"> {
+  return new Promise((resolve) => {
+    const active = ACTIVE_RUNS.get(runPublicId);
+    if (!active) {
+      resolve("expired");
+      return;
+    }
+    const gate = (decision: "approved" | "rejected" | "expired") => {
+      if (active.approvalTimer) clearTimeout(active.approvalTimer);
+      resolve(decision);
+    };
+    active.approvalGates.set("pending", gate);
+    active.approvalTimer = setTimeout(() => gate("expired"), APPROVAL_TIMEOUT_MS);
+    signal.addEventListener("abort", () => gate("expired"), { once: true });
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Public API                                                          */
+/* ------------------------------------------------------------------ */
+
+/** Start a run — persists the AgentRun row and executes in the background. */
+export async function startRun(input: OrchestratorRunInput): Promise<string> {
+  await recoverStaleRuns();
+  const runPublicId = randomUUID();
+  const controller = new AbortController();
+
+  const run = await db.agentRun.create({
+    data: {
+      publicId: runPublicId,
+      kind: "orchestrator",
+      status: "queued",
+      input: JSON.stringify(input),
+    },
+  });
+
+  const call: AgentCall = {
+    instruction: input.request,
+    request: input.request,
+    scopePaths: [],
+    hits: [],
+    fileCache: new Map(),
+    plan: null,
+    reasoning: null,
+    runInternalId: run.id,
+    signal: controller.signal,
+    onToolUse: () => undefined,
+  };
+
+  ACTIVE_RUNS.set(runPublicId, {
+    controller,
+    call,
+    approvalGates: new Map(),
+    approvalTimer: null,
+  });
+
+  // Fire-and-forget: status polling drives the UI.
+  void executeRun(run.id, runPublicId, input);
+  logInfo("orchestrator: run started", { run: runPublicId });
+  return runPublicId;
+}
+
+/** Abort a running/queued run. */
+export async function cancelRun(runPublicId: string): Promise<boolean> {
+  const active = ACTIVE_RUNS.get(runPublicId);
+  if (!active) return false;
+  active.controller.abort();
+  const run = await db.agentRun.findUnique({ where: { publicId: runPublicId } });
+  if (run && (run.status === "queued" || run.status === "running" || run.status === "waiting-approval")) {
+    await db.agentRun.update({
+      where: { id: run.id },
+      data: { status: "cancelled", completedAt: new Date() },
+    });
+  }
+  return true;
+}
+
+/** Record a human approval decision and release the run's gate. */
+export async function decideApproval(
+  runPublicId: string,
+  approvalId: string,
+  decision: "approved" | "rejected",
+  note?: string | null,
+): Promise<{ ok: boolean; message: string }> {
+  const approval = await db.approval.findUnique({ where: { id: approvalId } });
+  if (!approval || approval.runId === null) {
+    return { ok: false, message: "approval request not found" };
+  }
+  const run = await db.agentRun.findUnique({ where: { id: approval.runId } });
+  if (!run || run.publicId !== runPublicId) {
+    return { ok: false, message: "approval does not belong to this run" };
+  }
+  if (approval.status !== "pending") {
+    return { ok: false, message: `approval already ${approval.status}` };
+  }
+
+  await db.approval.update({
+    where: { id: approvalId },
+    data: { status: decision, decidedAt: new Date(), decisionNote: note ?? null },
+  });
+
+  // Change-set workflow: approval is RECORDED; applying is a separate,
+  // explicit step that does not exist in this phase (no disk writes).
+  if (decision === "rejected") {
+    await db.changeSet.updateMany({
+      where: { runId: run.id, status: "proposed" },
+      data: { status: "discarded" },
+    });
+  }
+
+  const active = ACTIVE_RUNS.get(runPublicId);
+  const gate = active?.approvalGates.get("pending");
+  if (gate) {
+    active?.approvalGates.delete("pending");
+    gate(decision);
+  }
+  return {
+    ok: true,
+    message:
+      decision === "approved"
+        ? "Approval recorded. The change-set stays 'proposed' — applying it is a separate explicit action (no disk writes in this phase)."
+        : "Rejection recorded — the proposed change-set was discarded.",
+  };
+}
+
+/** Full run state for polling + UI. */
+export async function getRunState(runPublicId: string): Promise<OrchestrationRunState | null> {
+  await recoverStaleRuns();
+  const run = await db.agentRun.findUnique({
+    where: { publicId: runPublicId },
+    include: {
+      orchestratorSpans: { orderBy: { startedAt: "asc" as const } },
+      approvals: { orderBy: { createdAt: "asc" as const } },
+      changeSets: { include: { changes: true } },
+    },
+  });
+  if (!run) return null;
+
+  let input: OrchestratorRunInput = { request: "" };
+  try {
+    input = JSON.parse(run.input ?? "{}") as OrchestratorRunInput;
+  } catch {
+    // keep default
+  }
+
+  let output: {
+    answer?: string | null;
+    criticVerdict?: CriticVerdict | null;
+    criticIssues?: CriticIssue[];
+    retrievedAgain?: boolean;
+    plan?: OrchestrationPlan | null;
+  } = {};
+  try {
+    output = JSON.parse(run.output ?? "{}") as typeof output;
+  } catch {
+    // keep default
+  }
+
+  const durationMs =
+    run.startedAt && run.completedAt
+      ? run.completedAt.getTime() - run.startedAt.getTime()
+      : null;
+
+  return {
+    runPublicId: run.publicId,
+    status: run.status as OrchestrationRunState["status"],
+    input,
+    intent: output.plan?.intent ?? null,
+    plan: output.plan ?? null,
+    spans: run.orchestratorSpans.map((span) => ({
+      agent: span.agentName as AgentName,
+      status: span.status as AgentResult["status"],
+      findings: [],
+      evidence: [],
+      confidence: (span.confidence as AgentResult["confidence"]) ?? "weak",
+      sources: safeParseArray(span.sourcesJson),
+      nextAction: null,
+      attempts: span.attempts,
+      toolCount: span.toolCount,
+      durationMs: span.endedAt
+        ? span.endedAt.getTime() - span.startedAt.getTime()
+        : 0,
+      error: span.error,
+      wave: span.wave,
+    })),
+    answer: output.answer ?? null,
+    criticVerdict: output.criticVerdict ?? null,
+    criticIssues: output.criticIssues ?? [],
+    retrievedAgain: output.retrievedAgain ?? false,
+    approvals: run.approvals.map((a) => {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = JSON.parse(a.payload ?? "{}") as Record<string, unknown>;
+      } catch {
+        // keep default
+      }
+      return {
+        id: a.id,
+        kind: a.kind,
+        status: a.status,
+        whatWillChange: String(payload.whatWillChange ?? ""),
+        affectedFiles: Array.isArray(payload.affectedFiles) ? (payload.affectedFiles as string[]) : [],
+        whyApprovalNeeded: String(payload.whyApprovalNeeded ?? ""),
+        risk: String(payload.risk ?? ""),
+        requestedPermission: String(payload.requestedPermission ?? ""),
+      };
+    }),
+    changeSets: run.changeSets.map((cs) => ({
+      publicId: cs.publicId,
+      title: cs.title,
+      status: cs.status,
+      description: cs.description,
+      changes: cs.changes.map((c) => ({
+        path: c.path,
+        changeKind: c.changeKind,
+        status: c.status,
+        diff: c.diff,
+      })),
+    })),
+    error: run.error,
+    startedAt: run.startedAt?.toISOString() ?? null,
+    completedAt: run.completedAt?.toISOString() ?? null,
+    durationMs,
+  };
+}
+
+function safeParseArray(raw: string | null): string[] {
+  try {
+    const parsed = JSON.parse(raw ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Recent runs for the observability list. */
+export async function listRecentRuns(limit = 20): Promise<
+  Array<{
+    runPublicId: string;
+    status: string;
+    request: string;
+    startedAt: string | null;
+    completedAt: string | null;
+    agentCount: number;
+  }>
+> {
+  await recoverStaleRuns();
+  const runs = await db.agentRun.findMany({
+    where: { kind: "orchestrator" },
+    orderBy: { createdAt: "desc" as const },
+    take: limit,
+    include: { _count: { select: { orchestratorSpans: true } } },
+  });
+  return runs.map((run) => {
+    let request = "";
+    try {
+      request = (JSON.parse(run.input ?? "{}") as OrchestratorRunInput).request ?? "";
+    } catch {
+      // keep empty
+    }
+    return {
+      runPublicId: run.publicId,
+      status: run.status,
+      request: request.slice(0, 120),
+      startedAt: run.startedAt?.toISOString() ?? null,
+      completedAt: run.completedAt?.toISOString() ?? null,
+      agentCount: run._count.orchestratorSpans,
+    };
+  });
+}

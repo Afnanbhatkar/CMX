@@ -1,0 +1,390 @@
+/**
+ * CodeMind X V2 — Phase 9 agent registry.
+ *
+ * The single source of truth for every agent's CONTRACT (spec §3):
+ * name, version, capability status, input/output schema names, allowed
+ * tools, timeout, approval policy and retry policy.
+ *
+ * Honesty rule (RULES.md §9 + Phase 9 V2.1 capability rule): an agent is
+ * `implemented` only when it runs REAL tools, persists REAL state, emits the
+ * structured output contract and is exercised by the acceptance scenarios.
+ * Everything else is declared `planned` and is never silently executed.
+ */
+
+import {
+  AGENT_NAMES,
+  type AgentCapabilityStatus,
+  type AgentName,
+  type ToolGrant,
+  type ToolName,
+  type ToolPermissionTier,
+} from "./contracts";
+
+export interface AgentSpec {
+  name: AgentName;
+  label: string;
+  version: string;
+  status: AgentCapabilityStatus;
+  tier: "core" | "specialist";
+  description: string;
+  /** Input contract name (see contracts.ts — every agent takes AgentCall). */
+  inputSchema: "AgentCall";
+  /** Output contract name — every implemented agent returns AgentResult. */
+  outputSchema: "AgentResult";
+  allowedTools: ToolGrant[];
+  timeoutMs: number;
+  /** "never" = the agent cannot mutate anything; "on-mutating-action" = the */
+  /** engine pauses for a human decision before the recorded action proceeds. */
+  approvalPolicy: "never" | "on-mutating-action";
+  retry: { maxAttempts: number; backoffMs: number };
+}
+
+function grants(...tools: Array<[ToolName, string]>): ToolGrant[] {
+  return tools.map(([tool, reason]) => ({ tool, reason }));
+}
+
+/** Implemented agents — REAL tools, REAL state, REAL structured output. */
+export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
+  planner: {
+    name: "planner",
+    label: "Planner",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "core",
+    description:
+      "Classifies the request intent and produces the agent plan (which agents run, in which order). LLM-backed with a deterministic fallback.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 45_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 2, backoffMs: 800 },
+  },
+  retrieval: {
+    name: "retrieval",
+    label: "Retrieval",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "core",
+    description:
+      "Runs the real hybrid search engine (BM25 + vectors + symbols + paths + import graph + git) and returns ranked, cited hits.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(["repo.search", "read/search only (spec §4)"]),
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 2, backoffMs: 500 },
+  },
+  "code-analyst": {
+    name: "code-analyst",
+    label: "Code Analyst",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "core",
+    description:
+      "Reads the files retrieval surfaced and extracts real structural facts (languages, sizes, exports, key symbols). Read/analyze only.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["repo.read-file", "read-only file access (spec §4)"],
+      ["repo.read-tree", "workspace tree listing (spec §4)"],
+      ["repo.symbol-scan", "regex symbol scan (spec §4)"],
+    ),
+    timeoutMs: 45_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  graph: {
+    name: "graph",
+    label: "Graph Agent",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "core",
+    description:
+      "Builds the real import graph for the files in scope and reports edges, hub files and cycles.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["graph.import-graph", "import graph over scoped files (spec §4)"],
+      ["repo.read-file", "read-only file access (spec §4)"],
+      ["repo.read-tree", "workspace tree listing (spec §4)"],
+    ),
+    timeoutMs: 45_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  reasoning: {
+    name: "reasoning",
+    label: "Reasoning Agent",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "core",
+    description:
+      "Synthesizes the final answer from gathered evidence only. Repository content enters its prompt as FENCED UNTRUSTED DATA.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 90_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 2, backoffMs: 800 },
+  },
+  critic: {
+    name: "critic",
+    label: "Critic",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "core",
+    description:
+      "Verifies claims against evidence: file references through the real reference verifier, claim support through a fenced LLM check. Weak evidence triggers one re-retrieval or an honest 'could not be verified'.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["repo.read-file", "read-only file access (spec §4)"],
+      ["repo.search", "re-retrieval on weak evidence (spec §7)"],
+      ["repo.symbol-scan", "symbol existence checks (spec §4)"],
+    ),
+    timeoutMs: 90_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 2, backoffMs: 800 },
+  },
+  security: {
+    name: "security",
+    label: "Security Agent",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "specialist",
+    description:
+      "Static pattern scan over scoped files (secrets, injection sinks, unsafe APIs). Read/static-analysis only — honest about pattern-based limits.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["static.security-scan", "pattern-based static analysis (spec §4)"],
+      ["repo.read-file", "read-only file access (spec §4)"],
+      ["repo.read-tree", "workspace tree listing (spec §4)"],
+    ),
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  dependency: {
+    name: "dependency",
+    label: "Dependency Agent",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "specialist",
+    description:
+      "Reads the real package.json and cross-checks declared dependencies against actual import usage across the workspace.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["deps.scan", "declared-vs-used dependency scan (spec §4)"],
+      ["repo.read-file", "read-only file access (spec §4)"],
+      ["repo.read-tree", "workspace tree listing (spec §4)"],
+    ),
+    timeoutMs: 45_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  git: {
+    name: "git",
+    label: "Git Agent",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "specialist",
+    description:
+      "Read-only git intelligence: current branch, overview and recent commits via the read-only git service. Mutating git operations are NOT implemented in this phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["git.read-overview", "branch/overview read (spec §4)"],
+      ["git.read-commits", "recent commit history read (spec §4)"],
+    ),
+    timeoutMs: 30_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  coding: {
+    name: "coding",
+    label: "Coding Agent",
+    version: "1.0.0",
+    status: "implemented",
+    tier: "specialist",
+    description:
+      "Proposes change-sets (per-file diffs) for the requested task. Proposals are PERSISTED as ChangeSet/CodeChange rows in 'proposed' status and REQUIRE the change-set workflow + explicit human approval. Nothing is ever written to disk by this phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: grants(
+      ["repo.read-file", "read-only file access (spec §4)"],
+      ["repo.search", "read/search to ground the proposal (spec §4)"],
+      ["code.propose-changes", "record a proposed change-set (spec §4)"],
+    ),
+    timeoutMs: 120_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 2, backoffMs: 800 },
+  },
+
+  /* ---------------- specialists: honestly planned ---------------- */
+
+  testing: {
+    name: "testing",
+    label: "Testing Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned: run affected tests and report coverage/regression risk. Arrives in a later phase — never silently executed.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  documentation: {
+    name: "documentation",
+    label: "Documentation Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description: "Planned: draft/update documentation with citations. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  debugger: {
+    name: "debugger",
+    label: "Debugger Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description: "Planned: reproduce, isolate and explain failures. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  architecture: {
+    name: "architecture",
+    label: "Architecture Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned: boundary/drift intelligence beyond the implemented import graph (the core graph agent already covers real import edges). Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  performance: {
+    name: "performance",
+    label: "Performance Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description: "Planned: measured hot-path analysis. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  refactoring: {
+    name: "refactoring",
+    label: "Refactoring Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description: "Planned: safe refactor proposals via change-sets. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  migration: {
+    name: "migration",
+    label: "Migration Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description: "Planned: framework/migration planning. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  release: {
+    name: "release",
+    label: "Release Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description: "Planned: release notes/checklists with approvals. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  sandbox: {
+    name: "sandbox",
+    label: "Sandbox Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned: isolated execution only. No execution sandbox exists in this phase — declared honestly, never invoked.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+};
+
+/** All agents the registry knows (guards against typos in plans). */
+export function isKnownAgent(name: string): name is AgentName {
+  return (AGENT_NAMES as readonly string[]).includes(name);
+}
+
+/** Agents that can actually execute in this phase. */
+export function implementedAgents(): AgentSpec[] {
+  return AGENT_NAMES.map((n) => AGENT_SPECS[n]).filter(
+    (s) => s.status === "implemented",
+  );
+}
+
+/** Tool grants for an agent (empty for planned agents). */
+export function allowedToolsFor(agent: AgentName): Set<ToolName> {
+  return new Set(AGENT_SPECS[agent].allowedTools.map((g) => g.tool));
+}
+
+/** Permission tier label for the registry UI. */
+export function permissionTierFor(agent: AgentName): ToolPermissionTier | null {
+  const tierByAgent: Partial<Record<AgentName, ToolPermissionTier>> = {
+    retrieval: "read-search-only",
+    "code-analyst": "read-analyze-only",
+    graph: "read-analyze-only",
+    reasoning: "read-analyze-only",
+    critic: "read-analyze-only",
+    security: "read-static-analysis-only",
+    dependency: "read-analyze-only",
+    git: "read-search-only",
+    coding: "read-propose-only",
+  };
+  return tierByAgent[agent] ?? null;
+}

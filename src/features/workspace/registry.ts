@@ -10,6 +10,7 @@
 import {
   Activity,
   BookOpen,
+  Bot,
   ClipboardCheck,
   FolderGit2,
   GitBranch,
@@ -46,6 +47,13 @@ export const WORKSPACE_DESTINATIONS: DestinationEntry[] = [
     label: "Assistant",
     availability: "available",
     icon: Sparkles,
+  },
+  {
+    id: "orchestrator",
+    label: "Orchestrator",
+    availability: "available",
+    note: "Phase 9 multi-agent orchestrator: planner, parallel specialist agents, critic verification — high-level trace only.",
+    icon: Bot,
   },
   {
     id: "repository",

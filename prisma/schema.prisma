@@ -300,7 +300,7 @@ model AgentRun {
   publicId     String    @unique @default(uuid())
   sessionId    String?
   repositoryId String?
-  /// "assistant" | "analysis" | "coding" | "testing" | "review" | "custom"
+  /// "assistant" | "analysis" | "coding" | "testing" | "review" | "orchestrator" | "custom"
   kind         String
   /// "queued" | "running" | "waiting-approval" | "completed" | "failed" | "cancelled"
   status       String    @default("queued")
@@ -317,10 +317,11 @@ model AgentRun {
   activities      Activity[]
   approvals       Approval[]
   evaluations     Evaluation[]
-  codeChanges     CodeChange[]
-  changeSets      ChangeSet[]
-  decisionRecords DecisionRecord[]
-  usageRecords    UsageRecord[]
+  codeChanges          CodeChange[]
+  changeSets           ChangeSet[]
+  decisionRecords      DecisionRecord[]
+  usageRecords         UsageRecord[]
+  orchestratorSpans    OrchestratorAgentSpan[]
 
   @@index([status])
   @@index([sessionId])
@@ -354,6 +355,41 @@ model Activity {
   @@index([runId])
   @@index([jobId])
   @@map("activities")
+}
+
+/// One agent span inside an orchestrator run (Phase 9 observability §8).
+/// Stores run metadata ONLY (agent id, status, duration, tool count, errors)
+/// — never model reasoning, tokens, credentials or private file content.
+model OrchestratorAgentSpan {
+  id            String    @id @default(uuid())
+  runId         String?
+  /// Agent contract name ("planner" | "retrieval" | "code-analyst" | …).
+  agentName     String
+  agentVersion  String
+  /// "running" | "completed" | "failed" | "timeout" | "skipped" |
+  /// "cancelled" | "awaiting-approval"
+  status        String    @default("running")
+  /// Ordered execution wave (0 = first stage). Independent agents in the
+  /// same wave ran in parallel.
+  wave          Int       @default(0)
+  attempts      Int       @default(1)
+  toolCount     Int       @default(0)
+  findingsCount Int       @default(0)
+  /// "high" | "probable" | "weak" — honest tier, null when not assessed.
+  confidence    String?
+  /// JSON array of source paths (evidence locations), no content.
+  sourcesJson   String?
+  error         String?
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  run AgentRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@index([agentName, status])
+  @@map("orchestrator_agent_spans")
 }
 
 /// A human-in-the-loop approval request raised by a run or job.
