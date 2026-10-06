@@ -55,6 +55,85 @@ is phase-based during the V2 build-out.
 - `chain-pacer.ts` and `answer-pacer.ts` byte-identical to the frozen
   baseline — pacing, reveal rhythm and anchoring untouched.
 
+## [Phase 9.5 — Adaptive Memory Engine + V2.1 Agent Safety] — 2026-10-06
+
+### Added
+- **Adaptive Memory Engine** (`src/server/memory/`): five memory layers
+  (project-rule / decision / concept / preference / correction) over the
+  additively-extended `MemoryItem` table — new fields `source`
+  (explicit|inferred), `confidence`, `evidenceRefsJson`, `expiresAt`,
+  `origin` (provenance guard), and extended scope/status/type vocabularies
+  (path/language/team; proposed/disabled). Precedence is enforced in
+  retrieval ordering + prompt wording: current user instruction >
+  repository evidence > explicit memory > inferred memory — memory never
+  overrides verified code truth.
+- **Memory security (spec §15)**: `assertMemoryOriginAllowed` allows ONLY
+  user-authored origins (manual / user-message / codemind-md /
+  inbox-accept); README instructions, source comments, tool output, logs
+  and commit messages can structurally never become memory.
+  `assertNoSecrets` refuses credential/token/key-shaped content before any
+  write. Every create/accept/disable/delete writes a `memory.change`
+  AuditLog row + append-only MemoryEvent.
+- **Memory Inbox (§6)**: inference (`proposeFromUserMessage`) mines ONLY
+  the user's own chat message after a completed run — deterministic
+  patterns for the five layers, max 3 per message — and every proposal is
+  born `proposed`, visible in the new Memory console Inbox with
+  [Accept]/[Reject]. Nothing auto-activates; direct activation of a
+  proposed item via PATCH is rejected (409).
+- **Memory vs code drift (§7)**: `checkMemoryDrift` compares every active
+  memory's key terms against the REAL workspace files (160-file cap,
+  term-presence + contradiction pairs, honest counts as evidence) and the
+  console offers Review / Keep (audit-recorded) / Disable per finding.
+- **Personal glossary (§8)**: `GlossaryEntry` CRUD + run-time resolution —
+  entries whose term/alias actually appears in the query are handed to the
+  model as DATA ("user says X means Y"), never as instructions.
+- **CODEMIND.md recognition (§5)**: `CODEMIND.md` at the repo root is the
+  one repository file whose user-authored rule lines can become explicit
+  project-rule memories (idempotent sync with real `CODEMIND.md#<line>`
+  evidence). README is never read by the memory engine.
+- **Memory Used chip, upgraded**: chat runs now merge DB memories
+  (explicit first, then accepted inferred) with the 8C worklog/changelog
+  project memories; the existing chip lists each used item with scope +
+  confidence + evidence and per-item disable (excluded ids are filtered
+  server-side BEFORE the model sees anything).
+- **Incognito run (§13)**: composer incognito toggle (no new memory from
+  your messages) + Memory-panel defaults for skip-reads/skip-writes;
+  incognito/reads-off runs get an honest note instead of memory records.
+- **Adaptive depth (§9)**: Beginner/Standard/Expert preference +
+  one-click per-run override in the composer; depth changes style only —
+  security/correctness/data-loss/approval outputs are never suppressed
+  (hard-coded UNSUPPRESSABLE_WARNING_KINDS).
+- **Habit-based help (§10)**: computed from real chat history (tests-after-
+  changes, explanation-heavy); habits only PROPOSE reusable workflows.
+- **Own-concept explanation (§11)**: only concept-layer memories WITH real
+  evidence refs can trigger the "same pattern as your existing flow" hint,
+  and the prompt requires repository evidence to support it.
+- **Memory console UI**: new "Memory" sidebar destination
+  (`src/features/workspace/memory/MemoryPanel.tsx`) with Memories / Inbox /
+  Drift / Glossary / CODEMIND.md / Habits tabs + run defaults.
+- **V2.1 §A — repository prompt-injection defense**: `detectInjectionAttempts`
+  + `renderInjectionWarning` (9 instruction-like pattern rules) surface
+  instruction-shaped lines inside repo/tool data as QUOTED suspicious
+  content in reasoning/critic prompts and agent findings; the fence passes
+  data verbatim — never censors, never obeys.
+- **V2.1 §B — tool-output defense**: `fenceToolOutput` gives tool results
+  their own explicit UNTRUSTED_TOOL_OUTPUT fence; the binding preamble
+  states no tool output can increase permissions, change autonomy, bypass
+  approval or redefine policy — enforced in code (registry grants + engine
+  approval gates read nothing from model text).
+- **V2.1 §C/§F — core agents + capability rule**: the four core agents
+  (Planner, Retrieval, Coder, Verifier) are first-class; `AgentCapabilityStatus`
+  gains `partial`; `src/server/orchestrator/evals.ts` drives 13 REAL eval
+  cases (10 implemented agents + injection/tool/memory-defense proofs,
+  gateway cases honest on failure) via `POST /api/orchestrator/evals`,
+  persisted as Evaluation rows, surfaced in a new Orchestrator console
+  card. Capability statuses now REQUIRE a passing case.
+- **V2.1 §D/§E — agent specifications**: `docs/agents/` ships the full
+  11-field spec template plus specs for every implemented agent and the
+  specialists prepared as `planned`: reproducer, dependency-upgrader,
+  pr-review, log-analyst (registry entries added; never instantiated for
+  tasks, never executed).
+
 ## [Phase 9.1 — Scroll on Send + Mandated Chain Close] — 2026-10-06
 
 ### Added

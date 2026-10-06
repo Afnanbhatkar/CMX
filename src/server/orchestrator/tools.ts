@@ -169,7 +169,7 @@ export interface ImportGraphView {
 }
 
 const IMPORT_RE =
-  /(?:import\s+[^'" ]*\s*from\s*|import\s*\(\s*|require\s*\(\s*|export\s+[^'" ]*\s*from\s*)["']([^"']+)["']/g;
+  /(?:import\s+[^'"]*\s*from\s*|import\s*\(\s*|require\s*\(\s*|export\s+[^'"]*\s*from\s*)["']([^"']+)["']/g;
 
 const RESOLVE_SUFFIXES = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".css", "/index.ts", "/index.tsx"];
 

@@ -32,7 +32,11 @@ export const CORE_AGENT_NAMES = [
   "critic",
 ] as const;
 
-/** Specialist agents (spec §1). Implemented ones do real tool work. */
+/** Specialist agents (spec §1). Implemented ones do real tool work.
+ *  Phase 9.5 (V2.1 §E): reproducer / dependency-upgrader / pr-review /
+ *  log-analyst join the registry as honestly `planned` preparations —
+ *  declared so every agent has a documented spec, never instantiated for
+ *  tasks and never executed until they have real tools + a passing eval. */
 export const SPECIALIST_AGENT_NAMES = [
   "security",
   "dependency",
@@ -47,6 +51,10 @@ export const SPECIALIST_AGENT_NAMES = [
   "migration",
   "release",
   "sandbox",
+  "reproducer",
+  "dependency-upgrader",
+  "pr-review",
+  "log-analyst",
 ] as const;
 
 export const AGENT_NAMES = [
@@ -56,8 +64,12 @@ export const AGENT_NAMES = [
 
 export type AgentName = (typeof AGENT_NAMES)[number];
 
-/** Honest capability status (RULES.md §9 — never fabricate availability). */
-export type AgentCapabilityStatus = "implemented" | "planned";
+/** Honest capability status (RULES.md §9 + Phase 9.5 capability rule §F):
+ *  "implemented" requires REAL tools, persisted/safely-managed state,
+ *  structured output AND at least one PASSING evaluation case (see
+ *  evals.ts). Agents without a passing case are `partial` until one runs;
+ *  never-executed preparations are `planned`. */
+export type AgentCapabilityStatus = "implemented" | "partial" | "planned";
 
 /** Registry status of one agent execution (spec §3 output.status). */
 export type AgentRunStatus =

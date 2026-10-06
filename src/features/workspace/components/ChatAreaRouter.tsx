@@ -22,6 +22,7 @@ import type { ReactNode } from "react";
 
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { AIChatPanel } from "@/features/workspace/chat";
+import { MemoryPanel } from "@/features/workspace/memory/MemoryPanel";
 import { OrchestratorPanel } from "@/features/workspace/orchestrator/OrchestratorPanel";
 import { CONVERSATION_SECTIONS } from "../registry";
 import { DestinationPlaceholderPanel } from "./DestinationPlaceholderPanel";
@@ -40,6 +41,8 @@ export function ChatAreaRouter() {
     content = <AIChatPanel />;
   } else if (section === "orchestrator") {
     content = <OrchestratorPanel />;
+  } else if (section === "memory") {
+    content = <MemoryPanel />;
   } else if (section === "repository") {
     content = <RepositoryOverviewPanel />;
   } else if (section === "search") {

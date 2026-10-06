@@ -9,6 +9,9 @@ import {
   runAssistantTurn,
   type AssistantStageEvent,
 } from "@/server/services/assistant-service";
+import { getMemoryPreferences } from "@/server/memory/engine";
+import { proposeFromUserMessage, saveProposals } from "@/server/memory/inference";
+import { logWarn } from "@/server/security/logger";
 import {
   cancelPendingRun,
   waitForAnswers,
@@ -80,6 +83,14 @@ const bodySchema = z.object({
     .optional(),
   mode: z.enum(COMPOSER_MODES).optional(),
   model: z.string().max(64).optional(),
+  /** Phase 9.5 — per-run memory policy (incognito + optional reads-off + depth). */
+  memory: z
+    .object({
+      incognito: z.boolean().optional(),
+      readsDisabled: z.boolean().optional(),
+      depth: z.enum(["beginner", "standard", "expert"]).optional(),
+    })
+    .optional(),
 });
 
 /** The transport-only frame carrying the complete answer (SSE contract). */
@@ -259,6 +270,19 @@ export async function POST(req: Request): Promise<Response> {
               model: parsed.data.model,
               requestId,
               runId,
+              // Phase 9.5 — memory policy: incognito/reads flags come from
+              // the composer; the depth default comes from saved prefs.
+              memoryPolicy: await (async () => {
+                const prefs = await getMemoryPreferences().catch(() => null);
+                return {
+                  incognito: parsed.data.memory?.incognito ?? false,
+                  readsDisabled:
+                    parsed.data.memory?.readsDisabled ??
+                    prefs?.incognitoMemoryReads ??
+                    false,
+                  depth: parsed.data.memory?.depth ?? prefs?.depth ?? "standard",
+                };
+              })(),
               // 8C question flow: the run pauses here, and the answers route
               // resolves it. Client disconnect cancels it.
               answersProvider: () => waitForAnswers(runId, () => {
@@ -286,6 +310,36 @@ export async function POST(req: Request): Promise<Response> {
           writeEvent({ type: "RUN_COMPLETED", runId, completedAt: Date.now() });
           publish(createEvent({ type: "ASSISTANT_COMPLETED", runId }));
           logInfo("assistant run completed", { runId, requestId, mode, servedModel });
+
+          // Phase 9.5 — memory inference (spec §6 + §13): ONLY the user's own
+          // messages are mined, ONLY into the Memory Inbox as "proposed".
+          // Never in incognito / reads-off runs; failures never disturb the
+          // completed run (logged honestly, no fabricated success).
+          const writePolicy =
+            parsed.data.memory?.incognito === true ||
+            (await getMemoryPreferences().catch(() => null))?.incognitoMemoryWrites === true;
+          if (!writePolicy) {
+            const lastUser = [...parsed.data.messages]
+              .reverse()
+              .find((m) => m.role === "user");
+            if (lastUser) {
+              try {
+                const proposals = proposeFromUserMessage(lastUser.content);
+                if (proposals.length > 0) {
+                  await saveProposals(proposals, `chat:${runId}`);
+                  logInfo("memory: inbox proposals created", {
+                    runId,
+                    count: proposals.length,
+                  });
+                }
+              } catch (error) {
+                logWarn("memory: inference failed (run unaffected)", {
+                  runId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
+          }
         } catch (error) {
           const cancelled =
             error instanceof AssistantError && error.reason === "cancelled";

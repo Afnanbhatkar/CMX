@@ -118,6 +118,12 @@ export interface AssistantSendOptions {
   context: AssistantSendContext;
   /** 8C: the user's pin/remove/memory-disable ledger (defaults to empty). */
   ledger?: AssistantContextLedger;
+  /**
+   * Phase 9.5 — per-run memory policy (spec §13 + §9). incognito: no new
+   * persistent memory is created from this run; readsDisabled: memory is
+   * not consulted at all; depth: one-click adaptive-depth override.
+   */
+  memory?: { incognito?: boolean; readsDisabled?: boolean; depth?: "beginner" | "standard" | "expert" };
 }
 
 /** Prior-context window sent to the API (backend also caps at 30 messages). */
@@ -474,6 +480,15 @@ export function useAssistantRun(): AssistantRun {
             messages: history,
             mode: options?.mode,
             model: options?.model ?? undefined,
+            memory:
+              options?.memory &&
+              (options.memory.incognito || options.memory.readsDisabled || options.memory.depth)
+                ? {
+                    incognito: options.memory.incognito || undefined,
+                    readsDisabled: options.memory.readsDisabled || undefined,
+                    depth: options.memory.depth || undefined,
+                  }
+                : undefined,
             context: hasContext
               ? {
                   repository: options?.context.repository ?? undefined,

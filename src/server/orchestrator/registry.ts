@@ -354,6 +354,72 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
     approvalPolicy: "on-mutating-action",
     retry: { maxAttempts: 1, backoffMs: 0 },
   },
+
+  /* ------- Phase 9.5 (V2.1 §E): specialists prepared as planned specs ------- */
+  /* Each has the full spec template (docs/agents/) but NO real tools and NO */
+  /* passing eval case yet — so the capability rule (§F) keeps them planned. */
+  /* The planner never instantiates them (it plans only implemented agents). */
+
+  reproducer: {
+    name: "reproducer",
+    label: "Reproducer Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned (Phase 9.5 preparation): turn a bug report into a minimal failing reproduction before any fix is proposed. Arrives with real execution tooling in a later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  "dependency-upgrader": {
+    name: "dependency-upgrader",
+    label: "Dependency Upgrader",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned (Phase 9.5 preparation): safe dependency upgrade plans with breaking-change analysis and rollback notes via change-sets. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "on-mutating-action",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  "pr-review": {
+    name: "pr-review",
+    label: "PR Review Agent",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned (Phase 9.5 preparation): structured pull-request review (correctness, style-drift vs project rules, risk) grounded in repository evidence. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
+  "log-analyst": {
+    name: "log-analyst",
+    label: "Log Analyst",
+    version: "0.0.0",
+    status: "planned",
+    tier: "specialist",
+    description:
+      "Planned (Phase 9.5 preparation): correlate runtime logs with code paths and propose hypotheses. Logs are untrusted data — same fencing as all tool output. Later phase.",
+    inputSchema: "AgentCall",
+    outputSchema: "AgentResult",
+    allowedTools: [],
+    timeoutMs: 60_000,
+    approvalPolicy: "never",
+    retry: { maxAttempts: 1, backoffMs: 0 },
+  },
 };
 
 /** All agents the registry knows (guards against typos in plans). */

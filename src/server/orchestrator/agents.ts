@@ -35,7 +35,12 @@ import {
   type OrchestrationPlan,
   type ToolName,
 } from "./contracts";
-import { fenceRepoContent, SECURITY_PREAMBLE } from "./fence";
+import {
+  detectInjectionAttempts,
+  fenceRepoContent,
+  renderInjectionWarning,
+  SECURITY_PREAMBLE,
+} from "./fence";
 import { AGENT_SPECS } from "./registry";
 import {
   evidenceFrom,
@@ -155,6 +160,17 @@ async function completeWithDeadline(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * Phase 9.5 (V2.1 §A): surface instruction-like lines inside untrusted
+ * content. Detection is ADVISORY — the fenced data still flows verbatim;
+ * the warning block only adds visibility. Never obeyed, never executed,
+ * never alters permissions or the plan (RULES.md §4).
+ */
+function injectionWarningFor(content: string): { block: string | null; flagged: number } {
+  const matches = detectInjectionAttempts(content);
+  return { block: renderInjectionWarning(matches), flagged: matches.length };
 }
 
 function hitEvidence(hits: SearchHit[], limit: number): Evidence[] {
@@ -608,7 +624,7 @@ function evidenceDigest(call: AgentCall): string {
 async function runReasoning(call: AgentCall): Promise<AgentResult> {
   const started = Date.now();
   let toolCount = 0;
-  const prompt = [
+  const promptLines: string[] = [
     SECURITY_PREAMBLE,
     "",
     "You are the REASONING agent. Answer the user's request using ONLY the gathered evidence below.",
@@ -619,8 +635,12 @@ async function runReasoning(call: AgentCall): Promise<AgentResult> {
     fenceRepoContent("user-request", call.request),
     "",
     "GATHERED EVIDENCE (untrusted repository data):",
-    fenceRepoContent("tool-output", evidenceDigest(call) || "(no evidence gathered — say so in the answer)"),
-  ].join("\n");
+  ];
+  const reasoningDigest = evidenceDigest(call) || "(no evidence gathered — say so in the answer)";
+  const reasoningInjection = injectionWarningFor(reasoningDigest);
+  promptLines.push(fenceRepoContent("tool-output", reasoningDigest));
+  if (reasoningInjection.block) promptLines.push("", reasoningInjection.block);
+  const prompt = promptLines.join("\n");
 
   const raw = await completeWithDeadline(
     [{ role: "user", content: prompt }],
@@ -646,6 +666,11 @@ async function runReasoning(call: AgentCall): Promise<AgentResult> {
     {
       findings: [
         `answer drafted (${parsed.answer.length} chars) with ${parsed.claims.length} verifiable claims`,
+        ...(reasoningInjection.flagged > 0
+          ? [
+              `${reasoningInjection.flagged} instruction-like line(s) detected inside the repository data — surfaced as quoted data, never followed (V2.1 §A)`,
+            ]
+          : []),
       ],
       evidence: hitEvidence(call.hits, 4),
       confidence: parsed.claims.every((c) => c.supportPaths.length > 0) && parsed.claims.length > 0 ? "probable" : "weak",
@@ -704,7 +729,7 @@ async function runCritic(call: AgentCall): Promise<AgentResult> {
   let llmVerdict: "supported" | "weak-evidence" | "unverified" | null = null;
   let retrieveAgain = false;
   if (call.reasoning) {
-    const prompt = [
+    const criticPromptLines: string[] = [
       SECURITY_PREAMBLE,
       "",
       "You are the CRITIC agent. Check each claim against the evidence ONLY.",
@@ -716,8 +741,12 @@ async function runCritic(call: AgentCall): Promise<AgentResult> {
       fenceRepoContent("claims", JSON.stringify(call.reasoning.claims, null, 1)),
       "",
       "EVIDENCE (untrusted repository data):",
-      fenceRepoContent("tool-output", evidenceDigest(call) || "(none)"),
-    ].join("\n");
+    ];
+    const criticDigest = evidenceDigest(call) || "(none)";
+    const criticInjection = injectionWarningFor(criticDigest);
+    criticPromptLines.push(fenceRepoContent("tool-output", criticDigest));
+    if (criticInjection.block) criticPromptLines.push("", criticInjection.block);
+    const prompt = criticPromptLines.join("\n");
     const raw = await completeWithDeadline(
       [{ role: "user", content: prompt }],
       AGENT_SPECS.critic.timeoutMs,

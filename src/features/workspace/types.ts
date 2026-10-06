@@ -95,6 +95,7 @@ export type WorkspaceSectionId =
   | "overview"
   | "assistant"
   | "orchestrator"
+  | "memory"
   | "repository"
   | "search"
   | "architecture"

@@ -43,7 +43,9 @@ import {
   Check,
   ChevronsUpDown,
   Code2,
+  EyeOff,
   FileCode2,
+  Gauge,
   Image as ImageIcon,
   Layers,
   Loader2,
@@ -488,6 +490,11 @@ export function AIComposer() {
   const model = useChatUiStore((s) => s.model);
   const setModel = useChatUiStore((s) => s.setModel);
   const attachFileNonce = useChatUiStore((s) => s.attachFileNonce);
+  /* Phase 9.5 — incognito run + one-click depth override (spec §13 + §9). */
+  const incognito = useChatUiStore((s) => s.incognito);
+  const setIncognito = useChatUiStore((s) => s.setIncognito);
+  const depthOverride = useChatUiStore((s) => s.depthOverride);
+  const setDepthOverride = useChatUiStore((s) => s.setDepthOverride);
 
   const activeConversationId = useWorkspaceStore((s) => s.activeConversationId);
   const activeTabPath = useWorkspaceStore((s) => s.activeTabPath);
@@ -723,6 +730,10 @@ export function AIComposer() {
         excludedMemoryIds: [...ledger.disabledMemoryIds],
         pinnedRefs: [...ledger.pinnedRefs],
       },
+      memory: {
+        incognito,
+        depth: depthOverride ?? undefined,
+      },
     });
     setDraft("");
     setAttachments([]);
@@ -742,6 +753,8 @@ export function AIComposer() {
     contextBranch,
     contextCurrentFile,
     ledger,
+    incognito,
+    depthOverride,
     setDraft,
   ]);
 
@@ -854,6 +867,69 @@ export function AIComposer() {
             model={model}
             onModelChange={setModel}
           />
+
+          {/* Phase 9.5 — incognito run toggle (spec §13): no new persistent
+              memory is created from messages sent while it is on. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Incognito mode"
+                aria-pressed={incognito}
+                onClick={() => setIncognito(!incognito)}
+                className={`size-7 rounded-[6px] ${
+                  incognito
+                    ? "bg-primary/15 text-primary hover:bg-primary/20 hover:text-primary"
+                    : "text-muted-foreground hover:bg-surface-hover hover:text-foreground"
+                }`}
+              >
+                <EyeOff aria-hidden="true" className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-60 text-[10.5px]">
+              {incognito
+                ? "Incognito ON — no new memory will be saved from your messages (reads follow your Memory preferences)."
+                : "Incognito mode: run without saving new memory"}
+            </TooltipContent>
+          </Tooltip>
+
+          {/* Phase 9.5 — one-click adaptive depth override (spec §9). */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Answer depth"
+                onClick={() =>
+                  setDepthOverride(
+                    depthOverride === null
+                      ? "beginner"
+                      : depthOverride === "beginner"
+                        ? "expert"
+                        : null,
+                  )
+                }
+                className={`size-7 rounded-[6px] ${
+                  depthOverride
+                    ? "bg-primary/15 text-primary hover:bg-primary/20 hover:text-primary"
+                    : "text-muted-foreground hover:bg-surface-hover hover:text-foreground"
+                }`}
+              >
+                <Gauge aria-hidden="true" className="size-3.5" />
+                {depthOverride ? (
+                  <span className="sr-only">Depth override: {depthOverride}</span>
+                ) : null}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-60 text-[10.5px]">
+              {depthOverride
+                ? `Depth override for this run: ${depthOverride}. Click to return to your saved preference.`
+                : "Answer depth: currently your saved preference. Click to override (beginner → expert → saved)."}
+            </TooltipContent>
+          </Tooltip>
 
           <div className="ml-auto flex items-center gap-1">
             {lastIsAssistant && !isGenerating && (

@@ -637,18 +637,51 @@ model RepositoryMember {
   @@map("repository_members")
 }
 
-/// A durable memory entry (V2.1 §C — memory schema reservation).
+/// A durable memory entry (V2.1 §C — memory schema reservation;
+/// Phase 9.5 Adaptive Memory Engine extends it additively).
+/// Phase 9.5 field vocabularies (SQLite String "enums", validated by
+/// src/server/memory/types.ts at every write):
+/// - scope:  "global" | "repository" | "user" | "session" (baseline)
+///           | "path" | "language" | "team" (Phase 9.5 additions)
+/// - type:   "fact" | "preference" | "summary" | "decision" | "other" (baseline)
+///           | "project-rule" | "concept" | "correction" (Phase 9.5 — the
+///           five memory layers map to project-rule/decision/concept/
+///           preference/correction)
+/// - status: "active" | "superseded" | "archived" | "deleted" (baseline)
+///           | "proposed" | "disabled" (Phase 9.5 — proposed = Memory Inbox
+///           candidate, never active without explicit confirmation;
+///           disabled = kept but never retrieved)
+/// SECURITY (Phase 9.5 §15): rows are ONLY created through paths whose
+/// origin is user-authored (manual form, user chat message, CODEMIND.md
+/// sync, inbox accept). README/comment/tool-output/log/commit-message text
+/// can NEVER become a memory, and secrets are rejected before insert.
 model MemoryItem {
   id           String    @id @default(uuid())
-  /// "global" | "repository" | "user" | "session"
+  /// scope vocabulary above.
   scope        String
-  /// Subject reference within the scope (repo id / subject id / session id).
+  /// Subject reference within the scope (repo id / subject id / session id /
+  /// path prefix / language id / team id).
   scopeRef     String?
   repositoryId String?
-  /// "fact" | "preference" | "summary" | "decision" | "other"
+  /// type vocabulary above.
   type         String
-  /// "active" | "superseded" | "archived" | "deleted"
+  /// status vocabulary above.
   status       String    @default("active")
+  /// Phase 9.5 — "explicit" (user- or CODEMIND.md-authored) | "inferred"
+  /// (engine-proposed; requires inbox confirmation before activation).
+  source       String    @default("explicit")
+  /// Phase 9.5 — honest 0..1 confidence (proposals carry their real match
+  /// strength; explicit user saves default to 1).
+  confidence   Float     @default(0.5)
+  /// Phase 9.5 — JSON array of real evidence refs ("src/auth.ts:42",
+  /// "CODEMIND.md#3"). Never fabricated; empty for pure preference notes.
+  evidenceRefsJson String?
+  /// Phase 9.5 — optional expiry; null = never expires. Expired items are
+  /// excluded from retrieval (not deleted — the user decides that).
+  expiresAt    DateTime?
+  /// Phase 9.5 — provenance guard (enforced in code, audited in AuditLog):
+  /// "manual" | "user-message" | "codemind-md" | "inbox-accept".
+  origin       String    @default("manual")
   title        String
   content      String
   importance   Float     @default(0.5)
@@ -672,7 +705,9 @@ model MemoryItem {
 model MemoryEvent {
   id        String   @id @default(uuid())
   itemId    String
-  /// "created" | "updated" | "recalled" | "superseded" | "archived" | "deleted"
+  /// "created" | "updated" | "recalled" | "superseded" | "archived" |
+  /// "deleted" (baseline) | "proposed" | "accepted" | "rejected" |
+  /// "disabled" | "enabled" | "drift-reviewed" (Phase 9.5 additions)
   eventType String
   detail    String?
   createdAt DateTime @default(now())

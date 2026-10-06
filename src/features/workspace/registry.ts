@@ -11,6 +11,7 @@ import {
   Activity,
   BookOpen,
   Bot,
+  Brain,
   ClipboardCheck,
   FolderGit2,
   GitBranch,
@@ -54,6 +55,13 @@ export const WORKSPACE_DESTINATIONS: DestinationEntry[] = [
     availability: "available",
     note: "Phase 9 multi-agent orchestrator: planner, parallel specialist agents, critic verification — high-level trace only.",
     icon: Bot,
+  },
+  {
+    id: "memory",
+    label: "Memory",
+    availability: "available",
+    note: "Phase 9.5 Adaptive Memory Engine: five memory layers, Memory Inbox, drift detection, personal glossary, incognito runs, CODEMIND.md rules.",
+    icon: Brain,
   },
   {
     id: "repository",

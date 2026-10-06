@@ -22,7 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import { CheckCircle2, CircleSlash, Clock, Loader2, Play, ShieldAlert, Square, XCircle } from "lucide-react";
+import { CheckCircle2, CircleSlash, Clock, FlaskConical, Loader2, Play, ShieldAlert, Square, XCircle } from "lucide-react";
 
 import { AGENT_SPECS } from "@/server/orchestrator/registry";
 import type { AgentName, OrchestrationRunState } from "@/server/orchestrator/contracts";
@@ -399,7 +399,7 @@ export function OrchestratorPanel() {
             </Card>
           )}
 
-          {/* Registry (honest implemented/planned) */}
+          {/* Registry (honest implemented/partial/planned) */}
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium">Agent registry (contracts)</CardTitle>
@@ -408,21 +408,34 @@ export function OrchestratorPanel() {
               <div className="grid gap-1.5 sm:grid-cols-2">
                 {(Object.keys(AGENT_SPECS) as AgentName[]).map((name) => {
                   const spec = AGENT_SPECS[name];
+                  const tone =
+                    spec.status === "implemented"
+                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-transparent"
+                      : spec.status === "partial"
+                        ? "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-transparent"
+                        : "";
                   return (
                     <div key={name} className="flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-sm">
                       <div className="min-w-0">
                         <span className="font-medium">{spec.label}</span>
                         <span className="ml-1.5 text-xs text-muted-foreground">v{spec.version}</span>
                       </div>
-                      <Badge variant={spec.status === "implemented" ? "secondary" : "outline"} className="shrink-0">
+                      <Badge variant="outline" className={`shrink-0 ${tone}`}>
                         {spec.status}
                       </Badge>
                     </div>
                   );
                 })}
               </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Capability rule (V2.1 §F): “implemented” requires real tools, persisted/safely-managed state,
+                structured output and a passing evaluation case — verified by the eval suite below.
+              </p>
             </CardContent>
           </Card>
+
+          {/* Phase 9.5 — evaluation harness (V2.1 §C/§F) */}
+          <EvalsCard />
 
           {/* Recent runs (observability §8) */}
           {recent.length > 0 && (
@@ -452,5 +465,123 @@ export function OrchestratorPanel() {
         </div>
       </ScrollArea>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 9.5 — evaluation harness card (V2.1 §C/§F)                     */
+/* ------------------------------------------------------------------ */
+
+interface EvalResultView {
+  caseId: string;
+  agent: string;
+  label: string;
+  kind: string;
+  pass: boolean;
+  detail: string;
+  durationMs: number;
+}
+
+interface EvalReportView {
+  startedAt: string;
+  durationMs: number;
+  results: EvalResultView[];
+  passCount: number;
+  failCount: number;
+  passRate: number;
+  gatewayAvailable: boolean;
+}
+
+function EvalsCard() {
+  const [report, setReport] = useState<EvalReportView | null>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/orchestrator/evals", { cache: "no-store" });
+        const json = (await res.json()) as { data?: { report: EvalReportView | null } };
+        if (!cancelled) setReport(json.data?.report ?? null);
+      } catch {
+        // no report yet — the button stays available
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runSuite = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/orchestrator/evals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error(`eval run failed (${res.status})`);
+      const json = (await res.json()) as { data?: { report: EvalReportView } };
+      setReport(json.data?.report ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "eval run failed");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">Agent evaluations (capability rule)</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => void runSuite()} disabled={running}>
+            {running ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <FlaskConical className="mr-1.5 h-3.5 w-3.5" />}
+            {running ? "Running suite…" : "Run eval suite"}
+          </Button>
+          {report && (
+            <Badge variant={report.failCount === 0 ? "secondary" : "outline"}>
+              {report.passCount}/{report.results.length} passed · {(report.passRate * 100).toFixed(0)}%
+            </Badge>
+          )}
+          {running && <span className="text-xs text-muted-foreground">gateway cases can take a couple of minutes</span>}
+        </div>
+        {error && (
+          <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+            {error}
+          </p>
+        )}
+        {report && (
+          <div className="space-y-1">
+            {report.results.map((result) => (
+              <div key={result.caseId} className="flex items-start justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                <div className="min-w-0">
+                  <span className="font-medium">{result.label}</span>
+                  <span className="ml-1.5 text-muted-foreground">({result.kind})</span>
+                  <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{result.detail}</p>
+                </div>
+                <Badge variant="outline" className={`shrink-0 ${result.pass ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-transparent" : "bg-red-500/15 text-red-700 dark:text-red-400 border-transparent"}`}>
+                  {result.pass ? "PASS" : "FAIL"}
+                </Badge>
+              </div>
+            ))}
+            <p className="text-[11px] text-muted-foreground">
+              Last run {new Date(report.startedAt).toLocaleString()} · {report.results.length} case(s) ·{" "}
+              {report.gatewayAvailable ? "gateway reachable" : "gateway cases failed honestly (gateway unavailable)"}
+            </p>
+          </div>
+        )}
+        {!report && !running && (
+          <p className="text-xs text-muted-foreground">
+            No eval run recorded yet. The suite drives the REAL agent code: real tools for deterministic
+            cases and the real gateway for planner/reasoning/coder — never simulations.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
