@@ -112,7 +112,7 @@ const MODES: ModeDescriptor[] = [
     id: "agent",
     label: "Agent",
     icon: Workflow,
-    description: "Controlled multi-step plan — single-turn until the execution engine lands.",
+    description: "Real multi-agent orchestrator — plan, retrieval, analysis, verification, live in the thought chain.",
   },
   {
     id: "loop",

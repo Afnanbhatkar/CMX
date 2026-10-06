@@ -4,6 +4,65 @@ All notable changes to CodeMind X V2 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning
 is phase-based during the V2 build-out.
 
+## [Phase 9.6 — Orchestrator Live in the AI Assistant Thought Chain] — 2026-10-06
+
+### Added
+- **Agent mode now runs the REAL Phase 9 multi-agent orchestrator inside the
+  chat**, and every agent's actual work plays through the PROTECTED thought
+  chain with zero changes to any frozen surface (chain-pacer, answer-pacer,
+  ActivityChain close machine, send-scroll gate, chain-close gate, anchoring
+  — all byte-identical). The planner, retrieval, code-analyst, graph,
+  dependency, security, git, reasoning, coding and critic agents appear as
+  the chain's own one-by-one rows with their real, fixed-format findings as
+  row details ("intent: architecture … · plan: 4 steps → retrieval, graph,
+  security, critic", "60 hits … (10.75ms, index: 360 files)", "static scan:
+  8 files, 1 candidate findings", "answer drafted (2994 chars) with 4
+  verifiable claims", "verdict: weak-evidence · 7 issue(s)…").
+- New `src/server/services/orchestrator-turn.ts`: maps live engine events
+  onto the existing 8B/8C stage-event vocabulary — one row per REAL
+  execution fact (agent started/finished), SEARCH_RESULT + the file cascade
+  from the retrieval agent's real scope, failed agents as failed rows,
+  planned agents never faked (no row).
+- Engine live-events (additive observer hook): `executeRun` accepts an
+  optional event sink (agent-started / agent-finished / plan /
+  approval-required / approval-decided / critic-verdict), returns its
+  composed output, and a new `startChatOrchestration` entry awaits the run
+  with cancellation (shared ACTIVE_RUNS registration — the console cancel
+  route still works). The fire-and-forget console path is byte-identical.
+- **Real approval gate in chat**: when the coding agent proposes a
+  change-set, the run genuinely PAUSES at the engine's approval gate; the
+  chat shows the real approval card MID-RUN (fixed: the card was hidden
+  while the message was generating), the chain shows "Waiting for approval"
+  with the run timer paused, and the decision is delivered via the new
+  `POST /api/assistant/approvals` to the orchestrator's gate — the run then
+  continues live in the same stream (critic → composed answer). Verified
+  end-to-end: approve → 200 → waiting-approval → completed.
+- Memory integration preserved: retrieved memories (Phase 9.5) ride into the
+  orchestrator request as labeled context data (never instructions,
+  precedence below repository evidence); the Memory Used chip, Context
+  Inspector and incognito/depth controls keep working.
+- Casual prompts in Agent mode keep the plain single-turn path (a greeting
+  must not burn a six-agent pipeline); the composer's Agent-mode description
+  and the mode prompt were updated to state the orchestrator honestly.
+- Client disconnect / stop now cancels the underlying orchestration
+  honestly (verified: hot-reload abort → run recorded `cancelled`).
+
+### Honesty
+- The result frame's note is now path-honest: orchestrator answers state
+  "composed by the real multi-agent orchestrator" instead of the gateway
+  streaming note; servedModel reports `multi-agent-orchestrator`.
+- Failed agents (e.g. an unparseable model proposal) degrade exactly as the
+  console does: failed row in the chain, "The run finished without a
+  synthesized answer. Agents executed: …" in the answer — never faked.
+
+### Verified (agent-browser + real gateway)
+- Full agent story in the chain (planner → retrieval + search chips + real
+  file reads → analyst/graph/security → reasoning → critic → honest
+  re-retrieval loop), protected choreography intact via the gate probe:
+  arm → loader-start (+311ms) → full-close (+1500ms — the mandated 1.5s) →
+  release + answer-begin on the same tick; approval loop approved through
+  the UI; zero page errors; lint 0 errors (1 pre-existing baseline warning).
+
 ## [Phase 9.2 — Thought Chain Working Phase: answer starts after the full close] — 2026-10-06
 
 ### Added

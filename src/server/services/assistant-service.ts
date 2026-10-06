@@ -35,6 +35,7 @@ import { retrieveRunMemories } from "@/server/memory/retrieval";
 import { resolveGlossaryForQuery } from "@/server/memory/engine";
 import { getMemoryPreferences } from "@/server/memory/engine";
 import { buildStructuredResponse } from "./response-engine";
+import { runOrchestratorTurn } from "./orchestrator-turn";
 
 /**
  * CodeMind X V2 — assistant turn service (Phase 3, spec §4; Phase 8A update).
@@ -111,6 +112,11 @@ export interface AssistantTurnInput {
    * The final `content` return value remains the authoritative full answer.
    */
   onResponseDelta?: (text: string) => void;
+  /**
+   * Phase 9.6: abort signal (client disconnect). For orchestrator-backed
+   * runs it cancels the underlying multi-agent execution honestly.
+   */
+  signal?: AbortSignal;
 }
 
 export type AssistantFailureReason = "empty" | "failed" | "cancelled";
@@ -145,7 +151,11 @@ export type AssistantStageEvent =
   | {
       type: "ACTIVITY_UPDATED";
       activityId: string;
-      patch: Partial<Pick<ActivityNode, "title" | "summary" | "metadata">>;
+      /** Wire parity: the sequenced ACTIVITY_UPDATED patch carries status
+       *  too (failed rows on the orchestrator path need it). */
+      patch: Partial<Pick<ActivityNode, "title" | "summary" | "metadata">> & {
+        status?: ActivityNode["status"];
+      };
     }
   | { type: "ACTIVITY_COMPLETED"; activityId: string; summary: string | null }
   | { type: "SEARCH_RESULT"; query: string; hits: number; topFiles: string[] }
@@ -200,13 +210,9 @@ const MODE_PROMPTS: Record<ComposerMode, string[]> = {
       "Keep the JSON valid and honest. If nothing would be modified, never emit the block.",
   ],
   agent: [
-    "COMPOSER MODE — Agent: the user asked for controlled multi-step execution.",
-    "You may propose an ordered step plan with the exact files involved.",
-    "HONESTY: this run is a SINGLE-TURN response; no tool execution or autonomous steps are connected yet — say so when the plan requires them.",
-    "APPROVAL PROTOCOL: if your plan would create or modify repository files, END the response with EXACTLY ONE fenced block tagged " +
-      APPROVAL_MARKER +
-      ' containing this JSON: {"whatWillChange":string,"affectedFiles":string[],"whyApprovalNeeded":string,"risk":string,"requestedPermission":string,"expectedTests":string[],"securityImpact":string}. ' +
-      "Keep the JSON valid and honest. If nothing would be modified, never emit the block.",
+    "COMPOSER MODE — Agent: this run executes through the REAL multi-agent orchestrator (Phase 9 engine).",
+    "A planner selects the agents; real retrieval/analysis/security/graph/coding agents run; a critic verifies the result against evidence.",
+    "The agents' work streams LIVE in the thought chain. Code changes are always PROPOSALS — applying them requires explicit human approval; nothing is written automatically.",
   ],
   loop: [
     "COMPOSER MODE — Loop: the user asked for an autonomous controlled loop.",
@@ -426,6 +432,10 @@ function shortDir(p: string): string {
 async function buildSdkMessages(
   input: AssistantTurnInput,
   onStage?: AssistantStageEmitter,
+  /** Phase 9.6: orchestrator-backed runs do their own retrieval (the
+   *  retrieval agent searches for real) — the standard pre-pass is skipped
+   *  so the repository is never searched twice in one run. */
+  opts?: { skipRetrieval?: boolean },
 ): Promise<BuiltTurn> {
   const mode = input.mode ?? DEFAULT_MODE;
   const preambleParts: string[] = [SYSTEM_PROMPT];
@@ -622,6 +632,7 @@ async function buildSdkMessages(
   const query = lastUser?.content.trim() ?? "";
   if (
     onStage &&
+    !opts?.skipRetrieval &&
     query.length >= RETRIEVAL_MIN_QUERY &&
     !isCasualPrompt(query)
   ) {
@@ -963,10 +974,57 @@ function extractApprovalRequest(content: string): {
 export async function runAssistantTurn(
   input: AssistantTurnInput,
   onStage?: AssistantStageEmitter,
-): Promise<{ content: string; servedModel: string | null; structured: StructuredResponse | null }> {
+): Promise<{
+  content: string;
+  servedModel: string | null;
+  structured: StructuredResponse | null;
+  /** Phase 9.6: honest result-frame note (orchestrator path overrides). */
+  note?: string;
+}> {
   const mode = input.mode ?? DEFAULT_MODE;
-  const built = await buildSdkMessages(input, onStage);
+  const built = await buildSdkMessages(input, onStage, {
+    // Agent mode does its retrieval INSIDE the orchestrator (the retrieval
+    // agent searches for real) — never search the repository twice.
+    skipRetrieval: mode === "agent",
+  });
   const sdkMessages = built.sdkMessages;
+
+  // ---- Phase 9.6: Agent mode = the REAL multi-agent orchestrator ----
+  // The Phase 9 engine executes planner → selected agents → critic with
+  // live events mapped onto the thought chain (orchestrator-turn.ts).
+  // Casual prompts keep the plain single-turn path — a greeting must not
+  // burn a six-agent pipeline. Failures/cancels surface honestly.
+  if (mode === "agent" && !isCasualPrompt(built.query)) {
+    try {
+      const orchestrator = await runOrchestratorTurn({
+        request: built.query,
+        memories: built.memories,
+        runId: input.runId ?? "run-pending",
+        onStage: onStage ?? (() => undefined),
+        signal: input.signal,
+      });
+      logInfo("assistant: orchestrator turn ok", {
+        runId: input.runId,
+        orchestratorRunId: orchestrator.orchestratorRunId,
+      });
+      return {
+        content: orchestrator.content,
+        servedModel: orchestrator.servedModel,
+        structured: null,
+        note: orchestrator.note,
+      };
+    } catch (error) {
+      if (input.signal?.aborted) {
+        throw new AssistantError("cancelled", "The multi-agent run was cancelled.");
+      }
+      const message =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : "The multi-agent run failed.";
+      logError("assistant: orchestrator turn failed", { error: message });
+      throw new AssistantError("failed", message);
+    }
+  }
 
   // ---- 8C question flow: pause for material decisions BEFORE composing ----
   const batch = decideIntakeBatch(mode, built.query, built.retrievalHits);

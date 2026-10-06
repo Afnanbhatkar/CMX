@@ -272,6 +272,22 @@ function AssistantMessage({
   const recordApprovalDecision = (decision: "approved" | "rejected" | "edited") => {
     if (!message.approval) return;
     updateMessage(conversationId, message.id, { approvalDecision: decision });
+    // Phase 9.6: orchestrator approvals must reach the ENGINE gate — the
+    // multi-agent run is genuinely paused at the approval gate until a
+    // human decides. Delivered fire-and-forget: the local decision record
+    // stands either way, and if delivery fails the engine's honest 15-min
+    // expiry finalizes the run (visible in the chain) — never a fake
+    // success. "edited" opens files only; it does not release the gate.
+    const orchestratorRunId = message.approval.orchestratorRunId;
+    if (orchestratorRunId && decision !== "edited") {
+      void fetch("/api/assistant/approvals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approvalId: message.approval.id, decision }),
+      }).catch((error: unknown) => {
+        console.error("[cmx-chat] approval decision delivery failed", error);
+      });
+    }
   };
 
   return (
@@ -319,8 +335,11 @@ function AssistantMessage({
       ) : null}
 
       {/* Phase 8C: the model's proposed change awaits an explicit human
-          decision — recorded locally, never applied (no ChangeSet yet). */}
-      {!busy && message.approval && (
+          decision — recorded locally, never applied (no ChangeSet yet).
+          Phase 9.6: orchestrator approvals arrive MID-RUN (the engine gate
+          genuinely pauses the stream) so the card must render while the
+          message is still generating — the decision releases the run. */}
+      {message.approval && (
         <ApprovalCard
           approval={message.approval}
           decision={message.approvalDecision ?? null}

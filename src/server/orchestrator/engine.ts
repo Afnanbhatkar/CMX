@@ -35,8 +35,10 @@ import {
   type CriticIssue,
   type CriticVerdict,
   type OrchestratorRunInput,
+  type OrchestrationIntent,
   type OrchestrationPlan,
   type OrchestrationRunState,
+  type PlanStep,
 } from "./contracts";
 import { AGENT_SPECS, implementedAgents } from "./registry";
 
@@ -68,6 +70,91 @@ const ACTIVE_RUNS = GLOBAL_STATE.activeRuns;
 
 /** Approval gate budget — honest expiry instead of an infinite wait. */
 const APPROVAL_TIMEOUT_MS = 15 * 60_000;
+
+/* ------------------------------------------------------------------ */
+/* Live events (Phase 9.6 — chat integration)                          */
+/*                                                                     */
+/* The console UI polls DB state; the CHAT assistant needs the same     */
+/* run streamed LIVE into the thought chain. The engine therefore       */
+/* accepts an optional event callback and emits one event per real      */
+/* execution fact (agent started/finished, plan ready, approval gate,   */
+/* critic verdict). Callback or not, engine behavior, persistence and   */
+/* the console path are IDENTICAL — this is a pure observer hook.       */
+/* ------------------------------------------------------------------ */
+
+/** The approval payload persisted by the coding agent (proposal only). */
+export interface OrchestratorApprovalPayload {
+  whatWillChange: string;
+  affectedFiles: string[];
+  whyApprovalNeeded: string;
+  risk: string;
+  requestedPermission: string;
+}
+
+export type OrchestratorEngineEvent =
+  | {
+      kind: "agent-started";
+      stepId: string;
+      agent: AgentName;
+      wave: number;
+      instruction: string;
+    }
+  | {
+      kind: "agent-finished";
+      stepId: string;
+      agent: AgentName;
+      wave: number;
+      result: AgentResult;
+    }
+  | { kind: "plan"; intent: OrchestrationIntent; steps: PlanStep[] }
+  | {
+      kind: "approval-required";
+      runPublicId: string;
+      approvalId: string;
+      payload: OrchestratorApprovalPayload;
+    }
+  | {
+      kind: "approval-decided";
+      approvalId: string;
+      decision: "approved" | "rejected";
+    }
+  | { kind: "critic-verdict"; verdict: CriticVerdict };
+
+export type OrchestratorEventSink = (event: OrchestratorEngineEvent) => void;
+
+/** Everything one completed orchestration produced (chat streaming return). */
+export interface ChatOrchestrationOutput {
+  answer: string;
+  verdict: CriticVerdict | null;
+  issues: CriticIssue[];
+  plan: OrchestrationPlan | null;
+  spans: (AgentResult & { wave: number })[];
+  retrievedAgain: boolean;
+}
+
+/** Parse the coding agent's persisted approval payload (honest defaults). */
+function parseApprovalPayload(raw: string | null): OrchestratorApprovalPayload {
+  try {
+    const parsed = JSON.parse(raw ?? "{}") as Record<string, unknown>;
+    return {
+      whatWillChange: typeof parsed.whatWillChange === "string" ? parsed.whatWillChange : "",
+      affectedFiles: Array.isArray(parsed.affectedFiles)
+        ? (parsed.affectedFiles as unknown[]).filter((v): v is string => typeof v === "string")
+        : [],
+      whyApprovalNeeded: typeof parsed.whyApprovalNeeded === "string" ? parsed.whyApprovalNeeded : "",
+      risk: typeof parsed.risk === "string" ? parsed.risk : "",
+      requestedPermission: typeof parsed.requestedPermission === "string" ? parsed.requestedPermission : "",
+    };
+  } catch {
+    return {
+      whatWillChange: "",
+      affectedFiles: [],
+      whyApprovalNeeded: "",
+      risk: "",
+      requestedPermission: "",
+    };
+  }
+}
 
 /**
  * One-time recovery: cancel/approval gates live in MEMORY, so a server
@@ -261,9 +348,21 @@ async function persistSpan(
 /* Run execution                                                       */
 /* ------------------------------------------------------------------ */
 
-async function executeRun(runInternalId: string, runPublicId: string, input: OrchestratorRunInput): Promise<void> {
+/**
+ * Execute one orchestration run end-to-end. When `onEvent` is provided,
+ * every real execution fact is emitted live (chat thought-chain streaming);
+ * without it the behavior is byte-identical to the Phase 9 console path.
+ * Returns the composed output (null on cancel/failure) — the fire-and-forget
+ * console path ignores it exactly as before.
+ */
+async function executeRun(
+  runInternalId: string,
+  runPublicId: string,
+  input: OrchestratorRunInput,
+  onEvent?: OrchestratorEventSink,
+): Promise<ChatOrchestrationOutput | null> {
   const active = ACTIVE_RUNS.get(runPublicId);
-  if (!active) return;
+  if (!active) return null;
   const { controller, call } = active;
   const signal = controller.signal;
 
@@ -290,14 +389,17 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       dependsOn: [],
       wave: 0,
     };
+    onEvent?.({ kind: "agent-started", stepId: plannerStep.id, agent: "planner", wave: 0, instruction: plannerStep.instruction });
     const plannerResult = await executeAgent(plannerStep, call, input.fault ?? null);
     spans.push({ ...plannerResult, wave: 0 });
     await persistSpan(runInternalId, plannerStep, plannerResult);
+    onEvent?.({ kind: "agent-finished", stepId: plannerStep.id, agent: "planner", wave: 0, result: plannerResult });
 
     const plan = call.plan;
     if (!plan || plan.steps.length === 0) {
       throw new Error("planner produced no plan");
     }
+    onEvent?.({ kind: "plan", intent: plan.intent, steps: plan.steps });
 
     // ---- Selection: only IMPLEMENTED agents may execute ----
     const implemented = new Set(implementedAgents().map((s) => s.name));
@@ -366,8 +468,10 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       // exists, so parallel execution cannot race on repository state.)
       const results = await Promise.all(
         waveSteps.map(async (step) => {
+          onEvent?.({ kind: "agent-started", stepId: step.id, agent: step.agent, wave, instruction: step.instruction });
           const result = await executeAgent(step, call, input.fault ?? null);
           await persistSpan(runInternalId, step, result);
+          onEvent?.({ kind: "agent-finished", stepId: step.id, agent: step.agent, wave, result });
           return { ...result, wave };
         }),
       );
@@ -376,8 +480,27 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       // Approval gate: the run PAUSES here until a human decides (spec §4).
       const awaiting = results.find((r) => r.status === "awaiting-approval");
       if (awaiting) {
+        let pendingApprovalId: string | null = null;
+        if (onEvent) {
+          const pendingApproval = await db.approval.findFirst({
+            where: { runId: runInternalId, status: "pending" },
+            orderBy: { createdAt: "desc" as const },
+          });
+          if (pendingApproval) {
+            pendingApprovalId = pendingApproval.id;
+            onEvent({
+              kind: "approval-required",
+              runPublicId,
+              approvalId: pendingApproval.id,
+              payload: parseApprovalPayload(pendingApproval.payload),
+            });
+          }
+        }
         await persistStatus("waiting-approval");
         const decision = await waitForApproval(runPublicId, signal);
+        if (pendingApprovalId && (decision === "approved" || decision === "rejected")) {
+          onEvent?.({ kind: "approval-decided", approvalId: pendingApprovalId, decision });
+        }
         if (decision === "expired") {
           spans.push({
             agent: "critic",
@@ -403,7 +526,7 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       await persistStatus("cancelled", { completedAt: new Date() });
       logInfo("orchestrator: run cancelled", { run: runPublicId });
       ACTIVE_RUNS.delete(runPublicId);
-      return;
+      return null;
     }
 
     // ---- Critic loop: one honest re-retrieval round on weak evidence ----
@@ -421,15 +544,18 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       ];
       for (const step of reSteps) {
         if (signal.aborted) break;
+        onEvent?.({ kind: "agent-started", stepId: step.id, agent: step.agent, wave: step.wave, instruction: step.instruction });
         const result = await executeAgent(step, call, input.fault ?? null);
         spans.push({ ...result, wave: step.wave });
         await persistSpan(runInternalId, step, result);
+        onEvent?.({ kind: "agent-finished", stepId: step.id, agent: step.agent, wave: step.wave, result });
       }
     }
 
     // ---- Finalize: honest answer composition ----
     const finalCritic = [...spans].reverse().find((s) => s.agent === "critic");
     const verdict: CriticVerdict | null = parseVerdict(finalCritic);
+    if (verdict) onEvent?.({ kind: "critic-verdict", verdict });
     const issues: CriticIssue[] = parseIssues(finalCritic);
     const answer = composeAnswer(call, spans, verdict, retrievedAgain);
 
@@ -467,6 +593,8 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       agents: spans.length,
       verdict: verdict ?? "none",
     });
+
+    return { answer, verdict, issues, plan, spans, retrievedAgain };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await persistStatus("failed", {
@@ -474,6 +602,7 @@ async function executeRun(runInternalId: string, runPublicId: string, input: Orc
       completedAt: new Date(),
     }).catch(() => undefined);
     logError("orchestrator: run failed", { run: runPublicId });
+    return null;
   } finally {
     if (active.approvalTimer) clearTimeout(active.approvalTimer);
     ACTIVE_RUNS.delete(runPublicId);
@@ -618,6 +747,77 @@ export async function startRun(input: OrchestratorRunInput): Promise<string> {
   void executeRun(run.id, runPublicId, input);
   logInfo("orchestrator: run started", { run: runPublicId });
   return runPublicId;
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat streaming entry (Phase 9.6 — assistant thought-chain bridge)   */
+/*                                                                     */
+/* Same engine, same persistence, same gates — but AWAITED by the      */
+/* caller (the assistant turn) with live events flowing into the chat  */
+/* SSE stream. The run stays cancelable: by the caller (client         */
+/* disconnect), by external abort, and by the console cancel route     */
+/* (the ACTIVE_RUNS registration is shared).                           */
+/* ------------------------------------------------------------------ */
+
+export interface ChatOrchestrationHandle {
+  runPublicId: string;
+  /** Resolves when the orchestration fully finishes (or null on failure). */
+  done: Promise<ChatOrchestrationOutput | null>;
+  /** Abort the underlying run (client disconnect / user stop). */
+  cancel: () => void;
+}
+
+/** Start a orchestration run that the chat pipeline AWAITS with live events. */
+export async function startChatOrchestration(
+  input: OrchestratorRunInput,
+  onEvent: OrchestratorEventSink,
+  externalSignal?: AbortSignal,
+): Promise<ChatOrchestrationHandle> {
+  await recoverStaleRuns();
+  const runPublicId = randomUUID();
+  const controller = new AbortController();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  const run = await db.agentRun.create({
+    data: {
+      publicId: runPublicId,
+      kind: "orchestrator",
+      status: "queued",
+      input: JSON.stringify(input),
+    },
+  });
+
+  const call: AgentCall = {
+    instruction: input.request,
+    request: input.request,
+    scopePaths: [],
+    hits: [],
+    fileCache: new Map(),
+    plan: null,
+    reasoning: null,
+    runInternalId: run.id,
+    signal: controller.signal,
+    onToolUse: () => undefined,
+  };
+
+  ACTIVE_RUNS.set(runPublicId, {
+    controller,
+    call,
+    approvalGates: new Map(),
+    approvalTimer: null,
+  });
+
+  const done = executeRun(run.id, runPublicId, input, onEvent);
+  logInfo("orchestrator: chat run started", { run: runPublicId });
+
+  return {
+    runPublicId,
+    done,
+    cancel: () => controller.abort(),
+  };
 }
 
 /** Abort a running/queued run. */

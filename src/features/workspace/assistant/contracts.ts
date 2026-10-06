@@ -355,6 +355,11 @@ export interface ApprovalRequest {
   expectedTests: string[];
   /** Honest security impact statement (model-provided; may be empty). */
   securityImpact: string;
+  /* ---- Phase 9.6 — additive ---- */
+  /** Present when this approval belongs to a REAL orchestrator run: the
+   *  decision must be delivered to the orchestrator's approval gate (the
+   *  run is paused at the engine gate until a human decides). */
+  orchestratorRunId?: string;
 }
 
 /** The decision a human made on an approval card (8C — recorded, never applied). */

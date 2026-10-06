@@ -262,7 +262,7 @@ export async function POST(req: Request): Promise<Response> {
       void (async () => {
         publish(createEvent({ type: "ASSISTANT_STARTED", runId }));
         try {
-          const { content, servedModel } = await runAssistantTurn(
+          const runResult = await runAssistantTurn(
             {
               messages: parsed.data.messages,
               context: parsed.data.context,
@@ -293,6 +293,8 @@ export async function POST(req: Request): Promise<Response> {
               onResponseDelta: (text) => {
                 writeStage({ type: "RESPONSE_CHUNK", segment: { kind: "markdown", text } });
               },
+              // Phase 9.6: client disconnect cancels orchestrator-backed runs.
+              signal: req.signal,
             },
             writeStage,
           );
@@ -300,16 +302,21 @@ export async function POST(req: Request): Promise<Response> {
           seq += 1;
           const resultFrame: ResultFrame = {
             seq,
-            content,
-            servedModel,
+            content: runResult.content,
+            servedModel: runResult.servedModel,
             mode,
-            note: RESULT_NOTE,
+            note: runResult.note ?? RESULT_NOTE,
           };
           write(`event: result\ndata: ${JSON.stringify(resultFrame)}\n\n`);
 
           writeEvent({ type: "RUN_COMPLETED", runId, completedAt: Date.now() });
           publish(createEvent({ type: "ASSISTANT_COMPLETED", runId }));
-          logInfo("assistant run completed", { runId, requestId, mode, servedModel });
+          logInfo("assistant run completed", {
+            runId,
+            requestId,
+            mode,
+            servedModel: runResult.servedModel,
+          });
 
           // Phase 9.5 — memory inference (spec §6 + §13): ONLY the user's own
           // messages are mined, ONLY into the Memory Inbox as "proposed".
