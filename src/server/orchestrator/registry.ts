@@ -56,14 +56,17 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
     inputSchema: "AgentCall",
     outputSchema: "AgentResult",
     allowedTools: [],
-    // 90s (parity with reasoning/critic): a DIFFICULT request legitimately
-    // needs a longer planning generation. The previous 45s budget was
-    // engine-killed mid-generation on BOTH attempts for hard questions, so
-    // the run failed with "planner produced no plan" instead of reaching the
-    // planner's own deterministic fallback.
-    timeoutMs: 90_000,
+    // 40s ceiling, single attempt (measured Phase 9.6 fix): the chat run
+    // surface's SSE connection is killed by the network path at ~3.5min
+    // (dev.log "client disconnect" at 3m11s–3m29s on every long run), so
+    // the WHOLE run must fit well under it. A stuck planner generation
+    // previously blocked 90s × 2 engine attempts before the fallback —
+    // the exact "Planning changes comes after so long secs" stall. Now the
+    // planner is capped at ~35s of generation, after which the instant
+    // deterministic fallback plan keeps the run moving.
+    timeoutMs: 40_000,
     approvalPolicy: "never",
-    retry: { maxAttempts: 2, backoffMs: 800 },
+    retry: { maxAttempts: 1, backoffMs: 800 },
   },
   retrieval: {
     name: "retrieval",
@@ -76,9 +79,10 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
     inputSchema: "AgentCall",
     outputSchema: "AgentResult",
     allowedTools: grants(["repo.search", "read/search only (spec §4)"]),
-    timeoutMs: 60_000,
+    // Local hybrid search — 15s is generous (measured sub-second typical).
+    timeoutMs: 15_000,
     approvalPolicy: "never",
-    retry: { maxAttempts: 2, backoffMs: 500 },
+    retry: { maxAttempts: 1, backoffMs: 500 },
   },
   "code-analyst": {
     name: "code-analyst",
@@ -95,7 +99,8 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["repo.read-tree", "workspace tree listing (spec §4)"],
       ["repo.symbol-scan", "regex symbol scan (spec §4)"],
     ),
-    timeoutMs: 45_000,
+    // Local file reads + regex scans — no model in the loop.
+    timeoutMs: 20_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 1, backoffMs: 0 },
   },
@@ -114,7 +119,7 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["repo.read-file", "read-only file access (spec §4)"],
       ["repo.read-tree", "workspace tree listing (spec §4)"],
     ),
-    timeoutMs: 45_000,
+    timeoutMs: 20_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 1, backoffMs: 0 },
   },
@@ -129,9 +134,12 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
     inputSchema: "AgentCall",
     outputSchema: "AgentResult",
     allowedTools: [],
-    timeoutMs: 90_000,
+    // 50s ceiling, single attempt: the final answer generation fits (the
+    // gateway completes long-but-legitimate answers inside this budget),
+    // while the run's total stays under the ~3.5min connection kill window.
+    timeoutMs: 50_000,
     approvalPolicy: "never",
-    retry: { maxAttempts: 2, backoffMs: 800 },
+    retry: { maxAttempts: 1, backoffMs: 800 },
   },
   critic: {
     name: "critic",
@@ -148,9 +156,11 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["repo.search", "re-retrieval on weak evidence (spec §7)"],
       ["repo.symbol-scan", "symbol existence checks (spec §4)"],
     ),
-    timeoutMs: 90_000,
+    // 35s ceiling, single attempt: verification is a bounded JSON check;
+    // the weak-evidence re-round guard in the engine relies on this cap.
+    timeoutMs: 35_000,
     approvalPolicy: "never",
-    retry: { maxAttempts: 2, backoffMs: 800 },
+    retry: { maxAttempts: 1, backoffMs: 800 },
   },
   security: {
     name: "security",
@@ -167,7 +177,7 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["repo.read-file", "read-only file access (spec §4)"],
       ["repo.read-tree", "workspace tree listing (spec §4)"],
     ),
-    timeoutMs: 60_000,
+    timeoutMs: 25_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 1, backoffMs: 0 },
   },
@@ -186,7 +196,7 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["repo.read-file", "read-only file access (spec §4)"],
       ["repo.read-tree", "workspace tree listing (spec §4)"],
     ),
-    timeoutMs: 45_000,
+    timeoutMs: 20_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 1, backoffMs: 0 },
   },
@@ -204,7 +214,7 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["git.read-overview", "branch/overview read (spec §4)"],
       ["git.read-commits", "recent commit history read (spec §4)"],
     ),
-    timeoutMs: 30_000,
+    timeoutMs: 12_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 1, backoffMs: 0 },
   },
@@ -223,9 +233,14 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
       ["repo.search", "read/search to ground the proposal (spec §4)"],
       ["code.propose-changes", "record a proposed change-set (spec §4)"],
     ),
-    timeoutMs: 120_000,
+    // 60s ceiling, single attempt (was 120s × 2 engine attempts): a hung
+    // proposal generation previously pinned the "Writing patch" row for up
+    // to 4 minutes — the "stuck ongoing code writing" report — and the run
+    // died with the connection. A capped single generation + honest failed
+    // row keeps the run inside the kill window.
+    timeoutMs: 60_000,
     approvalPolicy: "on-mutating-action",
-    retry: { maxAttempts: 2, backoffMs: 800 },
+    retry: { maxAttempts: 1, backoffMs: 800 },
   },
 
   /* ---------------- specialists: honestly planned ---------------- */

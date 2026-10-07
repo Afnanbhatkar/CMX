@@ -1347,3 +1347,27 @@ Stage Summary:
 - Changed exactly 2 files (+45/−5 lines): assistant-service.ts (1 staged emission on the agent path) and ConversationView.tsx (approval scroll-into-view). No other project files touched.
 - Approval flow, chain rhythm, close machine, answer gating, engine persistence all preserved as designed.
 - Residual honest behavior (not bugs): agent runs take ~15–35s (real multi-agent work); a declined/no-decision approval still waits for the engine's 15-min honest expiry; Stop still cancels the run truthfully.
+
+---
+Task ID: fix-chat-thought-chain
+Agent: Z.ai Code (main)
+Task: Fix AI chat thought-chain stalls — coding/tough questions no response, slow Planning stage, approval stuck, ongoing code writing stuck ("Failed after 4m 10s — network error")
+
+Work Log:
+- Traced the user's screenshots to the real pipeline: POST /api/assistant/runs → assistant-service.ts → orchestrator-turn.ts → orchestrator/engine.ts → agents.ts/registry.ts
+- dev.log ground truth: every long run ended with "assistant run cancelled (client disconnect)" at 3m11s–3m29s — the network path KILLS the SSE stream at ~3.5min (hence "Failed after 4m 10s — network error"). Runs finishing <60s always succeeded.
+- Root causes fixed (only these, nothing else touched):
+  1. registry.ts — agent budgets were 45–120s with engine retry ×2 (a stuck planner blocked ~3min before fallback). Tightened: planner 40s, retrieval 15s, code-analyst/graph/dependency 20s, security 25s, reasoning 50s, critic 35s, coding 60s, git 12s; all retry maxAttempts=1. Worst-case full run now ~2.5min, typical 30–90s.
+  2. engine.ts — APPROVAL_TIMEOUT_MS 15min→2min (approval card no longer strands a dead stream); critic weak-evidence re-round now guarded by CRITIC_REROUND_ELAPSED_BUDGET_MS=45s so it can't add 3 agents to an already-slow run.
+  3. run-answers-registry.ts — intake answers pause 10min→2min (same connection kill window), message updated honestly.
+- bun run lint: 0 errors (1 pre-existing unrelated warning)
+- Restarted dev server (setsid pattern), verified end-to-end with agent browser at /app → Assistant → Agent mode:
+  - Coding question: full chain (Understanding → Planning → Searching → Read 8 files → change-set proposed) in ~65s, approval card appeared, Approve clicked → "Approved — decision recorded" → run completed with proposal answer
+  - Tough architecture question: completed in ~30s ("Worked for 12s" active time), real answer with cited paths
+  - dev.log: "assistant run completed" for both runs — ZERO client disconnects, zero failures, no browser console errors
+- Screenshot verification: /tmp/verify1.png (both conversations "Completed", footer intact)
+
+Stage Summary:
+- Root cause: SSE connection killed by network path at ~3.5min + over-generous agent budgets (90–120s ×2 retries) + 15min approval gate. Fix = fit every run under the window with honest caps.
+- Files changed: src/server/orchestrator/registry.ts, src/server/orchestrator/engine.ts, src/server/services/run-answers-registry.ts
+- Result: coding/tough questions answer in 12–65s; approval flow completes interactively; no more "network error" stalls in verified runs.

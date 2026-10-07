@@ -68,8 +68,18 @@ const GLOBAL_STATE = ((globalThis as Record<string, unknown>).__cmxOrchestratorS
 
 const ACTIVE_RUNS = GLOBAL_STATE.activeRuns;
 
-/** Approval gate budget — honest expiry instead of an infinite wait. */
-const APPROVAL_TIMEOUT_MS = 15 * 60_000;
+/** Approval gate budget — honest expiry instead of an infinite wait.
+ *  2min (measured Phase 9.6 fix): the chat run's SSE connection is killed
+ *  by the network path at ~3.5min, so a gate that waits 15 minutes strands
+ *  the chat client — the approval card just sits there "stuck" on a dead
+ *  stream. An honest expiry finalizes the run ("approval expired") while
+ *  the connection can still deliver it. */
+const APPROVAL_TIMEOUT_MS = 2 * 60_000;
+
+/** The critic's weak-evidence re-round (retrieval + reasoning + critic) may
+ *  only start while the run is still fast enough to absorb ~100s more and
+ *  still finish under the ~3.5min chat connection kill window. */
+const CRITIC_REROUND_ELAPSED_BUDGET_MS = 45_000;
 
 /* ------------------------------------------------------------------ */
 /* Live events (Phase 9.6 — chat integration)                          */
@@ -397,6 +407,8 @@ async function executeRun(
 
   const spans: (AgentResult & { wave: number })[] = [];
   let retrievedAgain = false;
+  /** Wall-clock start of THIS run's execution (re-round budget anchor). */
+  const runStartedAt = Date.now();
 
   const persistStatus = async (status: string, patch: Record<string, unknown> = {}) => {
     await db.agentRun
@@ -564,10 +576,17 @@ async function executeRun(
     }
 
     // ---- Critic loop: one honest re-retrieval round on weak evidence ----
+    // Bounded by the run's elapsed time (Phase 9.6 fix): the re-round adds
+    // THREE more sequential agents (retrieval + reasoning + critic). On a
+    // slow run it pushed the total past the ~3.5min connection kill window
+    // — the run died mid-verify and the chat showed a network error. The
+    // re-round only fires while the run is still fast enough to absorb it.
+    const runElapsedMs = Date.now() - (runStartedAt ?? Date.now());
     const firstCritic = spans.find((s) => s.agent === "critic");
     if (
       firstCritic?.nextAction === "retrieve-again" &&
       !retrievedAgain &&
+      runElapsedMs <= CRITIC_REROUND_ELAPSED_BUDGET_MS &&
       !signal.aborted
     ) {
       retrievedAgain = true;
