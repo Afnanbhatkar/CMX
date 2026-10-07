@@ -1371,3 +1371,20 @@ Stage Summary:
 - Root cause: SSE connection killed by network path at ~3.5min + over-generous agent budgets (90–120s ×2 retries) + 15min approval gate. Fix = fit every run under the window with honest caps.
 - Files changed: src/server/orchestrator/registry.ts, src/server/orchestrator/engine.ts, src/server/services/run-answers-registry.ts
 - Result: coding/tough questions answer in 12–65s; approval flow completes interactively; no more "network error" stalls in verified runs.
+
+---
+Task ID: 3
+Agent: Z.ai Code (main)
+Task: Final fix — AI chat thought chain stalls (approval gate freeze, slow phase transitions, "assistant run failed")
+
+Work Log:
+- Root-caused with DB evidence (agent_runs + orchestrator_agent_spans): the user's two "stuck" chat runs had ~5s of real agent work (planner 2s, retrieval 47ms, coding 3.2s) but ran 125.3s total — the run sat frozen at the orchestrator approval gate (APPROVAL_TIMEOUT_MS = 2min), then finalized with the critic "skipped" after expiry. Runs crossing the ~3.5min SSE kill window died with "The assistant run failed".
+- Fixed src/server/orchestrator/engine.ts: the approval gate now only BLOCKS on the console path (no onEvent). On the chat streaming path the approval-required card event is emitted and the run continues immediately (next wave → critic → answer); the user's decision is still recorded on the Approval row whenever they click (decideApproval tolerates a finished run).
+- Fixed src/features/workspace/chat/activity/chain-pacer.ts: halved all display-rhythm minimums per the user's "in less secs" demand — FIRST_STEP_DELAY 900→450ms, MIN_STEP_GAP 450→220ms, MIN_DWELL 700→320ms, CHILD_GAP 170→90ms, WRAP_UP_GAP 300→150ms. Display-only minimums; real backend spacing still wins.
+- Verified via agent-browser end-to-end (agent mode):
+  - Coding question: run completed in 8.3s (was 125.3s), critic COMPLETED (was skipped), approval card visible mid-run, Approve click recorded (approvals row status=approved).
+  - Tough question: full 8-agent pipeline incl. weak-evidence re-round completed in 9.1s, honest answer rendered, "Worked for 9s" chip, zero console errors.
+
+Stage Summary:
+- Chat thought-chain runs now finish in ~8-10s instead of freezing 2+ minutes at the approval gate; approval decisions work during AND after the run; console (Orchestrator panel) behavior unchanged.
+- Changed files: src/server/orchestrator/engine.ts, src/features/workspace/chat/activity/chain-pacer.ts (only).

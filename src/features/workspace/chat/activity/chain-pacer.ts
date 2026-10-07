@@ -26,10 +26,13 @@
  *   the whole queued story in one frame and kill the one-by-one entrance
  *   rhythm (they arrive right after the read events on every real run).
  *
- * Rhythm (matching the prototype scenarios):
- *   Thinking alone ≈ 0.9s → step 1 appears → each step ≥ 0.45s apart →
- *   each step visibly "runs" ≥ 0.7s before completing → result/file rows
- *   cascade in one-by-one ~170ms apart (fast, but every row is readable).
+ * Rhythm (matching the prototype scenarios, Phase 9.6 speed fix — the user
+ * demanded fast phase transitions "in less secs": every minimum below was
+ * measured as dead wait on top of real backend work, so the story keeps its
+ * one-by-one readability at roughly double speed):
+ *   Thinking alone ≈ 0.45s → step 1 appears → each step ≥ 0.22s apart →
+ *   each step visibly "runs" ≥ 0.32s before completing → result/file rows
+ *   cascade in one-by-one ~90ms apart (fast, but every row is readable).
  */
 
 import type { SequencedAssistantEvent } from "../../assistant/contracts";
@@ -52,15 +55,15 @@ export interface ChainPacerOptions {
 }
 
 /** The Thinking header is visible on its own before the first step. */
-const FIRST_STEP_DELAY_MS = 900;
+const FIRST_STEP_DELAY_MS = 450;
 /** Minimum visible gap between two consecutive step rows. */
-const MIN_STEP_GAP_MS = 450;
+const MIN_STEP_GAP_MS = 220;
 /** Minimum time a step row stays visibly "running" before completing. */
-const MIN_DWELL_MS = 700;
+const MIN_DWELL_MS = 320;
 /** Cascade gap for search-result / file rows — quick (many files stay
  *  brisk, per the user: "speed thodi zyada chalega"), but every row is
  *  visibly its own one-by-one appearance, never a blur. */
-const CHILD_GAP_MS = 170;
+const CHILD_GAP_MS = 90;
 
 export interface ChainPacer {
   /** Feed one real wire event (call for EVERY event, in arrival order). */
@@ -196,9 +199,9 @@ export function createChainPacer(options: ChainPacerOptions = {}): ChainPacer {
       : performance.now();
 
   /** Gap between beats once the answer has started (wrap-up compression).
-   *  300ms keeps the closing rows readable one-by-one (the user rejected
-   *  the earlier 140ms blur: rows must never appear "all at once"). */
-  const WRAP_UP_GAP_MS = 300;
+   *  150ms keeps the closing rows readable one-by-one (never an
+   *  "all at once" blur) at the user-mandated fast pace. */
+  const WRAP_UP_GAP_MS = 150;
 
   /**
    * Wrap-up compression: the first answer chunk arrived while story events

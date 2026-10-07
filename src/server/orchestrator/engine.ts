@@ -518,30 +518,26 @@ async function executeRun(
       );
       spans.push(...results);
 
-      // Approval gate: the run PAUSES here until a human decides (spec §4).
+      /* ---- Approval gate (spec §4) — TWO behaviors, split by surface ----
+       *
+       * CHAT STREAM (onEvent present): the approval card event is emitted
+       * and the run CONTINUES immediately (next wave → critic → answer).
+       * The engine must NEVER block on the human decision here: measured
+       * Phase 9.6 evidence — chat runs with ~5s of real agent work sat
+       * frozen for the full APPROVAL_TIMEOUT_MS (2min) at this gate (DB:
+       * agent spans done at ~5s, run completed at ~125s), the chain showed
+       * nothing but a spinner, and runs that crossed the ~3.5min SSE kill
+       * window died with "The assistant run failed". The decision is still
+       * recorded whenever the user clicks the card — decideApproval writes
+       * the Approval row and tolerates a run that already finished.
+       *
+       * CONSOLE (no onEvent): the original blocking gate, unchanged — the
+       * orchestrator console drives the decision through its own UI and
+       * polls DB state, so pausing here is the designed behavior. */
       const awaiting = results.find((r) => r.status === "awaiting-approval");
-      if (awaiting) {
-        let pendingApprovalId: string | null = null;
-        if (onEvent) {
-          const pendingApproval = await db.approval.findFirst({
-            where: { runId: runInternalId, status: "pending" },
-            orderBy: { createdAt: "desc" as const },
-          });
-          if (pendingApproval) {
-            pendingApprovalId = pendingApproval.id;
-            onEvent({
-              kind: "approval-required",
-              runPublicId,
-              approvalId: pendingApproval.id,
-              payload: parseApprovalPayload(pendingApproval.payload),
-            });
-          }
-        }
+      if (awaiting && !onEvent) {
         await persistStatus("waiting-approval");
         const decision = await waitForApproval(runPublicId, signal);
-        if (pendingApprovalId && (decision === "approved" || decision === "rejected")) {
-          onEvent?.({ kind: "approval-decided", approvalId: pendingApprovalId, decision });
-        }
         if (decision === "expired") {
           spans.push({
             agent: "critic",
@@ -565,6 +561,21 @@ async function executeRun(
         // the critic) instead of a frozen "waiting-approval" until the run
         // fully completes. A later gate sets waiting-approval again.
         await persistStatus("running");
+      } else if (awaiting && onEvent) {
+        const pendingApproval = await db.approval.findFirst({
+          where: { runId: runInternalId, status: "pending" },
+          orderBy: { createdAt: "desc" as const },
+        });
+        if (pendingApproval) {
+          onEvent({
+            kind: "approval-required",
+            runPublicId,
+            approvalId: pendingApproval.id,
+            payload: parseApprovalPayload(pendingApproval.payload),
+          });
+        }
+        // No blocking wait — the next wave starts right away; the card's
+        // decision is recorded on the Approval row whenever it lands.
       }
     }
 
