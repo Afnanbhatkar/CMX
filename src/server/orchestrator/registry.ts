@@ -56,7 +56,12 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
     inputSchema: "AgentCall",
     outputSchema: "AgentResult",
     allowedTools: [],
-    timeoutMs: 45_000,
+    // 90s (parity with reasoning/critic): a DIFFICULT request legitimately
+    // needs a longer planning generation. The previous 45s budget was
+    // engine-killed mid-generation on BOTH attempts for hard questions, so
+    // the run failed with "planner produced no plan" instead of reaching the
+    // planner's own deterministic fallback.
+    timeoutMs: 90_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 2, backoffMs: 800 },
   },

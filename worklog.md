@@ -1306,3 +1306,24 @@ Work Log:
 Stage Summary:
 - All 10 implemented agents verified working live; difficult questions complete; coding proposals parse reliably; approval gate opens at most once per run and releases correctly in BOTH console and chat
 - 4 files changed: llm-gateway.ts (+14), agents.ts (+134/−), contracts.ts (+31), engine.ts (+46/−) — no other surfaces touched
+
+---
+Task ID: session-3
+Agent: Z.ai (CodeMind X V2 orchestrator)
+Task: Fix AI-chat (Assistant) thought-chain failures — hard questions stuck→fail, approval-ask stuck, "ongoing code writing" stuck. Explicit constraint: change NOTHING else in the project.
+
+Work Log:
+- Explored the AI chat run pipeline end to end: use-assistant-run.ts → POST /api/assistant/runs → assistant-service.runAssistantTurn → orchestrator-turn → engine.executeRun → agents.ts (+ registry budgets, llm-gateway, approvals route, ConversationView approval card, chain pacer/gates)
+- Evidence from dev.log (user's own failing session): chat run 6.7min → "client disconnect" → fail; run at 14:00 died at 10s while waiting-approval and the user's Approve POST (14:00:25) landed on an already-cancelled run; repeated "coding transient model failure — retrying" loops
+- Root cause 1 (all three symptoms): /api/assistant/runs streamed ZERO bytes during long agent phases (40–240s LLM generations, the 15-min approval gate, intake pauses) — the chat looks frozen mid-chain ("stuck"), and the dead/idle connection kills the run mid-flight ("fail shows"). The Phase-3 route (/api/assistant/stream) already had the heartbeat pattern; the chat route never adopted it
+- Root cause 2 (hard questions): planner registry budget was 45s (only LLM agent below 90s) — on difficult requests both attempts were engine-killed mid-generation → "planner produced no plan" → whole run failed; the planner's own deterministic fallback never got a chance to run
+- Fix A (src/app/api/assistant/runs/route.ts): subscribe to the process-wide bus and forward STREAM_HEARTBEAT frames every 15s (outside the run seq space, unsubscribed on close) — identical pattern to the Phase-3 route; client's sequenced parser ignores them (no seq) → zero client changes
+- Fix B (src/server/orchestrator/registry.ts): planner timeoutMs 45s → 90s (parity with reasoning/critic); retry policy untouched
+- Verified live (curl, frame-timestamped): hard architecture+security question → full multi-agent run → RUN_COMPLETED with answer; coding request → "Writing patch" row → APPROVAL_REQUIRED mid-stream → heartbeats during gate wait (16:27:16/31/46) → POST approve → critic row → result + RUN_COMPLETED; coding answer = honest "Proposed change-set" + critic verdict
+- Verified in browser (agent-browser): Assistant panel → Agent mode → coding request → thought chain (Planning changes / Searching repository / Waiting for approval) → Approve clicked → answer rendered, "AI run: idle"; hard deep-dive question → "Worked for 25s" chain chip + full structured answer; zero console/page errors
+- bun run lint: clean (1 pre-existing unrelated warning)
+
+Stage Summary:
+- Exactly 2 files changed, both inside the failing flow: src/app/api/assistant/runs/route.ts (+heartbeat liveness), src/server/orchestrator/registry.ts (planner budget). No other project file touched
+- All three reported failures share the silent-stream root cause and are fixed: hard question now completes (or falls back honestly), approval decision releases a LIVE gate and the run continues in the same stream, "Writing patch"/long phases no longer freeze the chat
+- Known residual (honest, out of scope): a page refresh while paused at the approval gate still cancels the run server-side (the SSE is gone; reconnect/resume machinery does not exist in this build) — with liveness frames this path is now far less likely to be hit

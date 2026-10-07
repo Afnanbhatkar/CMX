@@ -2,8 +2,8 @@ import { z } from "zod";
 
 import { securityHeaders } from "@/server/security/config";
 import { logError, logInfo } from "@/server/security/logger";
-import { publish } from "@/server/events/bus";
-import { createEvent } from "@/server/events/types";
+import { publish, subscribe } from "@/server/events/bus";
+import { createEvent, type CodeMindEvent } from "@/server/events/types";
 import {
   AssistantError,
   runAssistantTurn,
@@ -155,6 +155,25 @@ export async function POST(req: Request): Promise<Response> {
         write(`event: ${withSeq.type}\ndata: ${JSON.stringify(withSeq)}\n\n`);
       };
 
+      /** Raw transport frame OUTSIDE the run's seq space (liveness only). */
+      const writeFrame = (event: CodeMindEvent): void => {
+        write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      };
+
+      // Liveness during the run's LONG silent phases — slow model
+      // generations (a hard request legitimately runs 40–240s per agent),
+      // the approval gate (the run pauses until a human decides), and the
+      // intake pause. Without these frames the stream is byte-silent for
+      // minutes: the chat looks frozen mid-thought-chain ("stuck"), and an
+      // idle SSE connection can be cut, which kills the run mid-flight and
+      // surfaces as a failure. Forward ONLY the process-wide
+      // STREAM_HEARTBEAT (every 15s) — the stream stays focused on its own
+      // run and never mixes in unrelated job events. Heartbeat frames carry
+      // no seq, so the client's sequenced-event parser ignores them.
+      const unsubscribeHeartbeats = subscribe((event) => {
+        if (event.type === "STREAM_HEARTBEAT") writeFrame(event);
+      });
+
       // FIRST EVENT — synchronous, before any await. Measured target ~300ms
       // includes network + client parse; server-side this is ~0ms.
       writeEvent({
@@ -236,6 +255,7 @@ export async function POST(req: Request): Promise<Response> {
       const close = (): void => {
         if (closed) return;
         closed = true;
+        unsubscribeHeartbeats();
         try {
           controller.close();
         } catch {
