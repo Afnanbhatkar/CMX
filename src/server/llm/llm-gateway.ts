@@ -66,6 +66,11 @@ export interface GatewayCompletionRequest {
   model?: string;
   /** Explicit thinking toggle (the assistant keeps chain-of-thought off). */
   thinking?: { type: "disabled" | "enabled" };
+  /** Optional per-call hard deadline (ms). Callers with a declared agent
+   *  budget (orchestrator registry) pass it so long-but-legitimate
+   *  generations — big structured answers, multi-file proposals — are not
+   *  cut off by the default 60 s chat budget. Defaults to COMPLETION_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export interface GatewayCompletionResult {
@@ -152,6 +157,13 @@ export const LLMGateway = {
     const model = LLMGateway.resolveModel(request.model);
     const requestedModel = request.model?.trim() ? model.id : null;
 
+    const deadlineMs =
+      typeof request.timeoutMs === "number" &&
+      Number.isFinite(request.timeoutMs) &&
+      request.timeoutMs > 0
+        ? Math.min(Math.ceil(request.timeoutMs), 300_000)
+        : COMPLETION_TIMEOUT_MS;
+
     const zai = await ZAI.create();
     const startedAt = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -163,7 +175,7 @@ export const LLMGateway = {
           ...(request.thinking ? { thinking: request.thinking } : {}),
         }),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("timeout")), COMPLETION_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new Error("timeout")), deadlineMs);
         }),
       ]);
     } catch (error) {

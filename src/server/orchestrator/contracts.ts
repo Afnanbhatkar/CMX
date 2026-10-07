@@ -339,6 +339,35 @@ export const codingProposalSchema = z.object({
     .max(6),
 });
 
+/** Extract the FIRST balanced JSON object from a model response (brace
+ *  matching that respects strings/escapes). Model outputs that wrap the
+ *  JSON in prose ("Here is the proposal: {...}") or append notes after it
+ *  still yield the object — the previous first{…last} slice broke whenever
+ *  prose itself contained braces. Returns null when no balanced object. */
+export function extractBalancedJsonObject(raw: string): string | null {
+  const start = raw.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 /** Parse a JSON object out of a model response (fences tolerated). */
 export function parseJsonFromModel<T>(
   raw: string,
@@ -355,6 +384,8 @@ export function parseJsonFromModel<T>(
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     candidates.push(withoutFences.slice(firstBrace, lastBrace + 1));
   }
+  const balanced = extractBalancedJsonObject(withoutFences);
+  if (balanced) candidates.push(balanced);
   for (const candidate of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidate);

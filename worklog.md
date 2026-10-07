@@ -1280,3 +1280,29 @@ Stage Summary:
 - Project extracted byte-identical from tar; NO feature/code modifications
 - Dev server running (next dev -p 3000, PID ~2386 tree); /api/health reports healthy (db ok, jobSystem ok, SSE ok; postgresql honestly "planned")
 - Preview live for the user; awaiting user direction before any changes
+
+---
+Task ID: 1 (orchestrator reliability session)
+Agent: Z.ai Code
+Task: User reported orchestrator agents stuck/failing on difficult questions, stuck "writing code", and approval-flow hangs. Verify every implemented agent live, find root causes, fix ONLY the orchestrator path (no other surfaces).
+
+Work Log:
+- Read engine/agents/tools/contracts/registry/gateway/chat bridge + console panel; confirmed no protected surfaces touched
+- LIVE tests (API + browser): medium question ✅; hard architectural question → REPRODUCED stuck-then-fail; coding request → REPRODUCED double approval gate; multi-agent audit → all specialists
+- Root causes found:
+  (1) completeWithDeadline hard-capped EVERY agent LLM call at 55s and returned null → difficult questions and any sizable code proposal failed deterministically ("stuck in between then fail")
+  (2) engine Promise.race timers were never cleared (timer pile-up across waves/retries)
+  (3) engine retry policy silently skipped transient soft-failures (model response unavailable/unparseable) — registry retry contract not honored
+  (4) LLM planner produced TWO coding steps for a coding request → each coding execution persisted its own change-set + approval and gated the run separately → after approving gate 1, gate 2 stranded the run at waiting-approval until the 15-min expiry ("approval ask stucks")
+  (5) status stayed "waiting-approval" after a decision until full completion → UI looked frozen
+  (6) coding proposal parsing was brittle (strict first{…last} extraction + enum-only changeKind) → "model proposal unavailable or unparseable" under realistic scope noise
+- Fixes (4 files, orchestrator-scoped):
+  - llm-gateway.ts: optional per-call timeoutMs (default 60s unchanged; hard cap 300s) — purely additive
+  - agents.ts: completeWithDeadline now uses the AGENT's registry budget (−5s margin, engine timeout stays a real net) + one bounded second chance for fast transient failures; normalizePlan enforces ONE coding step per plan (idempotent, before id assignment); planner prompt line "at most ONE coding step"; coding proposal parse hardened: balanced-brace extraction + honest coercion (change-kind synonyms create/update/patch/remove → add/modify/delete, file/path aliases, content-as-diff, single-change shorthand, title fallback) — never fabricates
+  - engine.ts: race timer cleanup in finally; registry retry honored for transient "unavailable or unparseable" soft-failures; status flipped back to "running" after an approval decision
+- Re-verified LIVE: hard question → completed with real answer; coding request → exactly 1 coding span + 1 approval → approve → running → critic → completed (17.9s in console UI); deterministic memory-block repro → passes; CHAT end-to-end (SSE → approval card → /api/assistant/approvals → gate release → RUN_COMPLETED) ✅; multi-agent audit → planner/retrieval/code-analyst/graph/security/dependency/git/reasoning/critic all completed live; project eval suite 13/13 PASS; lint 0 errors (1 baseline warning); zero page errors in browser
+- Cleanup: cancelled leftover test runs (no active runs remain); /tmp probes only
+
+Stage Summary:
+- All 10 implemented agents verified working live; difficult questions complete; coding proposals parse reliably; approval gate opens at most once per run and releases correctly in BOTH console and chat
+- 4 files changed: llm-gateway.ts (+14), agents.ts (+134/−), contracts.ts (+31), engine.ts (+46/−) — no other surfaces touched

@@ -273,16 +273,45 @@ async function executeAgent(
       };
     }
     try {
-      const raced = await Promise.race([
-        runWithFaultInjection(step.agent, call, fault, attempt),
-        new Promise<"engine-timeout">(
-          (resolve) => setTimeout(() => resolve("engine-timeout"), spec.timeoutMs),
-        ),
-      ]);
+      let raceTimer: ReturnType<typeof setTimeout> | null = null;
+      let raced: AgentResult | "engine-timeout";
+      try {
+        raced = await Promise.race([
+          runWithFaultInjection(step.agent, call, fault, attempt),
+          new Promise<"engine-timeout">((resolve) => {
+            raceTimer = setTimeout(() => resolve("engine-timeout"), spec.timeoutMs);
+          }),
+        ]);
+      } finally {
+        // The race timer must not outlive the attempt — a completed agent
+        // must not leave a 45–120 s timer holding the event loop (timers
+        // piled up across waves and retries before this cleanup).
+        if (raceTimer) clearTimeout(raceTimer);
+      }
       if (raced === "engine-timeout") {
         lastError = `agent exceeded its ${spec.timeoutMs}ms deadline`;
         logWarn("orchestrator: agent timeout", { agent: step.agent, attempt });
         continue; // retry per policy
+      }
+      // Registry retry policy also covers TRANSIENT soft failures — a model
+      // response that came back empty/unparseable is the same class of
+      // failure as a thrown attempt (the deadline budgets inside the agents
+      // keep every attempt inside spec.timeoutMs, so the retry cannot blow
+      // the run's total wall time). Semantic failures (e.g. a proposal that
+      // targets no real files) are NOT retried — they are honest results.
+      if (
+        raced.status === "failed" &&
+        raced.error &&
+        raced.error.includes("unavailable or unparseable") &&
+        attempt < maxAttempts
+      ) {
+        lastError = raced.error;
+        logWarn("orchestrator: agent transient model failure — retrying", {
+          agent: step.agent,
+          attempt,
+        });
+        await new Promise((r) => setTimeout(r, spec.retry.backoffMs));
+        continue;
       }
       return { ...raced, attempts: attempt };
     } catch (error) {
@@ -519,6 +548,11 @@ async function executeRun(
           break;
         }
         if (signal.aborted) break;
+        // The decision released the gate — flip the status back to running
+        // so pollers show live progress (waves that follow the gate, e.g.
+        // the critic) instead of a frozen "waiting-approval" until the run
+        // fully completes. A later gate sets waiting-approval again.
+        await persistStatus("running");
       }
     }
 
