@@ -269,6 +269,30 @@ function AssistantMessage({
   const disableMemory = useContextInspectorStore((s) => s.disableMemory);
   const enableMemory = useContextInspectorStore((s) => s.enableMemory);
 
+  /* Phase 9.6 fix (approval mid-run pause invisible): under the pin-to-top
+   * anchor contract (RULES.md §15) the auto-follower stands down while the
+   * chain grows, so the orchestrator's approval card — rendered below the
+   * live chain — can land BELOW THE FOLD. The multi-agent run genuinely
+   * pauses at the approval gate until a human decides (spec §4), so an
+   * unseen card reads as "the run is stuck / ongoing code writing froze".
+   * When a NEW approval arrives on a generating message, bring the card
+   * into view ONCE (smooth, minimal scroll). This is a deliberate one-shot
+   * user-action scroll, the same spirit as the send anchor — it never runs
+   * while the answer is merely streaming, and the user's own scroll always
+   * wins afterwards. */
+  const approvalCardRef = useRef<HTMLDivElement | null>(null);
+  const scrolledApprovalIdRef = useRef<string | null>(null);
+  const approvalId = message.approval?.id ?? null;
+  useEffect(() => {
+    if (!busy || !approvalId) return;
+    if (scrolledApprovalIdRef.current === approvalId) return;
+    scrolledApprovalIdRef.current = approvalId;
+    approvalCardRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [busy, approvalId]);
+
   const recordApprovalDecision = (decision: "approved" | "rejected" | "edited") => {
     if (!message.approval) return;
     updateMessage(conversationId, message.id, { approvalDecision: decision });
@@ -340,11 +364,13 @@ function AssistantMessage({
           genuinely pauses the stream) so the card must render while the
           message is still generating — the decision releases the run. */}
       {message.approval && (
-        <ApprovalCard
-          approval={message.approval}
-          decision={message.approvalDecision ?? null}
-          onDecision={recordApprovalDecision}
-        />
+        <div ref={approvalCardRef}>
+          <ApprovalCard
+            approval={message.approval}
+            decision={message.approvalDecision ?? null}
+            onDecision={recordApprovalDecision}
+          />
+        </div>
       )}
 
       {message.state === "error" && (

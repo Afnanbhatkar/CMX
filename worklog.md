@@ -1327,3 +1327,23 @@ Stage Summary:
 - Exactly 2 files changed, both inside the failing flow: src/app/api/assistant/runs/route.ts (+heartbeat liveness), src/server/orchestrator/registry.ts (planner budget). No other project file touched
 - All three reported failures share the silent-stream root cause and are fixed: hard question now completes (or falls back honestly), approval decision releases a LIVE gate and the run continues in the same stream, "Writing patch"/long phases no longer freeze the chat
 - Known residual (honest, out of scope): a page refresh while paused at the approval gate still cancels the run server-side (the SSE is gone; reconnect/resume machinery does not exist in this build) — with liveness frames this path is now far less likely to be hit
+
+---
+Task ID: fix-ai-chat-thought-chain-stuck
+Agent: Z.ai Code (main)
+Task: Fix AI chat thought chain getting stuck in the AI chat section (not the Orchestrator panel) — tough/coding questions show no response, approval-type questions stall, "Writing patch" row stays ongoing.
+
+Work Log:
+- Traced the full agent-mode chat path: use-assistant-run.ts (client SSE) → /api/assistant/runs route → assistant-service.runAssistantTurn → orchestrator-turn → engine.ts (waves, approval gate) → chain pacer / chain-close gate / answer pacer / run-activity-store (client presentation).
+- Correlated dev.log + DB span timelines with the user's actual stuck runs (16:23, 16:27, 16:39): the backend completed or correctly paused at the approval gate every time — the UI never showed the answer/card in time.
+- Root cause 1 (backend): the orchestrator (agent-mode) path returned the final answer with NO RESPONSE_CHUNK on the wire. The client's chain-close + answer-reveal machinery keys on the FIRST chunk (story wrap-up compression → chain close → gated reveal), so the paced chain kept playing long after the run finished and the answer appeared very late — the chat read as frozen ("no response"), users hit Stop before the reveal.
+- Root cause 2 (frontend): under the pin-to-top anchor contract the auto-follower stands down while the chain grows, so the orchestrator approval card (rendered below the live chain) landed below the fold. The run genuinely pauses at the approval gate until a human decides — an unseen card = "stuck ongoing code writing" (DB proof: runs cancelled 40–90s in, approval still pending).
+- Fix 1 (src/server/services/assistant-service.ts, agent branch only): emit the orchestrator's complete answer as ONE honest RESPONSE_CHUNK before returning — engages the exact same downstream sequence every streamed run uses (compression → close → reveal). Nothing else in the engine/gateway/registry touched.
+- Fix 2 (src/features/workspace/chat/ConversationView.tsx, AssistantMessage only): when a NEW approval arrives on a generating message, smooth-scroll the card into view ONCE (ref + idempotent effect). Never fires while merely streaming; user scroll always wins afterwards.
+- Verified via curl SSE (agent mode): RESPONSE_CHUNK now precedes the result frame; approve via /api/assistant/approvals releases the gate and the run completes.
+- Verified via agent-browser at 1100x700 (preview-panel size): coding question → card auto-scrolled fully into view (top 298/700) → Approve → "Worked for 17s" + "Proposed change-set" answer visible; tough deep-dive question → completed 33s → 5,383-char answer revealed and visible with no manual scroll; search-mode regression → 65 streamed chunks, completed; zero console/server errors; bun run lint clean (only a pre-existing warning).
+
+Stage Summary:
+- Changed exactly 2 files (+45/−5 lines): assistant-service.ts (1 staged emission on the agent path) and ConversationView.tsx (approval scroll-into-view). No other project files touched.
+- Approval flow, chain rhythm, close machine, answer gating, engine persistence all preserved as designed.
+- Residual honest behavior (not bugs): agent runs take ~15–35s (real multi-agent work); a declined/no-decision approval still waits for the engine's 15-min honest expiry; Stop still cancels the run truthfully.

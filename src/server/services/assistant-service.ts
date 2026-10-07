@@ -1007,6 +1007,20 @@ export async function runAssistantTurn(
         runId: input.runId,
         orchestratorRunId: orchestrator.orchestratorRunId,
       });
+      // Phase 9.6 fix (agent-mode chat stuck): the orchestrator path used to
+      // return the answer with NO RESPONSE_CHUNK on the wire. The client's
+      // chain-close + answer-reveal machinery keys on the FIRST chunk (story
+      // wrap-up compression → chain close → gated reveal), so without it the
+      // thought chain kept playing its full paced story after the run had
+      // already finished and the answer appeared very late — the chat looked
+      // frozen mid-run ("stuck") on coding/tough questions. Emitting the full
+      // answer as ONE honest chunk (it really is the final model output)
+      // engages exactly the same downstream sequence every streamed run uses.
+      // Nothing is re-dressed: one chunk, the complete content, verbatim.
+      onStage?.({
+        type: "RESPONSE_CHUNK",
+        segment: { kind: "markdown", text: orchestrator.content },
+      });
       return {
         content: orchestrator.content,
         servedModel: orchestrator.servedModel,
