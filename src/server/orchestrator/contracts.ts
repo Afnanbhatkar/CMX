@@ -227,6 +227,11 @@ export interface OrchestratorRunInput {
   preset?: string | null;
   /** Drill fault injection — default off, used by acceptance verification. */
   fault?: FaultInjection | null;
+  /** User-designated target file(s) (attached, pinned, active, or named in
+   *  the request and resolved against the real workspace). When non-empty,
+   *  the coding agent MUST confine the change-set to EXACTLY these paths —
+   *  the user's file choice is a hard constraint, never a hint. */
+  targetFiles?: string[];
 }
 
 export interface OrchestrationApprovalView {

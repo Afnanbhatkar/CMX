@@ -139,6 +139,9 @@ export async function runOrchestratorTurn(opts: {
   request: string;
   /** Retrieved memory records (Phase 9.5) — appended as context data. */
   memories: MemoryRecord[];
+  /** User-designated target file(s) — the change-set MUST be confined to
+   *  exactly these paths when non-empty (file-targeting fix). */
+  targetFiles?: string[];
   /** The assistant run id (correlation in logs). */
   runId: string;
   /** The stage emitter (wire events flow to the thought chain). */
@@ -155,7 +158,7 @@ export async function runOrchestratorTurn(opts: {
   let orchestratorRunPublicId: string | null = null;
 
   const handle = await startChatOrchestration(
-    { request: requestWithMemory },
+    { request: requestWithMemory, targetFiles: opts.targetFiles },
     (event: OrchestratorEngineEvent) => {
       try {
         // The approval-required event is the FIRST carrier of the engine's

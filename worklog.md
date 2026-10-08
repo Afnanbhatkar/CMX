@@ -1453,3 +1453,23 @@ Work Log:
 Stage Summary:
 - Preview panel is live again and stable; the sandbox-stable launch pattern is documented in .zscripts/dev.sh for any future restart.
 - Root cause of the recurring "panel not showing anything": the sandbox reaps tool-call-spawned processes; only the clean double-fork exec pattern survives. Nothing in the app code was changed in this task.
+
+---
+Task ID: 12
+Agent: Z.ai Code (main)
+Task: Fix agent mode proposing changes in a RANDOM/incorrect file instead of the file the user specified (attached, pinned, open, or named in the prompt); when the named file cannot be resolved, ask with near-match suggestions through the existing question-choose flow.
+
+Work Log:
+- Root cause: runOrchestratorTurn received ONLY the request text — context.attachments / pinnedRefs / activeFile never reached the orchestrator — and the coding agent chose its target from retrieval hits (call.scopePaths), so the approval card showed whatever the search scored highest (observed: "rename a file called aiside bar" → src/features/workspace/memory/MemoryPanel.tsx).
+- SERVER — targeting pipeline (5 files):
+  - contracts.ts: OrchestratorRunInput.targetFiles — when non-empty the change-set is confined to EXACTLY these paths (hard constraint).
+  - engine.ts: both AgentCall construction sites thread input.targetFiles into the shared call.
+  - agents.ts: AgentCall.targetFiles; runCoding overrides scopePaths with the designated targets (retrieval search skipped), adds a HARD CONSTRAINT prompt line; planner prompt names the target file(s); deterministic safety net DROPS any proposed change outside the targets before persistence (logs + honest failure when everything is dropped).
+  - orchestrator-turn.ts: accepts + forwards targetFiles.
+  - assistant-service.ts: resolveAgentTargets(query, context) — resolves explicit repo paths, exact basenames ("fix X.tsx"), "file called/named X" mentions (stem-normalized matching: "aiside bar"→AISidebar.tsx, "greeting"→greeting.py/greeting2.py), attachment/pinned paths (validated against the real index), activeFile as last resort. Unresolved/ambiguous mention → ONE clarify pause via the standard 8C flow: INTAKE_QUESTIONS with near-match options (deterministic stem matches, then hybrid search fallback) + free-text answer; answers are appended to the request and the chosen file becomes the target. All gated on MODIFICATION_INTENT (questions/chat never asked).
+- Browser-verified end-to-end (agent mode, "rename a file called greeting"): clarify card fired — "I found 2 files matching 'greeting'. Which one should I change?" with chips greeting.py (examples) / greeting2.py (examples) + custom input (the existing question-choose UI). Picked greeting.py → Resume run → server log "coding: dropped changes outside user-designated targets, dropped: 1" (safety net fired) → DB approval: "Rename greeting.py — 1 file change(s): examples/greeting.py", affectedFiles [examples/greeting.py]. The approval card now shows the USER'S file.
+- bun run lint: 0 errors. Server verified stable on the sandbox-stable launch pattern.
+
+Stage Summary:
+- Agent mode now lands changes ONLY in the file the user designates (attach, pin, open, path, filename, or "called X"); wrong-file proposals are deterministically dropped; unresolvable names pause the run once with near-match suggestion chips + free text (standard 8C question flow).
+- Files changed: src/server/orchestrator/{contracts,engine,agents}.ts, src/server/services/{assistant-service,orchestrator-turn}.ts — nothing else.

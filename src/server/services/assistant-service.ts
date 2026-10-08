@@ -903,6 +903,227 @@ function renderAnswersBlock(batch: IntakeQuestionBatch, answers: IntakeAnswer[])
   return lines.join("\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* Agent-mode file targeting (Agent Mode V2 fix)                       */
+/*                                                                     */
+/* The user designates WHICH file a change must land in — by attaching  */
+/* it, pinning it, having it open, or naming it in the request. The     */
+/* change-set must be confined to EXACTLY that file: the coding agent   */
+/* used to pick whatever retrieval scored highest, so the approval card */
+/* showed a random file instead of the user's file. When a named file   */
+/* cannot be resolved, the run pauses ONCE and asks with near-match     */
+/* suggestions through the standard 8C question flow (option chips +    */
+/* free-text answer).                                                   */
+/* ------------------------------------------------------------------ */
+
+/** A repo path with a directory part and a real file extension. */
+const EXPLICIT_PATH_RE = /(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8}/g;
+/** A bare filename mention ("MemoryPanel.tsx", "greeting.py"). */
+const BASENAME_RE =
+  /\b([\w.-]+\.(?:tsx|ts|jsx|js|py|md|json|css|scss|html|htm|yml|yaml|toml|sql|sh|bash|go|rs|java|rb|php|vue|svelte|c|cpp|h|prisma|txt))\b/gi;
+/** "file called X" / "named X" — the user's name for the file (may not be a real path). */
+const CALLED_RE = /\b(?:called|named|titled)\s+["'“”]?([^"'“”.,!?\n]{2,48})/gi;
+
+const normalizeName = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+interface AgentTargetResolution {
+  /** Resolved repo-relative paths the change-set is confined to. */
+  targets: string[];
+  /** Non-empty when a named file could not be resolved — the run pauses
+   *  ONCE and asks the user to pick the real file (8C question flow). */
+  clarify: IntakeQuestionBatch | null;
+}
+
+/** Match a user's file-name mention against real file paths: the stem of the
+ *  basename (without extension) compared with punctuation stripped —
+ *  "aiside bar" matches AISidebar.tsx, "greeting" matches greeting.py. */
+function nameMatchesPath(mention: string, path: string): boolean {
+  const candidate = normalizeName(mention);
+  if (candidate.length < 3) return false;
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const stem = normalizeName(base.replace(/\.[A-Za-z0-9]{1,8}$/, ""));
+  if (!stem) return false;
+  return stem === candidate || stem.includes(candidate) || candidate.includes(stem);
+}
+
+/** Build the ONE clarify question for an unresolved/ambiguous file mention. */
+function buildTargetClarifyBatch(
+  mention: string,
+  suggestions: string[],
+  multipleMatches: boolean,
+): IntakeQuestionBatch | null {
+  if (suggestions.length === 0) return null;
+  const question: ClarifyQuestion = {
+    id: "q-target-file",
+    question: multipleMatches
+      ? `I found ${suggestions.length} files matching “${mention}”. Which one should I change?`
+      : `I couldn't find a file named “${mention}” in the repository. Did you mean one of these?`,
+    options: suggestions.map((path, i) => ({
+      id: `opt-${i + 1}`,
+      label: `${path.slice(path.lastIndexOf("/") + 1)} (${path.slice(0, path.lastIndexOf("/")) || "."})`,
+      value: path,
+    })),
+  };
+  return {
+    id: `intake-${Date.now().toString(36)}`,
+    questions: [question],
+    rationale: multipleMatches
+      ? "Several files match the name you gave — the choice changes what gets modified."
+      : "The file name you gave doesn't exist in the repository — pick the real file so the change lands in the right place.",
+    askedAt: Date.now(),
+  };
+}
+
+/** Extract the chosen target file(s) from the user's clarify answers. */
+function targetsFromAnswers(
+  batch: IntakeQuestionBatch,
+  answers: IntakeAnswer[],
+  workspacePaths: string[],
+): string[] {
+  const chosen: string[] = [];
+  for (const answer of answers) {
+    const question = batch.questions.find((q) => q.id === answer.questionId);
+    if (!question) continue;
+    if (answer.optionId) {
+      const option = question.options.find((o) => o.id === answer.optionId);
+      if (option) chosen.push(option.value);
+      continue;
+    }
+    const custom = answer.customText?.trim();
+    if (!custom) continue;
+    // Free text: accept a real path directly, else resolve by stem match.
+    const norm = custom.replace(/^\.?\//, "");
+    if (workspacePaths.includes(norm)) {
+      chosen.push(norm);
+      continue;
+    }
+    const suffix = workspacePaths.find((p) => p.endsWith(`/${norm}`));
+    if (suffix) {
+      chosen.push(suffix);
+      continue;
+    }
+    const stemHit = workspacePaths.find((p) => nameMatchesPath(custom, p));
+    if (stemHit) chosen.push(stemHit);
+  }
+  return [...new Set(chosen)];
+}
+
+/** Resolve the user-designated target file(s) for an agent-mode run. */
+async function resolveAgentTargets(
+  query: string,
+  context: AssistantTurnInput["context"],
+): Promise<AgentTargetResolution> {
+  const empty: AgentTargetResolution = { targets: [], clarify: null };
+  if (!MODIFICATION_INTENT.test(query)) return empty;
+
+  // The REAL workspace file list — a target must exist on disk; a claimed
+  // path that is not real can never silently become one.
+  let workspacePaths: string[] = [];
+  try {
+    const { index } = await getSearchIndex();
+    workspacePaths = index.files.map((f) => f.path);
+  } catch {
+    return empty; // index unavailable — run without targeting, honestly
+  }
+  const pathSet = new Set(workspacePaths);
+
+  // Attachment/pinned paths are the user's strongest signal — keep only
+  // ones that really exist (readAttachedFiles reports the rest honestly).
+  const attachmentPaths = [
+    ...(context?.attachments
+      ?.filter((a) => a.kind === "repository-file" && typeof a.path === "string")
+      .map((a) => a.path!.trim()) ?? []),
+    ...(context?.pinnedRefs ?? []),
+  ].filter((p) => p.length > 0 && pathSet.has(p));
+
+  const targets = new Set<string>(attachmentPaths);
+
+  // 1) Explicit paths written in the request ("src/app/page.tsx").
+  for (const match of query.matchAll(EXPLICIT_PATH_RE)) {
+    const norm = match[0].replace(/^\.?\//, "");
+    if (pathSet.has(norm)) {
+      targets.add(norm);
+      continue;
+    }
+    const suffix = workspacePaths.find((p) => p.endsWith(`/${norm}`));
+    if (suffix) targets.add(suffix);
+  }
+
+  // 2) Bare filename mentions ("fix MemoryPanel.tsx") — exact basename.
+  let unresolvedBasename: string | null = null;
+  for (const match of query.matchAll(BASENAME_RE)) {
+    const name = match[1];
+    const hits = workspacePaths.filter(
+      (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase() === name.toLowerCase(),
+    );
+    if (hits.length > 0) {
+      for (const hit of hits) targets.add(hit);
+    } else {
+      unresolvedBasename = name;
+    }
+  }
+
+  // 3) "file called X / named X" — resolve by stem similarity; an attached
+  //    file whose name matches IS the named file.
+  for (const match of query.matchAll(CALLED_RE)) {
+    const mention = match[1].trim();
+    if (!mention) continue;
+    const stemHits = workspacePaths.filter((p) => nameMatchesPath(mention, p));
+    if (stemHits.length === 1) {
+      targets.add(stemHits[0]);
+    } else if (stemHits.length > 1) {
+      // Several near-matches: let the user pick the real file.
+      return {
+        targets: [...targets],
+        clarify: buildTargetClarifyBatch(mention, stemHits.slice(0, 5), true),
+      };
+    } else {
+      // Nothing matches by name — ask with near-match suggestions.
+      return {
+        targets: [...targets],
+        clarify: await buildUnresolvedClarify(query, mention, workspacePaths),
+      };
+    }
+  }
+
+  // A bare basename that matched nothing is also an unresolved mention.
+  if (unresolvedBasename) {
+    return {
+      targets: [...targets],
+      clarify: await buildUnresolvedClarify(query, unresolvedBasename, workspacePaths),
+    };
+  }
+
+  // 4) Nothing named and nothing attached → the currently open file (when
+  //    one is open) is the change target; otherwise retrieval decides.
+  if (targets.size === 0) {
+    const active = context?.activeFile?.trim();
+    if (active && pathSet.has(active)) targets.add(active);
+  }
+
+  return { targets: [...targets], clarify: null };
+}
+
+/** Near-match suggestions for a file mention that resolved to nothing:
+ *  deterministic stem matches first, then the hybrid search index. */
+async function buildUnresolvedClarify(
+  query: string,
+  mention: string,
+  workspacePaths: string[],
+): Promise<IntakeQuestionBatch | null> {
+  let candidates = workspacePaths.filter((p) => nameMatchesPath(mention, p)).slice(0, 5);
+  if (candidates.length === 0) {
+    try {
+      const { index } = await getSearchIndex();
+      const response = await runHybridSearch(index, { query: mention, limit: 8, mode: "auto" });
+      candidates = [...new Set(response.results.map((h) => h.file))].slice(0, 4);
+    } catch {
+      candidates = []; // suggestions unavailable — no fake options
+    }
+  }
+  return buildTargetClarifyBatch(mention, candidates, false);
+}
+
 /**
  * Parse the model's APPROVAL_MARKER block, if the model emitted one. Returns
  * the cleaned content (block stripped) and the typed approval request — or
@@ -1006,9 +1227,50 @@ export async function runAssistantTurn(
   // burn a six-agent pipeline. Failures/cancels surface honestly.
   if (mode === "agent" && !isCasualPrompt(built.query)) {
     try {
+      // ---- File targeting (Agent Mode V2 fix) ----
+      // Resolve the file(s) the user designated (attached / pinned / open /
+      // named in the request). When a named file cannot be resolved against
+      // the real workspace, pause ONCE and ask with near-match suggestions
+      // through the standard 8C question flow — the change must land in the
+      // file the user means, never in whatever retrieval scored highest.
+      let requestText = built.query;
+      let targetFiles: string[] = [];
+      const resolution = await resolveAgentTargets(built.query, input.context);
+      if (resolution.clarify) {
+        if (!input.answersProvider) {
+          // No answers surface available — proceed honestly without targets
+          // (the clarify question simply cannot be asked here).
+          logWarn("assistant: target clarify skipped (no answers provider)", {
+            runId: input.runId,
+          });
+        } else {
+          onStage?.({ type: "INTAKE_QUESTIONS", batch: resolution.clarify });
+          input.onPause?.({ reason: "answers" });
+          const answers = await input.answersProvider(resolution.clarify);
+          if (!answers || answers.length === 0) {
+            throw new AssistantError("cancelled", "The run was cancelled while waiting for your answers.");
+          }
+          requestText = requestText + "\n" + renderAnswersBlock(resolution.clarify, answers);
+          const { index } = await getSearchIndex();
+          targetFiles = targetsFromAnswers(
+            resolution.clarify,
+            answers,
+            index.files.map((f) => f.path),
+          );
+        }
+      } else {
+        targetFiles = resolution.targets;
+      }
+      logInfo("assistant: agent target files resolved", {
+        runId: input.runId,
+        targets: targetFiles,
+        clarified: Boolean(resolution.clarify),
+      });
+
       const orchestrator = await runOrchestratorTurn({
-        request: built.query,
+        request: requestText,
         memories: built.memories,
+        targetFiles,
         runId: input.runId ?? "run-pending",
         onStage: onStage ?? (() => undefined),
         signal: input.signal,

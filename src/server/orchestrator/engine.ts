@@ -1225,6 +1225,7 @@ export async function startRun(input: OrchestratorRunInput): Promise<string> {
     plan: null,
     reasoning: null,
     runInternalId: run.id,
+    targetFiles: [...(input.targetFiles ?? [])],
     signal: controller.signal,
     onToolUse: () => undefined,
   };
@@ -1295,6 +1296,7 @@ export async function startChatOrchestration(
     plan: null,
     reasoning: null,
     runInternalId: run.id,
+    targetFiles: [...(input.targetFiles ?? [])],
     signal: controller.signal,
     onToolUse: () => undefined,
   };
