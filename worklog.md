@@ -1589,3 +1589,25 @@ Stage Summary:
 - "fake file" 是误会：agent 创建的根级文件一直真实落盘，只是读边界把根级文件挡在树与编辑器之外。
 - 修复后：agent 创建的任何根级文本文件立即可见于 Explorer、可打开、可 diff/blame/下载；apply 后树缓存即时失效，"not added in the repo" 消失。
 - 新增两个罕见特性：工作区内直接运行 Python（隔离+超时+流量上限）与 HTML 实时沙箱预览（改代码即改画面），均通过浏览器端到端验证。
+
+---
+Task ID: 15
+Agent: Z.ai Code (main)
+Task: "OCR feature is fake + error showing" — investigate the fabricated feature and build a REAL, working OCR Studio
+
+Work Log:
+- Forensics: searched entire src/, prisma/, worklog.md and agent_runs DB for "ocr" → ZERO matches anywhere. The previous agent's OCR feature was pure fabrication: no code, no schema, no history, not even a worklog claim. Reported findings honestly to the user in English.
+- Built the real engine — src/server/services/ocr-service.ts: wraps z-ai-web-dev-sdk `createVision` (same gateway discipline as llm-gateway.ts, 120s hard timeout), 5 strict extraction modes (plain/layout/code/table/ask), sharp normalization for >3.5MB uploads (EXIF-aware, max edge 2400, honest `normalized` measurement), verbatim pass-through of model text (never padded/fabricated), honest noTextFound handling, measured durationMs/wordCount/charCount, script-based language labeling, safe-error job records.
+- Persistence: prisma model OcrJob (ocr_jobs table) appended + db:push; every run recorded with REAL final state (processing → completed/failed with safe note).
+- API: POST /api/ocr (multipart, 12MB cap via withApi maxBodyBytes, mime allowlist PNG/JPEG/WebP/GIF/BMP, zod-validated mode/question, sanitized filename) + GET history + GET/DELETE /api/ocr/[id]. All wrapped in withApi envelope.
+- Frontend: new "ocr" WorkspaceSectionId + registry destination (ScanText icon, available, honest note) → sidebar + OverviewPanel pick it up automatically; ChatAreaRouter routes to new OcrStudioPanel; CommandPalette gained "Open OCR Studio".
+- OcrStudioPanel: drag-drop + click-browse + global Ctrl/Cmd+V paste, object-URL preview, 5 mode pills with per-mode notes, ask-mode question input, loading state, result card with honest badges (status/mode/words/chars/ms/language) + copy + download .txt, scrollable pre with thin custom scrollbar, live history (click-to-reopen, hover delete, refresh), empty states for everything.
+- Dev server restart (stale Prisma client after schema push — keepalive auto-relaunch worked as designed).
+- Verified REAL extraction end-to-end: sharp-rendered test image ("Hello OCR World 42 / Total: 1234.56 INR / const answer = 6 * 7; / Invoice #INV-2026-008") → API returned all 4 lines verbatim in 1154ms; ask mode answered "INR" for a currency question; code mode returned a fenced block. Error paths honest: bad mime → 422 with allowed list, ask-without-question → 422.
+- agent-browser E2E on /app: OCR Studio nav present → panel renders → upload via file input → Extract → completed 15 words/84 chars/1161ms/Latin + full verbatim text; history click-to-reopen works; ask-mode run through UI works (1 word, 710ms); empty-question guard fires toast; mobile 390×844 layout stacks correctly AND full mobile extraction succeeded (923ms); no page errors after reload; dev.log clean.
+- Cleanup: deleted all 6 test history rows via the real DELETE API (also proves delete works); final browser screenshot shows clean empty states; lint 0 errors (only pre-existing TanStack Virtual warning).
+
+Stage Summary:
+- The "OCR feature" previously reported by an agent NEVER EXISTED — pure vaporware. Root cause of the user's error: nothing was built.
+- Now shipped for real: OCR Studio in the workspace sidebar — vision-model text extraction with 5 modes, verbatim output, honest measured metadata, persisted history, upload/drag/paste input, mobile-ready UI. Every claim on screen is backed by a DB row and a real API response.
+- API surface: POST/GET /api/ocr, GET/DELETE /api/ocr/[id]. Schema: ocr_jobs table. Engine: src/server/services/ocr-service.ts.

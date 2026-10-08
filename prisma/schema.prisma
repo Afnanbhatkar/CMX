@@ -912,3 +912,41 @@ model RepositoryImportFinding {
   @@index([jobId])
   @@map("repository_import_findings")
 }
+
+// ============================================================================
+// OCR STUDIO — real image text extraction (vision model), append-only history
+// ============================================================================
+
+/// One OCR extraction run. Text is produced by the vision model — every
+/// stored field is measured truth (duration, sizes, counts), never fabricated.
+model OcrJob {
+  id        String   @id @default(cuid())
+  /// Original upload filename (sanitized, display only).
+  filename  String
+  /// "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/bmp"
+  mimeType  String
+  /// Uploaded image size in bytes (after server-side normalization).
+  sizeBytes Int
+  /// Extraction mode: "plain" | "layout" | "code" | "table" | "ask"
+  mode      String   @default("plain")
+  /// Custom question when mode === "ask" (empty otherwise).
+  question  String?
+  /// "processing" | "completed" | "failed"
+  status    String   @default("processing")
+  /// Extracted text (verbatim when the model can read it).
+  text      String?
+  /// Free-form honest note when status === "failed" (safe message only).
+  error     String?
+  /// Wall-clock duration of the vision call in ms (measured).
+  durationMs Int?
+  /// Model-reported primary text language (e.g. "English"), null when unknown.
+  language  String?
+  /// Measured word count of `text` (0 when empty).
+  wordCount Int      @default(0)
+  /// Measured character count of `text` (0 when empty).
+  charCount Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("ocr_jobs")
+}

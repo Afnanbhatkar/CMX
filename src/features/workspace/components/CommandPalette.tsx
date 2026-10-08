@@ -39,6 +39,7 @@ import {
   Plus,
   Repeat,
   RotateCcw,
+  ScanText,
   Search,
   Settings,
   ShieldCheck,
@@ -250,6 +251,15 @@ export function CommandPalette({ filesMode, onFilesModeChange }: CommandPaletteP
           shortcut: "⌘⇧F",
           run: () => {
             setSection("search");
+            close();
+          },
+        },
+        {
+          id: "open-ocr-studio",
+          label: "Open OCR Studio",
+          icon: ScanText,
+          run: () => {
+            setSection("ocr");
             close();
           },
         },

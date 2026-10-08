@@ -18,6 +18,7 @@ import {
   GitCompareArrows,
   LayoutDashboard,
   Network,
+  ScanText,
   Search,
   Settings,
   ShieldCheck,
@@ -75,6 +76,13 @@ export const WORKSPACE_DESTINATIONS: DestinationEntry[] = [
     availability: "available",
     note: "Hybrid retrieval over the real workspace — BM25 + local dense vectors + symbols + paths + import graph + git. English, Hindi and Hinglish queries.",
     icon: Search,
+  },
+  {
+    id: "ocr",
+    label: "OCR Studio",
+    availability: "available",
+    note: "Real text extraction from images through the vision model — verbatim output, five extraction modes, job history. Upload, drag-drop or paste an image.",
+    icon: ScanText,
   },
   {
     id: "architecture",

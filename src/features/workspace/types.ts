@@ -99,6 +99,7 @@ export type WorkspaceSectionId =
   | "memory"
   | "repository"
   | "search"
+  | "ocr"
   | "architecture"
   | "security"
   | "testing"
