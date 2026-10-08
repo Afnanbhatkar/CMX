@@ -16,7 +16,7 @@ import { z } from "zod";
 
 import { db } from "@/lib/db";
 import { contentHash } from "@/lib/server/workspace-mutation";
-import { logWarn } from "@/server/security/logger";
+import { logInfo, logWarn } from "@/server/security/logger";
 import {
   extractFileRefs,
   verifyReferences,
@@ -1179,6 +1179,78 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
       },
       { attempts: 1, toolCount, durationMs: Date.now() - started, error: "proposal targets no real files" },
     );
+  }
+
+  // ---- Rename completeness net (deterministic; Agent Mode V2) ----
+  // A rename is complete ONLY when the source is deleted AND the destination
+  // is created with the source's content. The model sometimes proposes just
+  // one half (observed: "change this file name - watchparty" persisted ONLY
+  // the delete of greeting.py — approval applied it and the file vanished
+  // with no watchparty created). When the request is a rename and the
+  // proposal carries the delete half, the create half is synthesized
+  // MECHANICALLY from the REAL source content captured at proposal time —
+  // the model is never trusted with the rename's integrity. (The regexes
+  // mirror assistant-service's targeting extraction — same request, same
+  // name, so both layers agree on the destination.)
+  const RENAME_REQ_RE =
+    /\b(?:re-?name)\b|\bchange\s+(?:this\s+|that\s+|the\s+)?(?:file\s+)?name\b|\bname[d]?\s+it\b|\bcall(?:ed)?\s+it\b/i;
+  if (RENAME_REQ_RE.test(call.request)) {
+    const NEW_NAME_RES: RegExp[] = [
+      /\bnamed?\s+(?:it|the\s+file|this\s+file|that\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
+      /\bcall\s+(?:it|the\s+file|this\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
+      /\bre-?name\s+(?:the\s+)?(?:[\w@.-]+\s+)?(?:file\s+)?(?:to\s+)?[\w@.-]+\s+to\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
+      /\bto\s+["'“”]?([A-Za-z][\w@.+-]{0,47})\s*[.!]?\s*$/i,
+      /(?:[-–—:]\s*|\bas\s+)["'“”]?([A-Za-z][\w@.+-]{1,47})\s*[.!]?\s*$/i,
+    ];
+    let newName: string | null = null;
+    for (const destRe of NEW_NAME_RES) {
+      const match = destRe.exec(call.request);
+      if (!match) continue;
+      const candidate = match[match.length - 1].trim().replace(/["'“”]/g, "");
+      if (candidate) {
+        newName = candidate;
+        break;
+      }
+    }
+    if (newName && /^[A-Za-z][\w.+-]*$/.test(newName)) {
+      const coveredPaths = new Set(validChanges.map((c) => c.path));
+      const synthesized: typeof validChanges = [];
+      for (const change of validChanges) {
+        if (change.changeKind !== "delete") continue;
+        const clean = newName.replace(/^\.?\//, "");
+        const dir = change.path.includes("/")
+          ? `${change.path.slice(0, change.path.lastIndexOf("/"))}/`
+          : "";
+        const ext = change.path.match(/\.[A-Za-z0-9]{1,8}$/)?.[0] ?? "";
+        const withExt = /\.[A-Za-z0-9]{1,8}$/.test(clean) ? clean : `${clean}${ext}`;
+        const destination = `${dir}${withExt}`;
+        if (destination === change.path || coveredPaths.has(destination)) continue;
+        const content =
+          change.beforeContent ??
+          (await cachedRead(call, "coding", change.path))?.content ??
+          "";
+        if (!content.trim()) continue; // no real content — never invent one
+        synthesized.push({
+          path: destination,
+          changeKind: "add",
+          content,
+          diff: content,
+          rationale: `rename: content moved from ${change.path}`,
+          beforeContent: null,
+          baseHash: null,
+        });
+        coveredPaths.add(destination);
+      }
+      if (synthesized.length > 0) {
+        validChanges.push(...synthesized);
+        parsed.description =
+          (parsed.description ? `${parsed.description} ` : "") +
+          "(rename completed: the new file is created with the original content)";
+        logInfo("coding: rename create-half synthesized from real source content", {
+          count: synthesized.length,
+        });
+      }
+    }
   }
 
   // Persist the PROPOSED change-set + the approval request (no disk writes).

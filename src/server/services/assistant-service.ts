@@ -977,9 +977,11 @@ function cleanFileMention(raw: string): string {
 }
 
 /** The request asks to RENAME something (the destination is a NEW name —
- *  it must never be resolved as an existing target file). */
+ *  it must never be resolved as an existing target file). Covers the plain
+ *  verb ("rename X to Y") AND the natural phrasings ("change this file
+ *  name - watchparty", "change the name to Y", "named it Y"). */
 const RENAME_INTENT_RE =
-  /\b(?:re-?name)\b|\bchange\s+(?:the\s+)?name\b|\bname[d]?\s+it\b|\bcall(?:ed)?\s+it\b/i;
+  /\b(?:re-?name)\b|\bchange\s+(?:this\s+|that\s+|the\s+)?(?:file\s+)?name\b|\bname[d]?\s+it\b|\bcall(?:ed)?\s+it\b/i;
 
 /** "rename X to Y" — X is the target-file mention (fallback when the target
  *  is not caught by the basename / name-before-file patterns). */
@@ -987,12 +989,14 @@ const RENAME_TARGET_RE =
   /\bre-?name\s+(?:the\s+)?(?:file\s+)?["'“”]?([A-Za-z][\w@.+-]{1,47})\s+to\s+["'“”]?/i;
 
 /** The NEW name in a rename request ("…named it watchparty", "rename X to
- *  watchparty", "name it Y", "call it Y", "…to watchparty"). */
+ *  watchparty", "name it Y", "call it Y", "…to watchparty", "change this
+ *  file name - watchparty"). */
 const RENAME_DEST_RES: RegExp[] = [
   /\bnamed?\s+(?:it|the\s+file|this\s+file|that\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
   /\bcall\s+(?:it|the\s+file|this\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
   /\bre-?name\s+(?:the\s+)?(?:[\w@.-]+\s+)?(?:file\s+)?(?:to\s+)?[\w@.-]+\s+to\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
   /\bto\s+["'“”]?([A-Za-z][\w@.+-]{0,47})\s*[.!]?\s*$/i,
+  /(?:[-–—:]\s*|\bas\s+)["'“”]?([A-Za-z][\w@.+-]{1,47})\s*[.!]?\s*$/i,
 ];
 
 interface AgentTargetResolution {
@@ -1107,6 +1111,49 @@ function renameDestinationPath(target: string, newName: string): string | null {
   const withExt = /\.[A-Za-z0-9]{1,8}$/.test(clean) ? clean : `${clean}${ext}`;
   const destination = `${dir}${withExt}`;
   return destination === target ? null : destination;
+}
+
+/** The user's rename NEW NAME for a request ("watchparty" in "rename
+ *  greeting.py to watchparty" / "…named it watchparty" / "change this file
+ *  name - watchparty"), or null when the request is not a rename. */
+function renameDestinationName(query: string): string | null {
+  if (!RENAME_INTENT_RE.test(query)) return null;
+  for (const destRe of RENAME_DEST_RES) {
+    const match = destRe.exec(query);
+    if (!match) continue;
+    const cleaned = cleanFileMention(match[1]);
+    if (cleaned) return cleaned;
+  }
+  return null;
+}
+
+/** Complete the rename TARGET SET: for every resolved target, add the
+ *  computed destination path (same directory, extension preserved) so the
+ *  change-set can CREATE the new file while staying confined to the
+ *  user-designated paths. Idempotent — safe to apply after every merge. */
+function addRenameDestinations(query: string, targets: string[]): string[] {
+  const newName = renameDestinationName(query);
+  if (!newName || targets.length === 0) return targets;
+  const out = new Set(targets);
+  for (const target of targets) {
+    const destination = renameDestinationPath(target, newName);
+    if (destination) out.add(destination);
+  }
+  return [...out];
+}
+
+/** Free-text clarify answers that mean "none of these — stop": the run must
+ *  be CANCELLED, never continued targetless (observed: the user answered
+ *  "non of them stop the run" and the run continued and modified an
+ *  unrelated file). Only free-text answers are matched — an option-chip
+ *  choice is always a real selection. */
+const STOP_ANSWER_RE =
+  /^(?:no\b|none\b|non\b|nothing\b|nah\b|nope\b|not\s+any\b|stop\b|cancel\b|never\s*mind|forget\s*it|skip\b|don'?t\b|do\s*not\b)/i;
+function answersIndicateStop(answers: IntakeAnswer[]): boolean {
+  return answers.some((a) => {
+    const text = (a.customText ?? "").trim();
+    return text.length > 0 && STOP_ANSWER_RE.test(text);
+  });
 }
 
 /** Resolve the user-designated target file(s) for an agent-mode run.
@@ -1494,21 +1541,34 @@ export async function runAssistantTurn(
           if (!answers || answers.length === 0) {
             throw new AssistantError("cancelled", "The run was cancelled while waiting for your answers.");
           }
-          requestText = requestText + "\n" + renderAnswersBlock(resolution.clarify, answers);
           const { index } = await getSearchIndex();
+          const answered = targetsFromAnswers(
+            resolution.clarify,
+            answers,
+            index.files.map((f) => f.path),
+          );
+          // The user refused every suggestion ("non of them stop the run")
+          // — the run STOPS. Continuing targetless would modify whatever
+          // retrieval scored highest — the original random-file bug.
+          if (answered.length === 0 && answersIndicateStop(answers)) {
+            throw new AssistantError(
+              "cancelled",
+              "The run was stopped — you chose none of the suggested files. No changes were made.",
+            );
+          }
+          requestText = requestText + "\n" + renderAnswersBlock(resolution.clarify, answers);
           // Merge with targets already resolved before the question (e.g. a
           // valid attachment) — the answers never discard real designations.
-          targetFiles = [
-            ...new Set([...resolution.targets, ...targetsFromAnswers(
-              resolution.clarify,
-              answers,
-              index.files.map((f) => f.path),
-            )]),
-          ];
+          targetFiles = [...new Set([...resolution.targets, ...answered])];
         }
       } else {
         targetFiles = resolution.targets;
       }
+      // A rename must be able to CREATE the new file: complete the target
+      // set with the computed destination path (idempotent; also covers
+      // targets that came from clarify answers, where the destination was
+      // never computed before the question).
+      targetFiles = addRenameDestinations(built.query, targetFiles);
       logInfo("assistant: agent target files resolved", {
         runId: input.runId,
         targets: targetFiles,

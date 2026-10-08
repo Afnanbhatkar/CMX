@@ -1501,3 +1501,24 @@ Work Log:
 Stage Summary:
 - The approval card now targets EXACTLY the user-designated file for every phrasing tested (attached/named/path/"X file"/rename); rename requests allow the destination file too; unresolvable names always ask with same/nearly-same suggestion chips (Claude-style choose-one) and can no longer fall through to a guessed file.
 - Files changed this session: src/server/services/assistant-service.ts (targeting rewrite), src/app/api/assistant/runs/resume/route.ts (live-pause stream close), src/server/orchestrator/evals.ts (1-line type fix) + restored the bug-damaged ConversationView.tsx. Nothing else.
+
+---
+Task ID: 12
+Agent: Z.ai Code (main)
+Task: 修复 agent 模式 (1) 重命名应用后是 delete-only，文件消失而无新文件；(2) 澄清问题回答 "non of them stop the run" 后 run 继续跑并修改随机文件（覆盖了 ConversationView.tsx 导致 "Export ConversationView doesn't exist" 构建错误）；(3) 恢复被污染的文件。
+
+Work Log:
+- 从 DB (change_sets/code_changes) 取证：changeset "Rename greeting.py to watchparty" 只含 delete（目标解析因 "change this file name - watchparty" 未命中 RENAME_INTENT_RE，destination 未加入 targetFiles，被 scope filter 丢弃）；changeset "Add top-level comment to ConversationView.tsx" 是澄清回答 "non of them stop the run" 被当作自由文本解析失败后 targetless 继续跑导致。
+- git checkout -- 恢复被覆盖的 src/features/workspace/chat/ConversationView.tsx（794 行完整导出）与被 delete-only rename 删掉的 examples/greeting.py。
+- assistant-service.ts: RENAME_INTENT_RE 扩展 "change this/that/the file name"；RENAME_DEST_RES 增加尾缀 "-/—/:/as X" 目的地模式；新增 renameDestinationName/addRenameDestinations（幂等）并在 clarify 回答合并后再次补全 destination；新增 STOP_ANSWER_RE + answersIndicateStop，回答解析不到目标且语义为拒绝/停止时 throw AssistantError("cancelled")。
+- agents.ts runCoding: 新增确定性 rename 完整性兜底 —— 请求为 rename 且 proposal 只有 delete 半边时，用 proposal 时捕获的真实源内容机械合成 destination 的 add（绝不发明内容），日志 logInfo 标注。
+- bun run lint 通过（仅既有无关 warning）。
+
+Stage Summary:
+- 浏览器端到端验证 4 条路径全部通过：
+  1) "rename greeting file to named it watchparty" → 审批卡片只含 examples/greeting.py + examples/watchparty.py（1 created·1 deleted），批准后磁盘 greeting.py 删除、watchparty.py 以原内容创建；
+  2) "rename greeting3 file …"（不存在）→ 澄清问题暂停，无任何修改；
+  3) 澄清回答 "stop" → run 诚实终止 "The run was stopped — you chose none of the suggested files. No changes were made."；
+  4) "rename greet file …"（部分名）→ "I found 1 files matching …" 选择卡片 → 选中 greeting2.py → 卡片 greeting2.py→alphapack.py，批准后正确落盘。
+- 控制台零错误；"Export ConversationView doesn't exist" 随文件恢复消失。
+- 教训：LLM 提案的目标约束必须机械强制 + rename 必须双半边完整；用户拒绝澄清选项时必须终止 run。
