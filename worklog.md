@@ -1550,3 +1550,21 @@ Stage Summary:
   4) 无引用 + 不存在名 "zzznope" → 澄清问题带 "Choose a file" 选择器 → 选 notes.py 填入答案 → resume 后 targets=[examples/notes.py]；
   5) 澄清回答 "stop" → run 诚实终止。
 - 教训：确定性正则分析必须只作用于用户原始文本（上下文块引用旧请求会跨 run 污染意图）；显式用户指定必须优先于启发式猜测；LLM 提案与真实磁盘状态之间的一切差异都要在 proposal 阶段对齐。
+
+---
+Task ID: 13
+Agent: Z.ai Code (main)
+Task: "preview is not showing" — 修复预览面板黑屏
+
+Work Log:
+- agent-browser 首次打开 http://localhost:3000 → net::ERR_CONNECTION_REFUSED，端口 3000 无监听，ps 无 next/bun dev 进程 → dev server 已死，用户的 Preview Panel 因此黑屏。
+- 复查 .zscripts/keepalive.sh：监督脚本根本没在运行；且其内部用 `bun run dev`，而 package.json 的 dev 脚本是 `next dev -p 3000 2>&1 | tee dev.log` —— tee 管道子进程会被沙箱进程收割器收割（与 dev.sh 注释一致）。
+- 以沙箱稳定模式重启 dev server：(setsid bash .zscripts/dev.sh < /dev/null > /dev/null 2>&1 &) → Ready in 2.6s。
+- 重写 .zscripts/keepalive.sh：不再直接跑 bun run dev；改为每 5s curl 探测 /api/health，宕机时用 setsid + dev.sh 拉起（唯一能存活收割器的启动方式），日志写 dev-server.log。
+- 以 (setsid bash .zscripts/keepalive.sh ...) 启动监督进程（ps 确认存活）。
+- 端到端验证：GET / → 200，GET /app → 200，GET /api/health → 200；agent-browser 截图确认落地页、工作区 Repository 视图、文件预览（点击 src/app/page.tsx 正常显示代码内容）均渲染正常；dev.log 无运行时错误。
+
+Stage Summary:
+- 根因：dev server 被沙箱回收后无人拉起（keepalive 未运行 + 自身启动方式会被收割器杀掉）→ Preview Panel 连接拒绝黑屏。
+- 修复：dev server 重启 + keepalive.sh 重写为探测式监督（curl /api/health → setsid dev.sh），keepalive 常驻。
+- 预览面板恢复显示；工作区各视图与文件预览功能浏览器验证通过。应用代码本身无 bug，未改动任何 src 文件。
