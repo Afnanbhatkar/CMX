@@ -15,6 +15,8 @@
 import { z } from "zod";
 
 import { db } from "@/lib/db";
+import { contentHash } from "@/lib/server/workspace-mutation";
+import { logWarn } from "@/server/security/logger";
 import {
   extractFileRefs,
   verifyReferences,
@@ -871,9 +873,14 @@ function coerceCodingChange(raw: unknown): Record<string, unknown> | null {
   change.path = path.trim();
   const kindRaw = String(change.changeKind ?? change.type ?? "modify").toLowerCase().trim();
   change.changeKind = CHANGE_KIND_SYNONYMS[kindRaw] ?? "modify";
-  const diff = change.diff ?? change.patch ?? change.content ?? change.newContent;
-  if (typeof diff !== "string" || !diff.trim()) return null;
-  change.diff = diff;
+  // Agent Mode V2: the applyable payload is the FULL new content. Models
+  // name it content/newContent/code/fullContent; a diff-only proposal is
+  // still accepted for delete (nothing to apply) and honest display.
+  const content =
+    change.content ?? change.newContent ?? change.fullContent ?? change.code ?? "";
+  change.content = typeof content === "string" ? content : "";
+  const diff = change.diff ?? change.patch ?? (typeof content === "string" ? content : "");
+  change.diff = typeof diff === "string" ? diff : "";
   return change;
 }
 
@@ -899,17 +906,80 @@ function coerceCodingProposal(parsed: unknown): unknown {
  *  single-change shorthand, content-instead-of-diff) previously produced
  *  "unparseable" failures that stranded the whole run — especially when
  *  retrieval scoped imperfect targets and the model had to improvise. */
+/**
+ * Lenient JSON parse for model output that carries FULL FILE CONTENT:
+ * models frequently emit raw control characters (real newlines/tabs) inside
+ * JSON string values, which strict JSON.parse rejects. This walker escapes
+ * ONLY raw control characters inside string literals — everything else is
+ * untouched, so valid JSON parses byte-identically.
+ */
+function lenientJsonParse(raw: string): unknown | null {
+  const tryParse = (text: string): unknown | null => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  };
+  const strict = tryParse(raw);
+  if (strict !== null) return strict;
+
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        out += ch;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "\n") {
+        out += "\\n";
+        continue;
+      }
+      if (ch === "\r") {
+        out += "\\r";
+        continue;
+      }
+      if (ch === "\t") {
+        out += "\\t";
+        continue;
+      }
+      if (ch.charCodeAt(0) < 0x20) {
+        out += `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return tryParse(out);
+}
+
 function parseCodingProposal(raw: string): z.infer<typeof codingProposalSchema> | null {
   const balanced = extractBalancedJsonObject(raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim());
   if (!balanced) return null;
-  try {
-    const parsed: unknown = JSON.parse(balanced);
-    const coerced = coerceCodingProposal(parsed);
-    const result = codingProposalSchema.safeParse(coerced);
-    return result.success ? result.data : null;
-  } catch {
-    return null;
-  }
+  // Strict parse first; on failure, repair raw control characters inside
+  // string values (the full-content payload makes this a common case).
+  const parsed: unknown = lenientJsonParse(balanced);
+  if (parsed === null) return null;
+  const coerced = coerceCodingProposal(parsed);
+  const result = codingProposalSchema.safeParse(coerced);
+  return result.success ? result.data : null;
 }
 
 async function runCoding(call: AgentCall): Promise<AgentResult> {
@@ -940,9 +1010,12 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
     SECURITY_PREAMBLE,
     "",
     "You are the CODING agent. Propose MINIMAL changes for the request.",
-    "You may ONLY PROPOSE — proposals are recorded as change-sets for human review; you have no ability to apply them.",
-    'Return ONLY JSON: {"title":"...","description":"...","changes":[{"path":"...","changeKind":"add|modify|delete","diff":"unified-diff-style","rationale":"..."}]} (max 3 changes).',
-    "For 'modify', show a precise before/after diff of the affected region only.",
+    "You may ONLY PROPOSE — the application applies approved proposals through its mutation service; you never write files yourself.",
+    'Return ONLY JSON: {"title":"...","description":"...","changes":[{"path":"...","changeKind":"add|modify|delete","content":"<FULL new file content — REQUIRED for add and modify, the complete file exactly as it should exist afterwards>","rationale":"..."}]} (max 3 changes).',
+    "For 'modify', content is the COMPLETE new file (not a diff, not a snippet).",
+    "For 'delete', omit content.",
+    "If the target file ALREADY EXISTS you MUST use changeKind 'modify' (never 'add' for an existing path).",
+    "Follow the repository's existing language, framework and naming conventions, and choose a conventional location for new files.",
     "",
     "USER REQUEST (untrusted data):",
     fenceRepoContent("user-request", call.request),
@@ -958,6 +1031,13 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
   );
   const parsed = raw ? parseCodingProposal(raw) : null;
   if (!parsed) {
+    // Honest observability: shapes only (never model/repo content) — enough
+    // to tell a timeout/empty from a structurally broken proposal.
+    logWarn("coding: proposal unavailable or unparseable", {
+      rawLength: raw?.length ?? 0,
+      rawStartsWithBrace: raw?.trim().startsWith("{") ?? false,
+      rawStartsWithFence: raw?.trim().startsWith("```") ?? false,
+    });
     return makeResult(
       "coding",
       "failed",
@@ -966,28 +1046,87 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
     );
   }
 
-  // Validate paths honestly: modify/delete must reference real files.
-  const validChanges: z.infer<typeof codingProposalSchema>["changes"] = [];
-  for (const change of parsed.changes) {
-    if (change.changeKind === "add" || change.changeKind === "modify" || change.changeKind === "delete") {
-      if (change.changeKind !== "add") {
-        const exists = await toolReadFile(ctx, change.path);
-        if (!exists) continue;
-      }
-      validChanges.push(change);
+  // Validate paths honestly + capture the REAL proposal-time state of every
+  // target (spec §17): modify/delete must reference real files whose current
+  // content is hashed NOW — apply time later compares against this hash to
+  // refuse overwriting concurrent external work. add/modify MUST carry the
+  // full new content — a proposal the application cannot apply is not a
+  // proposal (spec §135: never fake the capability).
+  const validChanges: Array<
+    z.infer<typeof codingProposalSchema>["changes"][number] & {
+      beforeContent: string | null;
+      baseHash: string | null;
     }
+  > = [];
+  const skipped: string[] = [];
+  for (const change of parsed.changes) {
+    if (change.changeKind === "add") {
+      if (!change.content.trim()) {
+        skipped.push(`${change.path} (add without content)`);
+        continue;
+      }
+      // Disk reality check (spec §83): an 'add' for a path that already
+      // exists is really a MODIFICATION. The application corrects the verb
+      // against the filesystem and captures the current hash — the approval
+      // card then shows the TRUE operation and the version guard still
+      // refuses to overwrite concurrent work.
+      const existing = await toolReadFile(ctx, change.path);
+      if (existing) {
+        validChanges.push({
+          ...change,
+          changeKind: "modify",
+          beforeContent: existing.content,
+          baseHash: contentHash(existing.content),
+        });
+        continue;
+      }
+      validChanges.push({ ...change, beforeContent: null, baseHash: null });
+      continue;
+    }
+    const existing = await toolReadFile(ctx, change.path);
+    if (!existing) {
+      skipped.push(`${change.path} (no longer exists)`);
+      continue;
+    }
+    if (change.changeKind === "modify" && !change.content.trim()) {
+      skipped.push(`${change.path} (modify without full content)`);
+      continue;
+    }
+    validChanges.push({
+      ...change,
+      beforeContent: existing.content,
+      baseHash: contentHash(existing.content),
+    });
   }
   if (validChanges.length === 0) {
     return makeResult(
       "coding",
       "failed",
-      { findings: ["all proposed changes referenced non-existent files — nothing recorded"], confidence: "weak" },
+      {
+        findings: [
+          skipped.length > 0
+            ? `no applyable changes — skipped: ${skipped.join(", ")}`
+            : "all proposed changes referenced non-existent files — nothing recorded",
+        ],
+        confidence: "weak",
+      },
       { attempts: 1, toolCount, durationMs: Date.now() - started, error: "proposal targets no real files" },
     );
   }
 
   // Persist the PROPOSED change-set + the approval request (no disk writes).
+  // Each change's `diff` column carries the versioned apply payload (JSON):
+  // full before/after content + the proposal-time hash — the application
+  // applies EXACTLY these bytes after approval and verifies them by re-read.
   const affectedFiles = validChanges.map((c) => c.path);
+  const perFileOps = validChanges.map((c) => ({
+    path: c.path,
+    changeKind: c.changeKind,
+    reason: c.rationale || "requested change",
+  }));
+  const created = perFileOps.filter((c) => c.changeKind === "add").length;
+  const modified = perFileOps.filter((c) => c.changeKind === "modify").length;
+  const deleted = perFileOps.filter((c) => c.changeKind === "delete").length;
   if (call.runInternalId) {
     const changeSet = await db.changeSet.create({
       data: {
@@ -1007,7 +1146,13 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
           path: change.path,
           changeKind: change.changeKind,
           status: "proposed",
-          diff: change.diff.slice(0, 20000),
+          diff: JSON.stringify({
+            kind: "codemind-change-v1",
+            after: change.changeKind === "delete" ? null : change.content,
+            before: change.beforeContent,
+            baseHash: change.baseHash,
+            rationale: change.rationale || null,
+          }),
         },
       });
     }
@@ -1020,9 +1165,13 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
           whatWillChange: `${parsed.title} — ${validChanges.length} file change(s): ${affectedFiles.join(", ")}`,
           affectedFiles,
           whyApprovalNeeded:
-            "Applying a proposed change-set is a mutating action (spec §4). The change-set workflow requires explicit human approval.",
-          risk: "Proposed diffs only — nothing is written to disk in this phase; approval records the human decision.",
-          requestedPermission: "record-approval-for-proposed-changeset",
+            "Applying this change-set performs REAL repository mutations (create/edit/delete files), which requires explicit human approval (Agent Mode V2 §93).",
+          risk:
+            `${created} created · ${modified} modified · ${deleted} deleted — after approval the listed files are actually written and verified.`,
+          requestedPermission: "apply-changeset-to-workspace",
+          changes: perFileOps,
+          counts: { created, modified, deleted },
+          changeSetId: changeSet.publicId,
         }),
       },
     });
@@ -1033,14 +1182,14 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
     "awaiting-approval",
     {
       findings: [
-        `change-set proposed: "${parsed.title}" — ${validChanges.length} file change(s)`,
+        `change-set proposed: "${parsed.title}" — ${created} created · ${modified} modified · ${deleted} deleted`,
         `affected: ${affectedFiles.join(", ")}`,
-        "status: awaiting human approval — proposals are never applied automatically (spec §4)",
+        "status: waiting for human approval — the change-set is applied to the workspace ONLY after approval",
       ],
       evidence: validChanges.slice(0, 3).map((c) => ({
         path: c.path,
         line: null,
-        snippet: c.diff.split("\n").slice(0, 3).join("\n").slice(0, 240),
+        snippet: (c.changeKind === "delete" ? c.diff : c.content).split("\n").slice(0, 3).join("\n").slice(0, 240),
         why: c.rationale || "proposed change",
       })),
       confidence: "probable",

@@ -28,6 +28,7 @@ import {
 } from "@/stores/workspace-store";
 import type {
   Attachment,
+  ChatMessage,
 } from "@/features/workspace/types";
 import type {
   ComposerMode,
@@ -53,6 +54,8 @@ import {
 } from "./activity/send-scroll-gate";
 import {
   exportPersistedChain,
+  exportPausedChain,
+  getRunMaxSeq,
   ingestLocalRunActivityEvent,
   resumeRunActivity,
 } from "./activity/run-activity-store";
@@ -199,6 +202,14 @@ export interface AssistantRun {
     runId: string,
     answers: IntakeAnswer[],
   ) => Promise<boolean>;
+  /** Agent Mode V2: record the human decision on the approval card inside
+   *  the thought chain and resume the SAME run (spec §3/§5/§51). */
+  decideApproval: (
+    conversationId: string,
+    messageId: string,
+    approvalId: string,
+    decision: "approved" | "rejected",
+  ) => Promise<void>;
   isGenerating: boolean;
 }
 
@@ -211,6 +222,40 @@ type WireFrame =
   | { kind: "result"; frame: RunResultFrame }
   | { kind: "error"; message: string }
   | { kind: "unknown" };
+
+/* ------------------------------------------------------------------ */
+/* Agent Mode V2 — pause/resume run state                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The run the user is currently DECIDING on (spec §110): while set, the
+ * client's Stop button must cancel through the dedicated route (the
+ * phase-1 fetch is gone) instead of aborting a live stream.
+ */
+interface PausedRun {
+  runId: string;
+  conversationId: string;
+  messageId: string;
+}
+let pausedRun: PausedRun | null = null;
+
+/**
+ * Replay guard (Agent Mode V2 resume): the resume stream replays the run's
+ * full event history with the SAME seq space. The per-run chain store
+ * dedupes by seq; the activity ENGINE gets the same protection here — an
+ * event whose seq was already applied is not applied twice.
+ */
+const appliedSeqByRun = new Map<string, number>();
+function applyWireEventGuarded(event: SequencedAssistantEvent): void {
+  const last = appliedSeqByRun.get(event.runId) ?? 0;
+  if (event.seq <= last) return;
+  appliedSeqByRun.set(event.runId, event.seq);
+  applyWireEvent(event);
+}
+
+/* ------------------------------------------------------------------ */
+/* SSE frame parsing                                                   */
+/* ------------------------------------------------------------------ */
 
 /** Parse one SSE frame (`event: X\ndata: {...}`) into a typed union. */
 function parseWireFrame(raw: string): WireFrame {
@@ -258,6 +303,28 @@ export function useAssistantRun(): AssistantRun {
   });
 
   const stop = useCallback(() => {
+    // Agent Mode V2 (spec §110): a PAUSED run has no live fetch to abort —
+    // cancel it through the dedicated route and settle honestly.
+    if (pausedRun) {
+      const target = pausedRun;
+      pausedRun = null;
+      void fetch("/api/assistant/runs/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: target.runId }),
+      }).catch(() => undefined);
+      runCancelled(target.runId);
+      ingestLocalRunActivityEvent({
+        type: "RUN_CANCELLED",
+        runId: target.runId,
+        cancelledAt: Date.now(),
+      });
+      useWorkspaceStore
+        .getState()
+        .updateMessage(target.conversationId, target.messageId, { state: "stopped" });
+      useWorkspaceStore.getState().setConversationStatus(target.conversationId, "stopped");
+      return;
+    }
     activeController?.abort();
   }, []);
 
@@ -279,14 +346,23 @@ export function useAssistantRun(): AssistantRun {
       history: ApiChatMessage[],
       options?: AssistantSendOptions,
       wireAttachments?: ApiChatAttachment[],
+      /** Agent Mode V2: resume an EXISTING paused run instead of starting a
+       *  new one — reuses the message, replays the run's event history. */
+      resume?: { runId: string; messageId: string },
     ) => {
       if (generatingRef.current || activeController) return;
 
       const store = useWorkspaceStore.getState();
-      const assistantMsgId = store.appendMessage(conversationId, {
-        role: "assistant",
-        content: "",
-      });
+      let assistantMsgId: string | null;
+      if (resume) {
+        assistantMsgId = resume.messageId;
+        pausedRun = null;
+      } else {
+        assistantMsgId = store.appendMessage(conversationId, {
+          role: "assistant",
+          content: "",
+        });
+      }
       if (assistantMsgId === null) return;
 
       const startedWallClock = Date.now();
@@ -307,10 +383,28 @@ export function useAssistantRun(): AssistantRun {
         Boolean(options?.context.selectedCode) ||
         (wireAttachments?.length ?? 0) > 0;
 
-      let wireRunId: string | null = null;
-      let sawWireRunStart = false;
+      let wireRunId: string | null = resume?.runId ?? null;
+      let sawWireRunStart = Boolean(resume);
       let firstEventRecorded = false;
       let resultFrame: RunResultFrame | null = null;
+      /** Agent Mode V2: seqs ≤ this are REPLAY on a resume stream — their
+       *  RUN_PAUSED must not re-trigger the pause path. */
+      const replayCeiling = resume ? getRunMaxSeq(resume.runId) : 0;
+      /** Any terminal frame (or transport result) seen this stream — a
+       *  replayed RUN_PAUSED followed by RUN_COMPLETED is a COMPLETED run,
+       *  never a pause (the replay delivers the whole history). */
+      let sawTerminalFrame = false;
+      /** Agent Mode V2: the run paused server-side (approval/answers).
+       *  Held in a wrapper object — the handler closure mutates it while
+       *  the stream loop runs (a bare `let` would be control-flow-narrowed
+       *  to null by TypeScript). */
+      const pauseState: {
+        info: {
+          reason: "approval" | "answers";
+          approvalId?: string;
+          orchestratorRunId?: string;
+        } | null;
+      } = { info: null };
 
       /* ---- Phase 9 + 9.1: the two presentation pacers (both honest) ----
        * chainPacer — display smoothing of REAL chain events (thinking first,
@@ -418,8 +512,9 @@ export function useAssistantRun(): AssistantRun {
           wireRunId = event.runId;
         }
         // Engine first: RUN_STARTED resets the run metrics; the measured
-        // latency is recorded against the NEW run right after.
-        applyWireEvent(event);
+        // latency is recorded against the NEW run right after. Replay-safe
+        // (the resume stream re-delivers the run's history — seq-guarded).
+        applyWireEventGuarded(event);
         // 8D + Phase 9: the same real event feeds the per-run activity chain
         // store through the display pacer (order-preserving, terminal/intake
         // events never wait).
@@ -458,6 +553,37 @@ export function useAssistantRun(): AssistantRun {
           useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
             approval: event.approval,
           });
+        } else if (event.type === "APPROVAL_DECIDED") {
+          // Agent Mode V2: mirrors the decision onto the message (important
+          // for RELOAD resumes — the decision may have been recorded
+          // server-side before the client reconnected).
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            approvalDecision: event.decision,
+          });
+        } else if (event.type === "CHANGE_RESULT") {
+          // The machine-generated result of the REAL mutation (spec §81) —
+          // the chat result card renders exactly this. The repository
+          // explorer reloads so created/modified/deleted files actually
+          // appear on disk-backed truth (spec §124).
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, {
+            changeResult: event.result,
+          });
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("cmx:repository-mutated"));
+          }
+        } else if (event.type === "RUN_PAUSED") {
+          // Agent Mode V2 (spec §5): the run paused server-side. The stream
+          // ends after this frame; the message enters the honest waiting
+          // state and the user decides (approval) or answers (questions).
+          // REPLAY GUARD: on a resume stream the phase-1 pause is re-
+          // delivered — only a pause BEYOND the replay point counts.
+          if (event.seq > replayCeiling) {
+            pauseState.info = {
+              reason: event.reason,
+              approvalId: event.approvalId,
+              orchestratorRunId: event.orchestratorRunId,
+            };
+          }
         } else if (event.type === "RESPONSE_STRUCTURED") {
           // 8.5: the typed structured payload — the UI renders THIS, never
           // parsed markdown. Persisted with the message like the other
@@ -473,50 +599,55 @@ export function useAssistantRun(): AssistantRun {
       };
 
       try {
-        const res = await fetch("/api/assistant/runs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: history,
-            mode: options?.mode,
-            model: options?.model ?? undefined,
-            memory:
-              options?.memory &&
-              (options.memory.incognito || options.memory.readsDisabled || options.memory.depth)
-                ? {
-                    incognito: options.memory.incognito || undefined,
-                    readsDisabled: options.memory.readsDisabled || undefined,
-                    depth: options.memory.depth || undefined,
-                  }
-                : undefined,
-            context: hasContext
-              ? {
-                  repository: options?.context.repository ?? undefined,
-                  branch: options?.context.branch ?? undefined,
-                  activeFile,
-                  selectedCode: options?.context.selectedCode ?? undefined,
-                  attachments:
-                    wireAttachments && wireAttachments.length > 0
-                      ? wireAttachments
+        const res = await fetch(
+          resume ? "/api/assistant/runs/resume" : "/api/assistant/runs",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: resume
+              ? JSON.stringify({ runId: resume.runId, fromSeq: 0 })
+              : JSON.stringify({
+                  messages: history,
+                  mode: options?.mode,
+                  model: options?.model ?? undefined,
+                  memory:
+                    options?.memory &&
+                    (options.memory.incognito || options.memory.readsDisabled || options.memory.depth)
+                      ? {
+                          incognito: options.memory.incognito || undefined,
+                          readsDisabled: options.memory.readsDisabled || undefined,
+                          depth: options.memory.depth || undefined,
+                        }
                       : undefined,
-                  /* 8C ledger — the user's context controls, enforced server-side. */
-                  excludedRefs:
-                    options?.ledger && options.ledger.excludedRefs.length > 0
-                      ? options.ledger.excludedRefs
-                      : undefined,
-                  excludedMemoryIds:
-                    options?.ledger && options.ledger.excludedMemoryIds.length > 0
-                      ? options.ledger.excludedMemoryIds
-                      : undefined,
-                  pinnedRefs:
-                    options?.ledger && options.ledger.pinnedRefs.length > 0
-                      ? options.ledger.pinnedRefs
-                      : undefined,
-                }
-              : undefined,
-          }),
-          signal: controller.signal,
-        });
+                  context: hasContext
+                    ? {
+                        repository: options?.context.repository ?? undefined,
+                        branch: options?.context.branch ?? undefined,
+                        activeFile,
+                        selectedCode: options?.context.selectedCode ?? undefined,
+                        attachments:
+                          wireAttachments && wireAttachments.length > 0
+                            ? wireAttachments
+                            : undefined,
+                        /* 8C ledger — the user's context controls, enforced server-side. */
+                        excludedRefs:
+                          options?.ledger && options.ledger.excludedRefs.length > 0
+                            ? options.ledger.excludedRefs
+                            : undefined,
+                        excludedMemoryIds:
+                          options?.ledger && options.ledger.excludedMemoryIds.length > 0
+                            ? options.ledger.excludedMemoryIds
+                            : undefined,
+                        pinnedRefs:
+                          options?.ledger && options.ledger.pinnedRefs.length > 0
+                            ? options.ledger.pinnedRefs
+                            : undefined,
+                      }
+                    : undefined,
+                }),
+            signal: controller.signal,
+          },
+        );
 
         // Validation/transport failures arrive as a plain JSON envelope
         // BEFORE any stream opens — surface the real error honestly.
@@ -589,10 +720,54 @@ export function useAssistantRun(): AssistantRun {
               case "unknown":
                 break;
             }
-            if (frame.kind === "event" && frame.event.type === "RUN_COMPLETED") {
+            if (
+              frame.kind === "event" &&
+              (frame.event.type === "RUN_COMPLETED" ||
+                frame.event.type === "RUN_FAILED" ||
+                frame.event.type === "RUN_CANCELLED")
+            ) {
+              sawTerminalFrame = true;
               break stream;
             }
+            if (frame.kind === "result") {
+              sawTerminalFrame = true;
+            }
           }
+        }
+
+        /* ---- Agent Mode V2: the run PAUSED server-side (spec §5/§31) ----
+         * The phase-1 stream ended after RUN_PAUSED. The chain stays OPEN
+         * with the waiting row visible, the message records the honest
+         * waiting state, and the run's continuation arrives through the
+         * resume stream (user decision / answers → decideApproval /
+         * answerIntake → resumeCompletion). The chain is persisted in its
+         * PAUSED shape (exportPausedChain) so a reload restores the open
+         * waiting state, never a fake final history (spec §110).
+         * A terminal frame wins: a replayed pause + RUN_COMPLETED is a
+         * COMPLETED run. */
+        const pausedInfo = pauseState.info;
+        if (pausedInfo !== null && !sawTerminalFrame) {
+          chainPacer.flushAll();
+          chainPacer.dispose();
+          answerPacer.dispose();
+          const pausedChain = wireRunId ? exportPausedChain(wireRunId) : null;
+          const waitingPatch: {
+            state: ChatMessage["state"];
+            waitingKind: NonNullable<ChatMessage["waitingKind"]>;
+            activityChain?: NonNullable<ChatMessage["activityChain"]>;
+          } = {
+            state: "waiting",
+            waitingKind: pausedInfo.reason === "approval" ? "approval" : "question",
+          };
+          if (pausedChain) waitingPatch.activityChain = pausedChain;
+          useWorkspaceStore.getState().updateMessage(conversationId, assistantMsgId, waitingPatch);
+          pausedRun = {
+            runId: wireRunId ?? "",
+            conversationId,
+            messageId: assistantMsgId,
+          };
+          useWorkspaceStore.getState().setConversationStatus(conversationId, "active");
+          return;
         }
 
         if (errorMessage !== null) {
@@ -889,6 +1064,8 @@ export function useAssistantRun(): AssistantRun {
   /**
    * 8C question flow: deliver the user's answers to the paused run. The run
    * resumes ONLY after this succeeds — pause → ask → resume, never silently.
+   * Agent Mode V2: on success the RESUME stream re-attaches to the same run
+   * (full replay + live remainder) — the run never restarts.
    */
   const answerIntake = useCallback(
     async (
@@ -924,6 +1101,12 @@ export function useAssistantRun(): AssistantRun {
         useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
           intakeAnswers: answers,
         });
+        // Agent Mode V2: re-attach to the SAME run — the resume stream
+        // replays the history and delivers the live remainder.
+        void runCompletion(conversationId, [], undefined, undefined, {
+          runId,
+          messageId,
+        });
         return true;
       } catch (error) {
         const message =
@@ -938,7 +1121,77 @@ export function useAssistantRun(): AssistantRun {
         return false;
       }
     },
-    [],
+    [runCompletion],
+  );
+
+  /**
+   * Agent Mode V2 (spec §3/§5/§51): the human decision on the approval card
+   * INSIDE the thought chain. The decision is recorded on the message, the
+   * Approval row is updated through the approvals route, and — only after
+   * the server confirms — the SAME run resumes (apply → verify → validate
+   * → critic → answer). "edited" only opens files; it never releases the
+   * gate (the run stays paused until a real decision arrives).
+   */
+  const decideApproval = useCallback(
+    async (
+      conversationId: string,
+      messageId: string,
+      approvalId: string,
+      decision: "approved" | "rejected",
+    ): Promise<void> => {
+      useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
+        approvalDecision: decision,
+      });
+      try {
+        const res = await fetch("/api/assistant/approvals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approvalId, decision }),
+        });
+        const data = (await res.json().catch(() => null)) as
+          | { ok?: boolean; error?: string; success?: boolean; data?: { ok?: boolean; message?: string } }
+          | null;
+        // The route wraps success in the API envelope ({success, data}) —
+        // accept both shapes honestly.
+        const delivered =
+          Boolean(data?.ok) || (Boolean(data?.success) && data?.data?.ok !== false);
+        if (!res.ok || !delivered) {
+          const error =
+            typeof data?.error === "string" && data.error.trim().length > 0
+              ? `Decision not delivered: ${data.error}`
+              : `Delivering the decision failed (HTTP ${res.status}).`;
+          useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
+            state: "error",
+            error,
+          });
+          useWorkspaceStore.getState().setConversationStatus(conversationId, "error");
+          return;
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Could not reach the approvals endpoint.";
+        useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
+          state: "error",
+          error: message,
+        });
+        useWorkspaceStore.getState().setConversationStatus(conversationId, "error");
+        return;
+      }
+      // The gate is released server-side — resume the SAME run.
+      const message = useWorkspaceStore
+        .getState()
+        .conversations.find((c) => c.id === conversationId)
+        ?.messages.find((m) => m.id === messageId);
+      const runId = message?.runId ?? pausedRun?.runId ?? null;
+      if (!runId) return;
+      void runCompletion(conversationId, [], undefined, undefined, {
+        runId,
+        messageId,
+      });
+    },
+    [runCompletion],
   );
 
   /**
@@ -971,5 +1224,5 @@ export function useAssistantRun(): AssistantRun {
     void runCompletion(conversation.id, history);
   }, [runCompletion]);
 
-  return { send, stop, regenerate, answerIntake, isGenerating };
+  return { send, stop, regenerate, answerIntake, decideApproval, isGenerating };
 }

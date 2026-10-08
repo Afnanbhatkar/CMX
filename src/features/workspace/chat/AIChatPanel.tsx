@@ -24,6 +24,7 @@ import {
 import { ConversationView } from "./ConversationView";
 import { AIComposer } from "./AIComposer";
 import { ContextInspector } from "./ContextInspector";
+import { ActiveQuestionFlow } from "./ActiveQuestionFlow";
 
 /** Status → chip tone (real statuses only, honest labels). */
 const STATUS_CHIP: Record<
@@ -133,6 +134,12 @@ export function AIChatPanel() {
           </div>
         </div>
       )}
+      {/* Agent Mode V2 (spec §76): the contextual question component sits
+          ABOVE the textarea — never a modal, never a chat bubble — and
+          stays associated with the current active run. */}
+      {activeConversation ? (
+        <ActiveQuestionFlow conversationId={activeConversation.id} />
+      ) : null}
       <AIComposer />
     </div>
   );

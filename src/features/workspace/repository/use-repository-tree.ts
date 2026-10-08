@@ -134,6 +134,17 @@ export function useRepositoryTree(): RepositoryTreeState {
     setNonce((n) => n + 1);
   }, []);
 
+  /* Agent Mode V2 (spec §124): after a REAL mutation the repository
+   * explorer must show the created/modified/deleted files. The chat run
+   * dispatches the window event "cmx:repository-mutated" when its applied
+   * change-set lands; the tree reloads (files + git status) — never a fake
+   * refresh: the data is re-fetched from disk. */
+  useEffect(() => {
+    const onMutated = (): void => reload();
+    window.addEventListener("cmx:repository-mutated", onMutated);
+    return () => window.removeEventListener("cmx:repository-mutated", onMutated);
+  }, [reload]);
+
   const loadDir = useCallback(
     async (path: string) => {
       if (dirControllersRef.current.has(path)) return;

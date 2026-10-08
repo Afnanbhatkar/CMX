@@ -727,6 +727,43 @@ function applyEventReducer(
       return;
     }
 
+    case "APPROVAL_DECIDED": {
+      // Agent Mode V2 (spec §51): the human decided — the waiting approval
+      // row completes with the honest mark and the run timer resumes. The
+      // decision itself stays in the timeline forever (spec §52).
+      const { decision } = event as { decision: "approved" | "rejected" };
+      const approvalRow = [...state.rows]
+        .reverse()
+        .find((r) => r.kind === "waiting_approval" && r.status === "waiting");
+      if (approvalRow) {
+        updateRowById(state, approvalRow.id, (current) => ({
+          ...current,
+          seq: Math.max(current.seq, event.seq),
+          status: decision === "approved" ? "completed" : "failed",
+          detail:
+            decision === "approved"
+              ? "Approved — applying the change-set"
+              : "Rejected — no files were changed",
+        }));
+      }
+      if (state.status === "waiting") resumeRun(state, perfNow);
+      return;
+    }
+
+    case "RUN_PAUSED":
+      // Agent Mode V2 (spec §5): the run paused server-side. The chain's
+      // waiting row already exists (APPROVAL_REQUIRED / intake events); the
+      // pause state itself lives on the message (message.state "waiting")
+      // and the phase-1 stream ends after this frame. Nothing to change in
+      // the chain — it stays open with the waiting row visible (spec §31).
+      return;
+
+    case "CHANGE_RESULT":
+      // The machine-generated result is consumed by the message (the chat
+      // result card) — not a chain row. The apply/verify rows already tell
+      // the execution story; the card tells the outcome (spec §54).
+      return;
+
     case "RESPONSE_CHUNK": {
       // FIRST final-answer chunk closes the work phase (spec A.6): freeze
       // the timer, finalize the timeline. Later chunks are no-ops.
@@ -911,6 +948,11 @@ export function resumeRunActivity(runId: string): void {
   scheduleFlush();
 }
 
+/** Highest seq already ingested for a run (Agent Mode V2 replay guard). */
+export function getRunMaxSeq(runId: string): number {
+  return runs.get(runId)?.maxSeq ?? 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Persistence                                                         */
 /* ------------------------------------------------------------------ */
@@ -937,19 +979,50 @@ export function exportPersistedChain(runId: string): PersistedActivityChain | nu
   };
 }
 
+/**
+ * Export a PAUSED chain (Agent Mode V2, spec §109/§110): the run is waiting
+ * for a human decision — the chain must survive a reload exactly as it
+ * looked, INCLUDING the open waiting state (never collapsed into a final
+ * history — the run is genuinely unresolved).
+ */
+export function exportPausedChain(runId: string): PersistedActivityChain | null {
+  const state = runs.get(runId);
+  if (!state || (state.status !== "waiting" && state.status !== "running")) return null;
+  return {
+    version: 1,
+    runId: state.runId,
+    phase: state.phase,
+    reachedSolving: state.reachedSolving,
+    waitingKind: state.waitingKind,
+    rows: state.rows.slice(-PERSISTED_ROW_CAP).map((row) => ({
+      ...row,
+      children: row.children.map((child) => ({ ...child })),
+    })),
+    hiddenEarlierCount: Math.max(0, state.rows.length - PERSISTED_ROW_CAP),
+    startedAt: state.startedAt,
+    endedAt: null,
+    activeMs: state.activeMs,
+    finalState: null,
+  };
+}
+
 /** Build a static snapshot from a persisted chain (history rendering). */
 export function snapshotFromPersistedChain(
   chain: PersistedActivityChain,
 ): RunActivitySnapshot {
+  // Agent Mode V2 (spec §110): a persisted chain WITHOUT a finalState is a
+  // PAUSED run — restore it as actively waiting (chain open, header
+  // "Waiting for approval/your answer"), never as a finished history.
+  const paused = chain.finalState === null && (chain.waitingKind === "approval" || chain.waitingKind === "question");
   return {
     runId: chain.runId,
-    status: "final",
+    status: paused ? "waiting" : "final",
     phase: chain.phase,
     waitingKind: chain.waitingKind,
     questionBatch: null,
     rows: chain.rows,
     hiddenEarlierCount: chain.hiddenEarlierCount,
-    workFinalized: true,
+    workFinalized: !paused,
     reachedSolving: chain.reachedSolving,
     activeMs: chain.activeMs ?? 0,
     finalState: chain.finalState,

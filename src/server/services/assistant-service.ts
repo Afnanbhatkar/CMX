@@ -24,6 +24,7 @@ import {
   type ContextChunk,
   type ContextInspectorEntry,
   type ContextInspectorSnapshot,
+  type ChangeResultSummary,
   type IntakeQuestionBatch,
   type IntakeAnswer,
   type MemoryRecord,
@@ -99,6 +100,13 @@ export interface AssistantTurnInput {
    */
   memoryPolicy?: { incognito?: boolean; readsDisabled?: boolean; depth?: "beginner" | "standard" | "expert" };
   /**
+   * Agent Mode V2 (spec §5): fires when the run PAUSES server-side — at the
+   * approval gate or the intake-question gate. The stream layer emits
+   * RUN_PAUSED and ENDS the phase-1 SSE response; the run continues and the
+   * client resumes through POST /api/assistant/runs/resume.
+   */
+  onPause?: (info: { reason: "approval" | "answers"; approvalId?: string; orchestratorRunId?: string }) => void;
+  /**
    * 8C question flow: when the pipeline needs a material decision it builds
    * an IntakeQuestionBatch and awaits answers through this provider. The
    * provider resolves with the user's answers (run resumes) or null
@@ -166,6 +174,8 @@ export type AssistantStageEvent =
   | { type: "MEMORY_USED"; memories: MemoryRecord[]; note: string | null }
   | { type: "INTAKE_QUESTIONS"; batch: IntakeQuestionBatch }
   | { type: "APPROVAL_REQUIRED"; approval: ApprovalRequest }
+  | { type: "APPROVAL_DECIDED"; approvalId: string; decision: "approved" | "rejected" }
+  | { type: "CHANGE_RESULT"; result: ChangeResultSummary }
   | { type: "RESPONSE_STRUCTURED"; structured: StructuredResponse };
 
 export type AssistantStageEmitter = (event: AssistantStageEvent) => void;
@@ -1002,6 +1012,14 @@ export async function runAssistantTurn(
         runId: input.runId ?? "run-pending",
         onStage: onStage ?? (() => undefined),
         signal: input.signal,
+        // Agent Mode V2: propagate the approval-gate pause to the stream
+        // layer (RUN_PAUSED → phase-1 response ends → client resumes).
+        onPause: (info) =>
+          input.onPause?.({
+            reason: "approval",
+            approvalId: info.approvalId,
+            orchestratorRunId: info.orchestratorRunId,
+          }),
       });
       logInfo("assistant: orchestrator turn ok", {
         runId: input.runId,
@@ -1044,6 +1062,11 @@ export async function runAssistantTurn(
   const batch = decideIntakeBatch(mode, built.query, built.retrievalHits);
   if (batch && input.answersProvider) {
     onStage?.({ type: "INTAKE_QUESTIONS", batch });
+    // Agent Mode V2: the pause ends the phase-1 stream — the run keeps
+    // waiting server-side (the answers route resolves it) and the client
+    // resumes through the resume stream. No more 2-minute stranding on a
+    // dying connection.
+    input.onPause?.({ reason: "answers" });
     const answers = await input.answersProvider(batch);
     if (!answers || answers.length === 0) {
       throw new AssistantError("cancelled", "The run was cancelled while waiting for your answers.");

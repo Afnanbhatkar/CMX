@@ -17,6 +17,7 @@ import type {
 import type {
   ApprovalDecision,
   ApprovalRequest,
+  ChangeResultSummary,
   ContextInspectorSnapshot,
   IntakeAnswer,
   IntakeQuestionBatch,
@@ -130,7 +131,10 @@ export type ConversationStatus =
   | "completed"
   | "error";
 
-export type MessageState = "complete" | "generating" | "error" | "stopped";
+export type MessageState = "complete" | "generating" | "waiting" | "error" | "stopped";
+
+/** Why a run is paused (Agent Mode V2 — spec §72 run states). */
+export type MessageWaitingKind = "approval" | "question";
 
 export interface Attachment {
   id: string;
@@ -208,6 +212,11 @@ export interface ChatMessage {
   approval?: ApprovalRequest | null;
   /** The recorded human decision on the approval card (never auto-applied). */
   approvalDecision?: ApprovalDecision | null;
+  /* ---- Agent Mode V2 — pause/resume run state (spec §72/§110) ---- */
+  /** Why this run is paused server-side (state === "waiting"). */
+  waitingKind?: MessageWaitingKind | null;
+  /** The machine-generated result of the REAL mutation (CHANGE_RESULT). */
+  changeResult?: ChangeResultSummary | null;
   /* ---- 8.5 — structured response + verified references ---- */
   /** The typed structured payload (RESPONSE_STRUCTURED); null = plain markdown. */
   structured?: StructuredResponse | null;
@@ -478,7 +487,8 @@ export type EditorNavigationSource =
   | "terminal"
   | "palette"
   | "intelligence"
-  | "manual";
+  | "manual"
+  | "change-result";
 
 /**
  * The single typed payload every file-opening feature must use.

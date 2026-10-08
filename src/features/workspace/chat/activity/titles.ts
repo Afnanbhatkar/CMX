@@ -37,6 +37,8 @@ const TITLE_TEMPLATES: Record<ActivityViewKind, string> = {
   verify: "Verifying changes",
   verify_response: "Verifying response",
   prepare: "Preparing response",
+  apply: "Applying approved changes",
+  validate: "Running validation",
   tool: "Working",
   waiting_approval: "Waiting for approval",
   waiting_question: "Waiting for your answer",
@@ -134,7 +136,19 @@ export function mapViewKind(
   if (title.startsWith("running tests")) return "run_tests";
   if (title.startsWith("checking security")) return "verify";
   if (title.startsWith("preparing preview")) return "verify";
+  /* ---- Agent Mode V2 — real execution rows (spec §8/§44) ----
+   * NOTE: "verifying changes" must be tested BEFORE the generic "verifying"
+   * prefix (which maps to verify_response). */
+  if (title.startsWith("applying approved changes")) return "apply";
+  if (title.startsWith("running validation")) return "validate";
+  if (title.startsWith("checking file versions")) return "verify";
+  if (title.startsWith("verifying changes")) return "verify";
   if (title.startsWith("verifying")) return "verify_response";
+  if (title.startsWith("creating folder")) return "create_file";
+  if (title.startsWith("folder creation failed")) return "create_file";
+  if (title.startsWith("creating")) return "create_file";
+  if (title.startsWith("updating")) return "edit_file";
+  if (title.startsWith("deleting")) return "delete_file";
 
   // Coarse backend categories → view kinds.
   switch (backendKind) {

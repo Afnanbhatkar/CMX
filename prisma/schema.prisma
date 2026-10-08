@@ -302,7 +302,7 @@ model AgentRun {
   repositoryId String?
   /// "assistant" | "analysis" | "coding" | "testing" | "review" | "orchestrator" | "custom"
   kind         String
-  /// "queued" | "running" | "waiting-approval" | "completed" | "failed" | "cancelled"
+  /// "queued" | "running" | "waiting-approval" | "applying" | "verifying" | "validating" | "completed" | "failed" | "cancelled"
   status       String    @default("queued")
   input        String?
   output       String?

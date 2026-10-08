@@ -44,6 +44,11 @@ import type {
 } from "@/types/contracts";
 import { editorNavigation } from "@/features/workspace/editor-navigation";
 import type { ChatActivityStep } from "@/features/workspace/types";
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+} from "@/features/workspace/assistant/contracts";
+import { ApprovalCard } from "@/components/ai/ApprovalCard";
 import { formatActiveDuration } from "@/features/workspace/chat/activity/duration";
 import { snapshotFromPersistedChain } from "@/features/workspace/chat/activity/run-activity-store";
 import { releaseChainCloseGate, logChainGate } from "@/features/workspace/chat/activity/chain-close-gate";
@@ -357,9 +362,22 @@ export interface ActivityChainViewProps {
    * user opens it when THEY want to look. Non-casual (task) runs keep the
    * visible one-by-one story. */
   minimal?: boolean;
+  /* ---- Agent Mode V2 (spec §3/§51): approval INSIDE the chain ----
+   * The approval card renders as the body of the chain's waiting_approval
+   * row — never as a normal chat message. The decision callback releases
+   * the real engine gate through /api/assistant/approvals. */
+  approval?: ApprovalRequest | null;
+  approvalDecision?: ApprovalDecision | null;
+  onApprovalDecision?: (decision: "approved" | "rejected") => void;
 }
 
-export function ActivityChainView({ snapshot, minimal = false }: ActivityChainViewProps) {
+export function ActivityChainView({
+  snapshot,
+  minimal = false,
+  approval,
+  approvalDecision,
+  onApprovalDecision,
+}: ActivityChainViewProps) {
   const controlsId = useId();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -573,11 +591,34 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
                 )
               ) : null}
               {visibleRows.map((row, index) => (
-                <ActivityItem
-                  key={row.id}
-                  row={row}
-                  showLoader={closingLoader && index === visibleRows.length - 1}
-                />
+                <div key={row.id} className="cmx-act-row-wrap">
+                  <ActivityItem
+                    row={row}
+                    showLoader={closingLoader && index === visibleRows.length - 1}
+                  />
+                  {/* Agent Mode V2 (spec §3/§51): the approval card lives
+                      INSIDE the thought chain, right under its waiting row
+                      — a blocking decision surface, not a chat message. */}
+                  {row.kind === "waiting_approval" && approval ? (
+                    <div className="cmx-act-approval-slot">
+                      <ApprovalCard
+                        approval={approval}
+                        decision={approvalDecision ?? null}
+                        onDecision={(decision) => {
+                          if (decision === "edited") {
+                            // "Edit" opens the affected files for manual
+                            // review; it never releases the engine gate.
+                            const first = approval.affectedFiles[0];
+                            if (first) void editorNavigation.openFile(first, "manual");
+                            return;
+                          }
+                          onApprovalDecision?.(decision);
+                        }}
+                        disabled={approvalDecision !== null && approvalDecision !== undefined}
+                      />
+                    </div>
+                  ) : null}
+                </div>
               ))}
             </div>
           </div>
@@ -598,9 +639,15 @@ export function ActivityChainView({ snapshot, minimal = false }: ActivityChainVi
 export function ActivityChainLive({
   runId,
   minimal = false,
+  approval,
+  approvalDecision,
+  onApprovalDecision,
 }: {
   runId: string | null;
   minimal?: boolean;
+  approval?: ApprovalRequest | null;
+  approvalDecision?: ApprovalDecision | null;
+  onApprovalDecision?: (decision: "approved" | "rejected") => void;
 }) {
   const snapshot = useRunActivity(runId);
   // Before the run's first real event the chain shows nothing — nothing is
@@ -613,7 +660,15 @@ export function ActivityChainLive({
       </div>
     );
   }
-  return <ActivityChainView snapshot={snapshot} minimal={minimal} />;
+  return (
+    <ActivityChainView
+      snapshot={snapshot}
+      minimal={minimal}
+      approval={approval}
+      approvalDecision={approvalDecision}
+      onApprovalDecision={onApprovalDecision}
+    />
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -696,6 +751,10 @@ export interface ActivityChainProps {
   legacySteps?: ChatActivityStep[];
   legacyThoughtForMs?: number | null;
   legacyRunId?: string | null;
+  /* ---- Agent Mode V2: approval inside the chain (history + waiting) ---- */
+  approval?: ApprovalRequest | null;
+  approvalDecision?: ApprovalDecision | null;
+  onApprovalDecision?: (decision: "approved" | "rejected") => void;
 }
 
 export function ActivityChain({
@@ -703,6 +762,9 @@ export function ActivityChain({
   legacySteps,
   legacyThoughtForMs,
   legacyRunId,
+  approval,
+  approvalDecision,
+  onApprovalDecision,
 }: ActivityChainProps) {
   const snapshot = useMemo(() => {
     if (chain) return snapshotFromPersistedChain(chain);
@@ -713,5 +775,12 @@ export function ActivityChain({
   }, [chain, legacySteps, legacyThoughtForMs, legacyRunId]);
 
   if (!snapshot) return null;
-  return <ActivityChainView snapshot={snapshot} />;
+  return (
+    <ActivityChainView
+      snapshot={snapshot}
+      approval={approval}
+      approvalDecision={approvalDecision}
+      onApprovalDecision={onApprovalDecision}
+    />
+  );
 }

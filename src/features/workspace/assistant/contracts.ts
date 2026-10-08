@@ -360,6 +360,13 @@ export interface ApprovalRequest {
    *  decision must be delivered to the orchestrator's approval gate (the
    *  run is paused at the engine gate until a human decides). */
   orchestratorRunId?: string;
+  /* ---- Agent Mode V2 — additive (spec §50) ---- */
+  /** Per-file operations behind this approval (real ChangeSet contents). */
+  changes?: { path: string; changeKind: "add" | "modify" | "delete"; reason: string }[];
+  /** Machine-countable blast radius (spec §20). */
+  counts?: { created: number; modified: number; deleted: number };
+  /** The change-set this approval applies (idempotency + audit). */
+  changeSetId?: string;
 }
 
 /** The decision a human made on an approval card (8C — recorded, never applied). */
@@ -469,6 +476,50 @@ export type ResponseSegment =
   | { kind: "question"; question: ClarifyQuestion };
 
 /* ------------------------------------------------------------------ */
+/* §13.2 — Agent Mode V2: real change result (spec §21/§22/§81/§82)      */
+/* ------------------------------------------------------------------ */
+
+/** One real file mutation outcome (machine-generated — never summarized by a model). */
+export interface ChangeResultFile {
+  path: string;
+  verified: boolean;
+}
+
+/** One honest validation check ("skipped" is reported as skipped, never passed). */
+export interface ChangeValidationCheck {
+  name: string;
+  path: string;
+  status: "passed" | "failed" | "skipped";
+  detail: string | null;
+}
+
+/** One unified-diff line computed from REAL before/after disk content. */
+export interface ChangeDiffLine {
+  kind: "add" | "remove" | "same";
+  text: string;
+}
+
+export interface ChangeResultDiffEntry {
+  path: string;
+  operation: "create" | "modify" | "delete";
+  lines: ChangeDiffLine[] | null;
+}
+
+/** The typed result the chat renders after a real mutation (spec §22). */
+export interface ChangeResultSummary {
+  changeSetId: string | null;
+  created: ChangeResultFile[];
+  modified: ChangeResultFile[];
+  deleted: ChangeResultFile[];
+  validation: ChangeValidationCheck[];
+  noOp: boolean;
+  conflict: string | null;
+  error: string | null;
+  /** Real diffs (bounded) for the View-diff control. */
+  diffs?: ChangeResultDiffEntry[] | null;
+}
+
+/* ------------------------------------------------------------------ */
 /* §13 — Streaming events                                              */
 /* ------------------------------------------------------------------ */
 
@@ -494,7 +545,17 @@ export type AssistantStreamEvent =
   | { type: "RESPONSE_STRUCTURED"; runId: string; structured: StructuredResponse }
   | { type: "RUN_COMPLETED"; runId: string; completedAt: number }
   | { type: "RUN_FAILED"; runId: string; error: string; failedAt: number }
-  | { type: "RUN_CANCELLED"; runId: string; cancelledAt: number };
+  | { type: "RUN_CANCELLED"; runId: string; cancelledAt: number }
+  /* ---- Agent Mode V2 additions (spec §5/§31/§51/§56/§110) ---- */
+  /** The run PAUSED server-side (approval gate / intake questions). The
+   *  phase-1 stream ENDS after this frame; the client resumes through
+   *  POST /api/assistant/runs/resume — the same run, the same seq space. */
+  | { type: "RUN_PAUSED"; runId: string; reason: "approval" | "answers"; approvalId?: string; orchestratorRunId?: string }
+  /** The human decision landed — the waiting_approval row completes with
+   *  the honest mark and the run continues (apply/verify/validate). */
+  | { type: "APPROVAL_DECIDED"; runId: string; approvalId: string; decision: "approved" | "rejected" }
+  /** Machine-generated result of the REAL mutation (the chat result card). */
+  | { type: "CHANGE_RESULT"; runId: string; result: ChangeResultSummary };
 
 /* ------------------------------------------------------------------ */
 /* §13.1 (8B) — Sequenced wire events                                  */

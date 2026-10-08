@@ -27,10 +27,12 @@ export interface IntakeAnswerWire {
 }
 
 /** How long a run may stay paused for answers before it is cancelled.
- *  2min (Phase 9.6 fix): the chat run's SSE connection is killed by the
- *  network path at ~3.5min — waiting longer strands a dead stream, so the
- *  pause expires honestly while the client can still receive the outcome. */
-const ANSWER_TIMEOUT_MS = 2 * 60 * 1_000;
+ *  Agent Mode V2: the pause no longer holds an SSE connection (the phase-1
+ *  response ENDS at the pause and the client resumes later), so the old
+ *  ~3.5min network kill no longer bounds this window. 30min keeps an
+ *  abandoned pause from leaking forever while letting a human actually
+ *  think; expiry stays an honest cancelled outcome (never a fake resume). */
+const ANSWER_TIMEOUT_MS = 30 * 60 * 1_000;
 
 /**
  * The pending map MUST live on globalThis: Next.js compiles each route with
@@ -57,7 +59,7 @@ export function waitForAnswers(
         reject(
           new AssistantError(
             "cancelled",
-            "No answer arrived within 2 minutes — the paused run was cancelled.",
+            "No answer arrived within 30 minutes — the paused run was cancelled.",
           ),
         );
       }

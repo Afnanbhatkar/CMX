@@ -48,17 +48,17 @@ const DECISION_BANNER: Record<
   approved: {
     tone: "border-success/40 bg-success/5 text-success",
     icon: Check,
-    text: "Approved — decision recorded. ChangeSet application is not connected in this build; no files were modified.",
+    text: "Approved — applying the change-set to the workspace now, then verifying every written file.",
   },
   rejected: {
     tone: "border-danger/40 bg-danger/5 text-danger",
     icon: X,
-    text: "Rejected — decision recorded. The proposed change was not applied (and cannot be in this build).",
+    text: "Rejected — no files were changed. The change-set was discarded.",
   },
   edited: {
     tone: "border-info/40 bg-info/5 text-info",
     icon: Pencil,
-    text: "Edit — the affected files were opened in the editor for manual changes. Nothing is applied automatically.",
+    text: "Edit — the affected files were opened in the editor for review. The run stays paused until you approve or reject.",
   },
 };
 

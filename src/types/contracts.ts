@@ -119,6 +119,8 @@ export type ActivityViewKind =
   | "verify"
   | "verify_response"
   | "prepare"
+  | "apply"
+  | "validate"
   | "tool"
   | "waiting_approval"
   | "waiting_question"

@@ -41,6 +41,13 @@ const ALLOWED_ROOTS = [
   "postcss.config.mjs",
   "tailwind.config.ts",
   "README.md",
+  // Agent Mode V2 (spec §124): files the agent creates must show up in the
+  // repository explorer and open in the editor — examples/ (and any other
+  // conventional top-level output folders) are part of the workspace.
+  "examples",
+  "tests",
+  "scripts",
+  "docs",
 ] as const;
 
 /** Directories never listed, even if found inside allowed roots. */
@@ -79,6 +86,25 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   ".toml": "toml",
   ".svg": "xml",
   ".txt": "text",
+  // Agent Mode V2: the workspace can now contain files the agent creates in
+  // other languages — they must be readable, editable and validatable.
+  ".py": "python",
+  ".rb": "ruby",
+  ".go": "go",
+  ".java": "java",
+  ".kt": "kotlin",
+  ".swift": "swift",
+  ".c": "c",
+  ".h": "c",
+  ".cpp": "cpp",
+  ".hpp": "cpp",
+  ".cc": "cpp",
+  ".cs": "csharp",
+  ".php": "php",
+  ".sql": "sql",
+  ".ini": "ini",
+  ".cfg": "text",
+  ".xml": "xml",
 };
 
 /* ------------------------------------------------------------------ */

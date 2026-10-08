@@ -255,6 +255,9 @@ export interface OrchestrationRunState {
     | "queued"
     | "running"
     | "waiting-approval"
+    | "applying"
+    | "verifying"
+    | "validating"
     | "completed"
     | "failed"
     | "cancelled";
@@ -330,8 +333,12 @@ export const codingProposalSchema = z.object({
       z.object({
         path: z.string().min(1).max(400),
         changeKind: z.enum(["add", "modify", "delete"]),
-        /** Unified-diff-style proposal text (preview only — never applied). */
-        diff: z.string().min(1).max(20000),
+        /** Agent Mode V2: the FULL new file content for add/modify — the
+         *  application (not the model) applies it after approval. */
+        content: z.string().max(200_000).optional().default(""),
+        /** Legacy preview text — kept for honest display when content is
+         *  absent (delete proposals). */
+        diff: z.string().max(20000).optional().default(""),
         rationale: z.string().max(600).default(""),
       }),
     )

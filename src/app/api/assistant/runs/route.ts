@@ -16,35 +16,51 @@ import {
   cancelPendingRun,
   waitForAnswers,
 } from "@/server/services/run-answers-registry";
+import {
+  emitErrorFrame,
+  emitResultFrame,
+  emitRunEvent,
+  endRunStream,
+  markRunPaused,
+  openRunStream,
+  setOrchestratorMapping,
+  subscribeRunFrames,
+} from "@/server/services/run-stream-registry";
 import type {
   AssistantStreamEvent,
   SequencedAssistantEvent,
 } from "@/features/workspace/assistant/contracts";
 
 /**
- * POST /api/assistant/runs — the Phase 8B/8C streaming run surface.
+ * POST /api/assistant/runs — the Phase 8B/8C streaming run surface
+ * (Agent Mode V2 update, spec §5/§31/§56/§110).
  *
  * One real assistant turn, streamed as the 8B event contract: every wire
  * event carries a monotonic per-run `seq` (starting at 1) and uses the
  * shared AssistantStreamEvent vocabulary:
  *
  *   RUN_STARTED → ACTIVITY_* → CONTEXT_SNAPSHOT → MEMORY_USED →
- *   SEARCH_RESULT → FILE_REFERENCED → (INTAKE_QUESTIONS_REQUIRED → …user
- *   answers via /api/assistant/runs/answers…) → RESPONSE_CHUNK →
- *   RESPONSE_STRUCTURED (8.5) → `result` frame → APPROVAL_REQUIRED →
- *   RUN_COMPLETED (or RUN_FAILED/RUN_CANCELLED).
+ *   SEARCH_RESULT → FILE_REFERENCED → (INTAKE_QUESTIONS_REQUIRED →
+ *   RUN_PAUSED …user answers via /api/assistant/runs/answers, run resumes
+ *   through /api/assistant/runs/resume…) → APPROVAL_REQUIRED → RUN_PAUSED
+ *   (the run BLOCKS server-side at the approval gate; the phase-1 response
+ *   ENDS here — the client shows the approval INSIDE the thought chain and
+ *   resumes the run through the resume stream) → RESPONSE_CHUNK →
+ *   RESPONSE_STRUCTURED → CHANGE_RESULT → `result` frame → RUN_COMPLETED
+ *   (or RUN_FAILED/RUN_CANCELLED).
  *
- * First-event latency: RUN_STARTED is written SYNCHRONOUSLY when the stream
+ * Every frame flows through the per-run ledger (run-stream-registry) so the
+ * resume stream can REPLAY the run's full history with the same seq space —
+ * reloads and reconnects never duplicate rows (client-side seq dedupe).
+ *
+ * First-event latency: RUN_STARTED is emitted SYNCHRONOUSLY when the stream
  * opens — before any await — so the first visible activity event does not
- * wait on validation, retrieval, or the model. The measured server-side
- * first-event latency is logged with the run.
+ * wait on validation, retrieval, or the model.
  *
  * Privacy boundary (8B §1): only safe execution summaries travel on this
  * stream. The 8C additions (context snapshot, memory records, intake
  * questions, approval payloads) carry safe execution facts — never chain-
- * of-thought. Phase 9: RESPONSE_CHUNK now carries REAL model token deltas
- * (the gateway streams with `stream: true`); each delta is forwarded exactly
- * as the transport produced it — nothing is re-dressed or fabricated.
+ * of-thought. RESPONSE_CHUNK carries REAL model token deltas.
  */
 
 const COMPOSER_MODES = ["search", "code", "agent", "loop"] as const;
@@ -93,15 +109,6 @@ const bodySchema = z.object({
     .optional(),
 });
 
-/** The transport-only frame carrying the complete answer (SSE contract). */
-interface ResultFrame {
-  seq: number;
-  content: string;
-  servedModel: string | null;
-  mode: string;
-  note: string;
-}
-
 const RESULT_NOTE =
   "The answer streamed as real model token deltas (gateway stream: true); this frame carries the authoritative final content.";
 
@@ -138,7 +145,6 @@ export async function POST(req: Request): Promise<Response> {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
-      let seq = 0;
 
       const write = (chunk: string): void => {
         if (closed) return;
@@ -149,42 +155,35 @@ export async function POST(req: Request): Promise<Response> {
         }
       };
 
-      const writeEvent = (event: AssistantStreamEvent): void => {
-        seq += 1;
-        const withSeq = { ...event, seq } as SequencedAssistantEvent;
-        write(`event: ${withSeq.type}\ndata: ${JSON.stringify(withSeq)}\n\n`);
-      };
-
-      /** Raw transport frame OUTSIDE the run's seq space (liveness only). */
-      const writeFrame = (event: CodeMindEvent): void => {
-        write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-      };
-
-      // Liveness during the run's LONG silent phases — slow model
-      // generations (a hard request legitimately runs 40–240s per agent),
-      // the approval gate (the run pauses until a human decides), and the
-      // intake pause. Without these frames the stream is byte-silent for
-      // minutes: the chat looks frozen mid-thought-chain ("stuck"), and an
-      // idle SSE connection can be cut, which kills the run mid-flight and
-      // surfaces as a failure. Forward ONLY the process-wide
-      // STREAM_HEARTBEAT (every 15s) — the stream stays focused on its own
-      // run and never mixes in unrelated job events. Heartbeat frames carry
-      // no seq, so the client's sequenced-event parser ignores them.
+      /** Liveness during the run's LONG silent phases — slow model
+       *  generations, the intake pause, the approval pause. Forward ONLY
+       *  the process-wide STREAM_HEARTBEAT (every 15s). Heartbeat frames
+       *  carry no seq, so the client's sequenced-event parser ignores them. */
       const unsubscribeHeartbeats = subscribe((event) => {
-        if (event.type === "STREAM_HEARTBEAT") writeFrame(event);
+        if (event.type === "STREAM_HEARTBEAT") {
+          write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+        }
       });
 
-      // FIRST EVENT — synchronous, before any await. Measured target ~300ms
-      // includes network + client parse; server-side this is ~0ms.
-      writeEvent({
-        type: "RUN_STARTED",
-        runId,
-        conversationId: null,
-        startedAt: Date.now(),
-        mode,
+      // ---- The per-run frame LEDGER (Agent Mode V2) ----
+      // Every sequenced frame is emitted through the ledger; this pump is
+      // just one subscriber that mirrors frames onto THIS response. When the
+      // run pauses, the pump detaches and the response ends — the ledger
+      // keeps accumulating so the RESUME stream can replay + continue.
+      openRunStream(runId);
+      const pump = subscribeRunFrames(runId, 0, (frame) => {
+        if (frame.kind === "event") {
+          write(`event: ${frame.event.type}\ndata: ${JSON.stringify(frame.event)}\n\n`);
+        } else if (frame.kind === "result") {
+          write(`event: result\ndata: ${JSON.stringify(frame.frame)}\n\n`);
+        } else {
+          write(`event: error\ndata: ${JSON.stringify({ error: frame.message })}\n\n`);
+        }
       });
-      const firstEventMs = Date.now() - receivedAt;
-      logInfo("assistant run: first event written", { runId, requestId, firstEventMs });
+
+      const writeEvent = (event: AssistantStreamEvent): SequencedAssistantEvent => {
+        return emitRunEvent(runId, event);
+      };
 
       /** Map one service stage event onto the sequenced wire contract. */
       const writeStage = (stage: AssistantStageEvent): void => {
@@ -236,6 +235,12 @@ export async function POST(req: Request): Promise<Response> {
           case "RESPONSE_STRUCTURED":
             writeEvent({ type: "RESPONSE_STRUCTURED", runId, structured: stage.structured });
             break;
+          case "CHANGE_RESULT":
+            writeEvent({ type: "CHANGE_RESULT", runId, result: stage.result });
+            break;
+          case "APPROVAL_DECIDED":
+            writeEvent({ type: "APPROVAL_DECIDED", runId, approvalId: stage.approvalId, decision: stage.decision });
+            break;
           /* ---- 8C surfaces ---- */
           case "CONTEXT_SNAPSHOT":
             writeEvent({ type: "CONTEXT_SNAPSHOT", runId, snapshot: stage.snapshot });
@@ -256,6 +261,7 @@ export async function POST(req: Request): Promise<Response> {
         if (closed) return;
         closed = true;
         unsubscribeHeartbeats();
+        pump.unsubscribe();
         try {
           controller.close();
         } catch {
@@ -263,21 +269,70 @@ export async function POST(req: Request): Promise<Response> {
         }
       };
 
-      // Client disconnect: stop writing; the run is cancelled from the
-      // caller's perspective. If the run is paused for intake answers, the
-      // pending entry is cancelled so nothing dangles. The process-wide bus
-      // keeps its existing lifecycle vocabulary; the cancellation is
-      // recorded in the log only.
-      req.signal.addEventListener(
-        "abort",
-        () => {
-          logInfo("assistant run cancelled (client disconnect)", { runId, requestId });
-          cancelPendingRun(runId);
-          close();
-        },
-        { once: true },
-      );
+      /* ---- Abort bridging (Agent Mode V2) ----
+       * While the phase-1 stream is live, a client disconnect cancels the
+       * run (honest stop). Once the run PAUSES (approval/answers), the
+       * bridge stands down: the response we close ourselves must NOT cancel
+       * the run — the user may close the tab for an hour and approve later
+       * (spec §110: active-run rehydration). Explicit cancellation of a
+       * paused run goes through POST /api/assistant/runs/cancel. */
+      const runAbort = new AbortController();
+      let paused = false;
+      const onReqAbort = (): void => {
+        if (paused) return;
+        logInfo("assistant run cancelled (client disconnect)", { runId, requestId });
+        cancelPendingRun(runId);
+        runAbort.abort();
+      };
+      req.signal.addEventListener("abort", onReqAbort, { once: true });
       cleanup = close;
+
+      /** The pause: emit RUN_PAUSED through the ledger (the phase-1 pump
+       *  still delivers it), mark the ledger, then end THIS response. The
+       *  run itself keeps executing server-side; the client resumes it
+       *  through POST /api/assistant/runs/resume with full replay. */
+      const handlePause = (info: {
+        reason: "approval" | "answers";
+        approvalId?: string;
+        orchestratorRunId?: string;
+      }): void => {
+        paused = true;
+        if (info.orchestratorRunId) {
+          setOrchestratorMapping(runId, info.orchestratorRunId);
+        }
+        writeEvent({
+          type: "RUN_PAUSED",
+          runId,
+          reason: info.reason,
+          approvalId: info.approvalId,
+          orchestratorRunId: info.orchestratorRunId,
+        });
+        markRunPaused(runId, {
+          reason: info.reason,
+          approvalId: info.approvalId,
+          orchestratorRunId: info.orchestratorRunId,
+        });
+        logInfo("assistant run paused (awaiting human input)", {
+          runId,
+          requestId,
+          reason: info.reason,
+        });
+        // Give the event loop one tick so the RUN_PAUSED frame flushes to
+        // the socket before the response ends.
+        setTimeout(() => close(), 30);
+      };
+
+      // FIRST EVENT — synchronous, before any await. Measured target ~300ms
+      // includes network + client parse; server-side this is ~0ms.
+      writeEvent({
+        type: "RUN_STARTED",
+        runId,
+        conversationId: null,
+        startedAt: Date.now(),
+        mode,
+      });
+      const firstEventMs = Date.now() - receivedAt;
+      logInfo("assistant run: first event written", { runId, requestId, firstEventMs });
 
       void (async () => {
         publish(createEvent({ type: "ASSISTANT_STARTED", runId }));
@@ -303,34 +358,38 @@ export async function POST(req: Request): Promise<Response> {
                   depth: parsed.data.memory?.depth ?? prefs?.depth ?? "standard",
                 };
               })(),
-              // 8C question flow: the run pauses here, and the answers route
-              // resolves it. Client disconnect cancels it.
-              answersProvider: () => waitForAnswers(runId, () => {
-                // nothing extra — the abort listener already closes the stream
-              }),
+              // 8C question flow — Agent Mode V2: the pause ends THIS
+              // response; the run keeps waiting and the answers route
+              // resolves it. The client disconnect bridge is disarmed by
+              // then (a closed tab must not cancel the paused run).
+              answersProvider: () =>
+                waitForAnswers(runId, () => {
+                  if (!paused) runAbort.abort();
+                }),
+              onPause: handlePause,
               // Phase 9: opt into REAL token streaming — every gateway delta
               // becomes one sequenced RESPONSE_CHUNK on this run stream.
               onResponseDelta: (text) => {
                 writeStage({ type: "RESPONSE_CHUNK", segment: { kind: "markdown", text } });
               },
-              // Phase 9.6: client disconnect cancels orchestrator-backed runs.
-              signal: req.signal,
+              // Phase 9.6/V2: aborts flow through the BRIDGE — disconnected
+              // while live → cancel; disconnected after pause → the run
+              // survives (spec §110).
+              signal: runAbort.signal,
             },
             writeStage,
           );
 
-          seq += 1;
-          const resultFrame: ResultFrame = {
-            seq,
+          emitResultFrame(runId, {
+            seq: 0, // the ledger assigns the authoritative seq
             content: runResult.content,
             servedModel: runResult.servedModel,
             mode,
             note: runResult.note ?? RESULT_NOTE,
-          };
-          write(`event: result\ndata: ${JSON.stringify(resultFrame)}\n\n`);
-
+          });
           writeEvent({ type: "RUN_COMPLETED", runId, completedAt: Date.now() });
           publish(createEvent({ type: "ASSISTANT_COMPLETED", runId }));
+          endRunStream(runId);
           logInfo("assistant run completed", {
             runId,
             requestId,
@@ -383,13 +442,14 @@ export async function POST(req: Request): Promise<Response> {
           }
           if (cancelled) {
             writeEvent({ type: "RUN_CANCELLED", runId, cancelledAt: Date.now() });
-            write(`event: error\ndata: ${JSON.stringify({ error: safeReason })}\n\n`);
+            emitErrorFrame(runId, safeReason);
             publish(createEvent({ type: "ASSISTANT_FAILED", runId, reason: safeReason }));
           } else {
             writeEvent({ type: "RUN_FAILED", runId, error: safeReason, failedAt: Date.now() });
-            write(`event: error\ndata: ${JSON.stringify({ error: safeReason })}\n\n`);
+            emitErrorFrame(runId, safeReason);
             publish(createEvent({ type: "ASSISTANT_FAILED", runId, reason: safeReason }));
           }
+          endRunStream(runId);
         } finally {
           close();
           cleanup = null;

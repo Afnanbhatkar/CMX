@@ -20,7 +20,7 @@ import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Attachment, ChatMessage } from "@/features/workspace/types";
 import { selectLedger, useContextInspectorStore } from "@/stores/context-inspector-store";
 import { FileReferenceChip } from "@/features/workspace/components/FileReferenceChip";
-import { ApprovalCard } from "@/components/ai";
+import { ChangeResultCard } from "./ChangeResultCard";
 import {
   ActivityChain,
   ActivityChainLive,
@@ -39,7 +39,6 @@ import { ApprovalCardSlot } from "./ApprovalCardSlot";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ResponseView } from "./ResponseView";
 import { MemoryUsedChip } from "./MemoryUsedChip";
-import { QuestionFlow } from "./QuestionFlow";
 import { isCasualPrompt } from "@/lib/casual-prompt";
 
 export interface ConversationViewProps {
@@ -164,9 +163,9 @@ function AttachmentChip({ attachment }: { attachment: Attachment }) {
 
 /**
  * The current run's real-time activity chain, driven by the per-run store
- * over the SAME backend events as before. While the run is PAUSED for
- * intake questions (8C), the QuestionFlow card renders below the chain —
- * the run resumes only after the user answers.
+ * over the SAME backend events as before. Agent Mode V2 (spec §3): the
+ * approval card renders INSIDE the chain — the decision releases the real
+ * engine gate. The question flow moved ABOVE the composer (spec §76).
  */
 function RunActivityLive({
   message,
@@ -178,37 +177,26 @@ function RunActivityLive({
   minimal: boolean;
 }) {
   const runId = message.runId ?? null;
-  const snapshot = useRunActivity(runId);
-  const { answerIntake } = useAssistantRun();
-  const [submitting, setSubmitting] = useState(false);
-
-  const paused =
-    snapshot.status === "waiting" &&
-    snapshot.waitingKind === "question" &&
-    message.questionBatch !== null &&
-    message.questionBatch !== undefined;
-
-  const handleAnswer = async (answers: Parameters<typeof answerIntake>[3]) => {
-    if (!runId) return;
-    setSubmitting(true);
-    try {
-      await answerIntake(conversationId, message.id, runId, answers);
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  useRunActivity(runId);
+  const { decideApproval } = useAssistantRun();
 
   return (
     <div className="mb-2 space-y-2" data-testid="run-activity-live">
-      <ActivityChainLive runId={runId} minimal={minimal} />
-      {paused && message.questionBatch ? (
-        <QuestionFlow
-          batch={message.questionBatch}
-          answers={message.intakeAnswers ?? []}
-          onAnswer={(answers) => void handleAnswer(answers)}
-          submitting={submitting}
-        />
-      ) : null}
+      <ActivityChainLive
+        runId={runId}
+        minimal={minimal}
+        approval={message.approval ?? null}
+        approvalDecision={message.approvalDecision ?? null}
+        onApprovalDecision={(decision) => {
+          if (!message.approval) return;
+          void decideApproval(
+            conversationId,
+            message.id,
+            message.approval.id,
+            decision,
+          );
+        }}
+      />
     </div>
   );
 }
@@ -262,7 +250,7 @@ function AssistantMessage({
   triggerPrompt: string;
 }) {
   const busy = message.state === "generating";
-  const updateMessage = useWorkspaceStore((s) => s.updateMessage);
+  const waiting = message.state === "waiting";
   const disabledMemoryIds = useContextInspectorStore((s) =>
     selectLedger(s, conversationId).disabledMemoryIds,
   );
@@ -271,58 +259,52 @@ function AssistantMessage({
 
   /* Phase 9.6 fix (approval mid-run pause invisible): under the pin-to-top
    * anchor contract (RULES.md §15) the auto-follower stands down while the
-   * chain grows, so the orchestrator's approval card — rendered below the
-   * live chain — can land BELOW THE FOLD. The multi-agent run genuinely
-   * pauses at the approval gate until a human decides (spec §4), so an
-   * unseen card reads as "the run is stuck / ongoing code writing froze".
-   * When a NEW approval arrives on a generating message, bring the card
-   * into view ONCE (smooth, minimal scroll). This is a deliberate one-shot
-   * user-action scroll, the same spirit as the send anchor — it never runs
-   * while the answer is merely streaming, and the user's own scroll always
-   * wins afterwards. */
+   * chain grows, so the orchestrator's approval card — rendered INSIDE the
+   * thought chain (Agent Mode V2, spec §3) — can land BELOW THE FOLD. The
+   * multi-agent run genuinely pauses at the approval gate until a human
+   * decides, so an unseen card reads as "the run is stuck". When a NEW
+   * approval arrives on a run, bring the card into view ONCE (smooth,
+   * minimal scroll). A one-shot user-action scroll — the user's own scroll
+   * always wins afterwards. */
   const approvalCardRef = useRef<HTMLDivElement | null>(null);
   const scrolledApprovalIdRef = useRef<string | null>(null);
   const approvalId = message.approval?.id ?? null;
   useEffect(() => {
-    if (!busy || !approvalId) return;
-    if (scrolledApprovalIdRef.current === approvalId) return;
-    scrolledApprovalIdRef.current = approvalId;
-    approvalCardRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "nearest",
-    });
-  }, [busy, approvalId]);
-
-  const recordApprovalDecision = (decision: "approved" | "rejected" | "edited") => {
-    if (!message.approval) return;
-    updateMessage(conversationId, message.id, { approvalDecision: decision });
-    // Phase 9.6: orchestrator approvals must reach the ENGINE gate — the
-    // multi-agent run is genuinely paused at the approval gate until a
-    // human decides. Delivered fire-and-forget: the local decision record
-    // stands either way, and if delivery fails the engine's honest 15-min
-    // expiry finalizes the run (visible in the chain) — never a fake
-    // success. "edited" opens files only; it does not release the gate.
-    const orchestratorRunId = message.approval.orchestratorRunId;
-    if (orchestratorRunId && decision !== "edited") {
-      void fetch("/api/assistant/approvals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approvalId: message.approval.id, decision }),
-      }).catch((error: unknown) => {
-        console.error("[cmx-chat] approval decision delivery failed", error);
+    if (busy || waiting) {
+      if (!approvalId) return;
+      if (scrolledApprovalIdRef.current === approvalId) return;
+      scrolledApprovalIdRef.current = approvalId;
+      approvalCardRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
       });
     }
-  };
+  }, [busy, waiting, approvalId]);
+
+  /* Agent Mode V2 (spec §3): the decision goes through the hook — it posts
+   * to /api/assistant/approvals and resumes the SAME run through the
+   * resume stream. The card itself renders inside the chain; this wrapper
+   * anchor just keeps the one-shot scroll working. */
+  const { decideApproval } = useAssistantRun();
+
+  const approvalAnchor = message.approval ? (
+    <div ref={approvalCardRef} aria-hidden="true" className="h-0" />
+  ) : null;
 
   return (
     <div className="max-w-[92%] min-w-0">
       {/* Phase 8D: the real-time activity chain IS the message header — the
-          old "Assistant" heading/status presentation is intentionally gone. */}
+          old "Assistant" heading/status presentation is intentionally gone.
 
-      {/* Phase 8D live run: per-run chain (Thinking → Solving → Waiting →
-          final duration) + the 8C question flow while paused. Casual
-          prompts (hii / hello / how are you) keep the chain COLLAPSED —
-          the user opens the step dropdown only when they want to see it. */}
+          LIVE (generating) vs WAITING (Agent Mode V2): a run paused at the
+          approval gate / intake questions renders through the SAME chain
+          surface — the chain is genuinely unresolved, so it must stay open
+          with the approval card (or the composer question) interactive.
+          spec §31/§74: no auto-collapse, no final label, no answer. */}
+      {/* LIVE chain while the run streams. A WAITING (paused) run renders
+          through the PERSISTED chain below — the paused snapshot was
+          captured at the pause and restores as open + waiting (spec §110),
+          so both the live-pause and the reload cases show the same truth. */}
       {busy && (
         <RunActivityLive
           message={message}
@@ -332,14 +314,28 @@ function AssistantMessage({
       )}
 
       {/* Persisted chain for history (reload keeps the final timeline);
-          legacy pre-8D messages render through the same presentation. */}
+          legacy pre-8D messages render through the same presentation.
+          Agent Mode V2: a WAITING message restores its paused chain here
+          (snapshotFromPersistedChain keeps it open) with the approval card
+          still interactive — the run is genuinely unresolved (spec §73). */}
       {!busy && (
         <ActivityChain
           chain={message.activityChain ?? null}
           legacySteps={message.activity}
           legacyThoughtForMs={message.thoughtForMs ?? null}
           legacyRunId={message.runId ?? null}
+          approval={message.approval ?? null}
+          approvalDecision={message.approvalDecision ?? null}
+          onApprovalDecision={(decision) => {
+            if (!message.approval) return;
+            void decideApproval(conversationId, message.id, message.approval.id, decision);
+          }}
         />
+      )}
+      {waiting && message.approval && (
+        <div className="sr-only">
+          Approval requested — use the controls in the activity chain above.
+        </div>
       )}
 
       {/* Phase 9: the answer streams word by word below the live chain
@@ -358,20 +354,18 @@ function AssistantMessage({
         )
       ) : null}
 
-      {/* Phase 8C: the model's proposed change awaits an explicit human
-          decision — recorded locally, never applied (no ChangeSet yet).
-          Phase 9.6: orchestrator approvals arrive MID-RUN (the engine gate
-          genuinely pauses the stream) so the card must render while the
-          message is still generating — the decision releases the run. */}
-      {message.approval && (
-        <div ref={approvalCardRef}>
-          <ApprovalCard
-            approval={message.approval}
-            decision={message.approvalDecision ?? null}
-            onDecision={recordApprovalDecision}
-          />
-        </div>
-      )}
+      {/* Agent Mode V2 (spec §21/§22): the machine-generated change result
+          card — real files, real verification, real diffs. Rendered in the
+          CHAT (result surface) once the run completes; approval lives in
+          the THOUGHT CHAIN, never here. */}
+      {!busy && !waiting && message.changeResult ? (
+        <ChangeResultCard result={message.changeResult} />
+      ) : null}
+
+      {/* Agent Mode V2: the approval card is NOT a chat message anymore —
+          it lives inside the thought chain (spec §3/§6). This zero-height
+          anchor only supports the one-shot scroll-into-view. */}
+      {approvalAnchor}
 
       {message.state === "error" && (
         <div className="space-y-1.5">

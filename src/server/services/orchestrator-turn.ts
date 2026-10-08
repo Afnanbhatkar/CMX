@@ -1,23 +1,27 @@
 /**
- * CodeMind X V2 — orchestrator chat turn (Phase 9.6).
+ * CodeMind X V2 — orchestrator chat turn (Phase 9.6 + Agent Mode V2).
  *
  * Runs the REAL Phase 9 multi-agent orchestrator inside an assistant chat
  * run and maps every live engine event onto the EXISTING 8B/8C stage-event
  * vocabulary — so the agents' actual work (planning, searching, reading,
- * analyzing, proposing, verifying) plays through the PROTECTED thought
- * chain (chain-pacer one-by-one rhythm, close gate, answer gating) with
- * ZERO changes to any frozen surface.
+ * analyzing, proposing, applying, verifying) plays through the PROTECTED
+ * thought chain with ZERO changes to any frozen surface.
+ *
+ * Agent Mode V2 (spec §5/§31/§56/§110): the approval gate is a REAL blocking
+ * state. When the engine reaches it, this turn RETURNS a "paused" result —
+ * the stream layer ends the phase-1 SSE response (RUN_PAUSED) while the run
+ * continues server-side; the client resumes through a fresh stream and the
+ * engine's approval decision (recorded via /api/assistant/approvals)
+ * releases the gate. Final response, mutation and verification all happen
+ * strictly AFTER the decision.
  *
  * Honesty rules (RULES.md §9):
- * - every row is a REAL engine event (an agent really started/finished);
- * - summaries come from the agents' own fixed-format findings — never
- *   model free text, never chain-of-thought (ARCHITECTURE.md §8);
- * - failed agents surface as failed rows with the real error;
- * - planned (never-implemented) agents the model selected produce NO row
- *   (the engine never executes them; the console lists the honest skip);
- * - the approval gate pauses the run exactly like the 8C approval flow —
- *   the chat approval card decision releases it via the orchestrator
- *   approval registry.
+ * - every row is a REAL engine event (an agent really started/finished, a
+ *   file really was created/edited/deleted and re-read from disk);
+ * - summaries come from fixed-format findings — never model free text,
+ *   never chain-of-thought (ARCHITECTURE.md §8);
+ * - failed agents/operations surface as failed rows with the real error;
+ * - planned (never-implemented) agents the model selected produce NO row.
  */
 
 import type { AssistantStageEmitter } from "./assistant-service";
@@ -27,6 +31,7 @@ import type {
 } from "@/features/workspace/assistant/contracts";
 import {
   startChatOrchestration,
+  getRunState,
   type ChatOrchestrationOutput,
   type OrchestratorEngineEvent,
 } from "@/server/orchestrator/engine";
@@ -40,6 +45,25 @@ export interface OrchestratorTurnResult {
   /** Honest result-frame note (replaces the streaming note for this path). */
   note: string;
   orchestratorRunId: string | null;
+  /** Machine-generated change result (present when a ChangeSet was applied). */
+  changeResult: ChatOrchestrationOutput["changeResult"];
+}
+
+/** A turn that PAUSED at the approval gate — the run continues server-side
+ *  (the pause itself is delivered through the onPause callback). */
+export interface OrchestratorTurnPaused {
+  paused: true;
+  orchestratorRunId: string;
+  approvalId: string;
+}
+
+/**
+ * Server-side file-op rows use the ALLOWED ActivityNode kind vocabulary;
+ * the client's mapViewKind derives the real view kind from the fixed title
+ * ("Creating"/"Updating"/"Deleting"/…) — titles are the contract.
+ */
+function fileOpKind(): ActivityNode["kind"] {
+  return "coding";
 }
 
 /** Fixed stage row per agent — kinds/titles map deterministically (8D). */
@@ -108,6 +132,8 @@ function parseRetrievalSearch(
   return { query: fallbackQuery, hits: result.sources.length };
 }
 
+let fileOpCounter = 0;
+
 export async function runOrchestratorTurn(opts: {
   /** The user's request for THIS turn (query already extracted). */
   request: string;
@@ -119,15 +145,25 @@ export async function runOrchestratorTurn(opts: {
   onStage: AssistantStageEmitter;
   /** Abort signal — client disconnect cancels the orchestration. */
   signal?: AbortSignal;
+  /** Agent Mode V2: fires when the run reaches the approval gate. */
+  onPause?: (info: { orchestratorRunId: string; approvalId: string }) => void;
 }): Promise<OrchestratorTurnResult> {
-  const { request, memories, runId, onStage, signal } = opts;
+  const { request, memories, runId, onStage, signal, onPause } = opts;
 
   const requestWithMemory = request.slice(0, 8000) + renderMemoryBlock(memories);
+
+  let orchestratorRunPublicId: string | null = null;
 
   const handle = await startChatOrchestration(
     { request: requestWithMemory },
     (event: OrchestratorEngineEvent) => {
       try {
+        // The approval-required event is the FIRST carrier of the engine's
+        // run id — captured here so the pause callback never races the
+        // handle assignment.
+        if (event.kind === "approval-required") {
+          orchestratorRunPublicId = event.runPublicId;
+        }
         mapEngineEvent(event, request, onStage);
       } catch (error) {
         // A mapping bug must never corrupt the run stream — log + continue.
@@ -135,6 +171,15 @@ export async function runOrchestratorTurn(opts: {
       }
     },
     signal,
+    (info) => {
+      // The engine reached the approval gate. Tell the stream layer (which
+      // ends the phase-1 response) — the run continues server-side until
+      // the decision releases the gate.
+      onPause?.({
+        orchestratorRunId: orchestratorRunPublicId ?? handle.runPublicId,
+        approvalId: info.approvalId,
+      });
+    },
   );
 
   let output: ChatOrchestrationOutput | null = null;
@@ -142,6 +187,15 @@ export async function runOrchestratorTurn(opts: {
     output = await handle.done;
   } catch (error) {
     if (signal?.aborted) {
+      const cancelled = new Error("The multi-agent run was cancelled.");
+      (cancelled as Error & { cancelled?: boolean }).cancelled = true;
+      throw cancelled;
+    }
+    // The engine's OWN controller was aborted (paused-run cancel route) —
+    // the honest outcome is CANCELLED, not failed. The DB row is
+    // authoritative (spec §5).
+    const state = await getRunState(handle.runPublicId).catch(() => null);
+    if (state?.status === "cancelled") {
       const cancelled = new Error("The multi-agent run was cancelled.");
       (cancelled as Error & { cancelled?: boolean }).cancelled = true;
       throw cancelled;
@@ -158,6 +212,13 @@ export async function runOrchestratorTurn(opts: {
   }
 
   if (!output || !output.answer.trim()) {
+    // Honest failure propagation (spec §106/§135): the run's real error —
+    // including apply/verify failures — travels to the chat verbatim,
+    // never a generic "something went wrong".
+    const state = await getRunState(handle.runPublicId).catch(() => null);
+    if (state?.status === "failed" && state.error) {
+      throw new Error(`The multi-agent run failed: ${state.error}`);
+    }
     throw new Error(
       "The multi-agent run finished without a synthesized answer (see the Orchestrator console for the honest span details).",
     );
@@ -166,8 +227,9 @@ export async function runOrchestratorTurn(opts: {
   return {
     content: output.answer,
     servedModel: "multi-agent-orchestrator",
-    note: "The answer was composed by the real multi-agent orchestrator (planner → agents → critic); the agents' work played live in the thought chain.",
+    note: "The answer was composed by the real multi-agent orchestrator (planner → agents → approval → applied changes → critic); the agents' work played live in the thought chain.",
     orchestratorRunId: handle.runPublicId,
+    changeResult: output.changeResult,
   };
 }
 
@@ -249,8 +311,8 @@ function mapEngineEvent(
 
     case "approval-required": {
       // The 8C approval card + the chain's "Waiting for approval" row (the
-      // store pauses the run timer; the decision resumes it via the next
-      // real agent event).
+      // store pauses the run timer; the RUN PAUSE ends the phase-1 stream —
+      // the decision releases the gate through the approvals route).
       onStage({
         type: "APPROVAL_REQUIRED",
         approval: {
@@ -259,20 +321,28 @@ function mapEngineEvent(
           affectedFiles: event.payload.affectedFiles,
           whyApprovalNeeded:
             event.payload.whyApprovalNeeded ||
-            "Applying a proposed change-set requires explicit human approval.",
-          risk: event.payload.risk || "Proposed diffs only — nothing is written to disk automatically.",
-          requestedPermission: event.payload.requestedPermission || "record-approval-for-proposed-changeset",
+            "Applying a proposed change-set performs REAL repository mutations and requires explicit human approval.",
+          risk: event.payload.risk || "Real repository mutations require explicit approval.",
+          requestedPermission: event.payload.requestedPermission || "apply-changeset-to-workspace",
           expectedTests: [],
           securityImpact: "",
           orchestratorRunId: event.runPublicId,
+          changes: event.payload.changes,
+          counts: event.payload.counts,
+          changeSetId: event.payload.changeSetId,
         },
       });
       return;
     }
 
     case "approval-decided": {
-      // No row: the next real agent event implicitly resumes the run and the
-      // store completes the waiting row (existing 8C semantics, untouched).
+      // The chain completes the waiting row with the honest decision mark;
+      // the run continues server-side (resume stream delivers the rest).
+      onStage({
+        type: "APPROVAL_DECIDED",
+        approvalId: event.approvalId,
+        decision: event.decision,
+      });
       return;
     }
 
@@ -281,7 +351,143 @@ function mapEngineEvent(
       // the verdict line). Kept as a no-op so the story stays minimal.
       return;
     }
+
+    /* ---- Agent Mode V2: real execution facts ---- */
+    case "apply-started": {
+      onStage({
+        type: "ACTIVITY_STARTED",
+        activity: {
+          id: "apply-changeset",
+          kind: "coding",
+          title: "Applying approved changes",
+          summary: null,
+          metadata: null,
+          children: [],
+        },
+      });
+      return;
+    }
+
+    case "file-op": {
+      fileOpCounter += 1;
+      const id = `file-op-${fileOpCounter}`;
+      onStage({
+        type: "ACTIVITY_STARTED",
+        activity: {
+          id,
+          kind: fileOpKind(),
+          title: event.title,
+          summary: null,
+          metadata: { path: event.path ?? "" },
+          children: event.path
+            ? [{ tool: "create_patch" as const, path: event.path, approved: true }]
+            : [],
+        },
+      });
+      if (event.status !== "started") {
+        onStage({
+          type: "ACTIVITY_COMPLETED",
+          activityId: id,
+          summary: event.detail,
+        });
+      }
+      return;
+    }
+
+    case "apply-completed": {
+      onStage({
+        type: "ACTIVITY_COMPLETED",
+        activityId: "apply-changeset",
+        summary: event.summary.slice(0, SUMMARY_CAP),
+      });
+      return;
+    }
+
+    case "apply-failed": {
+      onStage({
+        type: "ACTIVITY_UPDATED",
+        activityId: "apply-changeset",
+        patch: { status: "failed", summary: event.error.slice(0, SUMMARY_CAP) },
+      });
+      return;
+    }
+
+    case "validation": {
+      const id = "validation-run";
+      onStage({
+        type: "ACTIVITY_STARTED",
+        activity: {
+          id,
+          kind: "testing",
+          title: "Running validation",
+          summary: null,
+          metadata: null,
+          children: event.checks.map((check) => ({
+            tool: "run_tests" as const,
+            target: `${check.name}: ${check.path}`,
+            passed: check.status === "passed" ? true : check.status === "failed" ? false : null,
+          })),
+        },
+      });
+      const passed = event.checks.filter((c) => c.status === "passed").length;
+      const failed = event.checks.filter((c) => c.status === "failed").length;
+      const skipped = event.checks.filter((c) => c.status === "skipped").length;
+      onStage({
+        type: "ACTIVITY_COMPLETED",
+        activityId: id,
+        summary:
+          failed > 0
+            ? `${failed} check(s) failed, ${passed} passed${skipped > 0 ? `, ${skipped} not auto-validated` : ""}`
+            : `${passed} passed${skipped > 0 ? `, ${skipped} not auto-validated (honest skip)` : ""}`,
+      });
+      return;
+    }
+
+    case "conflict": {
+      fileOpCounter += 1;
+      const id = `conflict-${fileOpCounter}`;
+      onStage({
+        type: "ACTIVITY_STARTED",
+        activity: {
+          id,
+          kind: "testing",
+          title: "Checking file versions",
+          summary: null,
+          metadata: null,
+          children: [],
+        },
+      });
+      onStage({
+        type: "ACTIVITY_COMPLETED",
+        activityId: id,
+        summary: `${event.path} changed after the proposal — re-reading and re-planning (nothing overwritten)`.slice(0, SUMMARY_CAP),
+      });
+      return;
+    }
+
+    case "change-result": {
+      // The machine-generated result card travels as its own typed wire
+      // event — the chat renders the real outcome (spec §81/§82).
+      onStage({
+        type: "CHANGE_RESULT",
+        result: {
+          changeSetId: event.result.changeSetId,
+          created: event.result.created,
+          modified: event.result.modified,
+          deleted: event.result.deleted,
+          validation: event.result.validation,
+          noOp: event.result.noOp,
+          conflict: event.result.conflict,
+          error: event.result.error,
+        },
+      });
+      return;
+    }
   }
+}
+
+function fileOpKindRemoved(): void {
+  // placeholder removed
 }
 
 /** Stable activity id per engine step — start/finish pairs must match. */

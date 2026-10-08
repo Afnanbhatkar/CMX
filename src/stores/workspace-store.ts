@@ -246,6 +246,8 @@ export interface WorkspaceState {
         | "intakeAnswers"
         | "approval"
         | "approvalDecision"
+        | "waitingKind"
+        | "changeResult"
         | "structured"
       >
     >,
