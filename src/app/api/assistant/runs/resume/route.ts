@@ -62,6 +62,10 @@ export async function POST(req: Request): Promise<Response> {
       let unsubscribe: (() => void) | null = null;
       let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
       let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
+      /** Frames with seq ≤ this are REPLAY (already processed by the client
+       *  on a previous stream). Declared before `deliver` — the replay may
+       *  invoke it synchronously during subscribe. */
+      const lastSeqAtOpen = getRunStreamLastSeq(runId);
 
       const finish = (logMessage: string): void => {
         if (closed) return;
@@ -105,6 +109,18 @@ export async function POST(req: Request): Promise<Response> {
             // Terminal: the transport error frame (if any) was already
             // delivered before this point in ledger order; end the stream.
             setTimeout(() => finish("assistant resume: run terminal"), 60);
+          } else if (
+            frame.event.type === "RUN_PAUSED" &&
+            frame.event.seq > lastSeqAtOpen
+          ) {
+            // A LIVE pause (a new gate reached during THIS stream — e.g. the
+            // approval gate after the intake answers) — mirror the phase-1
+            // contract exactly: the pause ends THIS response, the run keeps
+            // waiting server-side, and the client re-resumes after the next
+            // human decision (spec §5/§31/§110). Without this, the resume
+            // stream hangs open and the client never settles into the
+            // waiting state (the approval card never renders).
+            setTimeout(() => finish("assistant resume: run paused"), 60);
           }
         } else if (frame.kind === "result" && frame.frame) {
           writeFrame("result", frame.frame);
@@ -158,7 +174,7 @@ export async function POST(req: Request): Promise<Response> {
       logInfo("assistant resume stream opened", {
         runId,
         fromSeq,
-        lastSeq: getRunStreamLastSeq(runId),
+        lastSeq: lastSeqAtOpen,
         paused: getRunPause(runId)?.reason ?? null,
         orchestratorRunId: getOrchestratorMapping(runId),
       });

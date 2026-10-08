@@ -92,6 +92,7 @@ function makeCall(overrides: Partial<AgentCall> = {}): AgentCall {
     plan: null,
     reasoning: null,
     runInternalId: null,
+    targetFiles: [],
     signal: new AbortController().signal,
     onToolUse: () => {},
     ...overrides,

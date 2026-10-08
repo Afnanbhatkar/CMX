@@ -923,8 +923,77 @@ const BASENAME_RE =
   /\b([\w.-]+\.(?:tsx|ts|jsx|js|py|md|json|css|scss|html|htm|yml|yaml|toml|sql|sh|bash|go|rs|java|rb|php|vue|svelte|c|cpp|h|prisma|txt))\b/gi;
 /** "file called X" / "named X" — the user's name for the file (may not be a real path). */
 const CALLED_RE = /\b(?:called|named|titled)\s+["'“”]?([^"'“”.,!?\n]{2,48})/gi;
+/** "…greeting2 file…" — a name written BEFORE the word "file" (no extension,
+ *  so BASENAME_RE never sees it: "find greeting2 file and rename it"). The
+ *  capture keeps up to 2 preceding words; cleanFileMention strips fillers. */
+const NAME_BEFORE_FILE_RE = /\b((?:[\w@.+-]+\s+){0,2}[\w@.+-]+)\s+files?\b/gi;
 
 const normalizeName = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+/** File-name stem: BASENAME without extension, punctuation-stripped —
+ *  directory parts never leak into the stem ("examples/greeting2.py" has
+ *  the stem "greeting2", not "examplesgreeting2"). */
+const stemOfName = (s: string): string => {
+  const base = s.slice(Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\")) + 1);
+  return normalizeName(base.replace(/\.[A-Za-z0-9]{1,8}$/, ""));
+};
+
+/** Words that are NEVER (part of) a file name in natural requests — pronouns
+ *  and filler around the real mention ("named it watchparty" captures
+ *  "it watchparty"; the mention is "watchparty"). */
+const NON_NAME_WORDS = new Set([
+  "a", "an", "the", "this", "that", "these", "those", "my", "your", "our",
+  "their", "its", "it", "him", "her", "them", "he", "she", "they", "his",
+  "hers", "new", "old", "same", "other", "another", "some", "any", "one",
+  "two", "three", "no", "current", "previous", "next", "last", "first",
+  "second", "third", "original", "actual", "correct", "right", "wrong",
+  "selected", "chosen", "given", "specified", "attached", "pinned", "target",
+  "following", "above", "below", "certain", "specific", "particular",
+  "single", "whole", "entire", "full", "complete", "existing", "open",
+  "active", "code", "file", "files", "folder", "dir", "directory", "repo",
+  "repository", "project", "workspace", "please", "and", "or", "but",
+  "then", "also", "to", "into", "with", "for", "from", "of", "in", "on",
+  "at", "by", "about", "called", "named", "name", "rename", "change",
+  "update", "edit", "modify", "fix", "delete", "remove", "create", "make",
+  "add", "write", "find", "show", "read", "see", "tell", "mention",
+  "mentioned", "want", "need", "let", "us", "can", "could", "would",
+  "should", "will", "shall", "just", "simply", "now", "here",
+]);
+
+/** Clean a raw captured mention: cut at clause boundaries (conjunctions and
+ *  the rename "to X" tail — "aiside bar to sidebar" is a mention plus the
+ *  DESTINATION clause), strip filler words around the real name. Empty when
+ *  nothing name-like remains. */
+function cleanFileMention(raw: string): string {
+  let mention = raw.trim().replace(/["'“”]/g, "");
+  // Captures like "watchparty and delete greeting" are one mention plus a
+  // NEW clause — cut at the boundary, never treat the tail as the name.
+  mention = mention.split(/\s+(?:and|then|also|plus|but|or|so|to|into)\s+/i)[0].trim();
+  const words = mention.split(/\s+/).filter(Boolean);
+  while (words.length > 0 && NON_NAME_WORDS.has(words[0].toLowerCase())) words.shift();
+  while (words.length > 0 && NON_NAME_WORDS.has(words[words.length - 1].toLowerCase())) words.pop();
+  const cleaned = words.join(" ").trim();
+  if (!cleaned || cleaned.length > 60) return "";
+  return cleaned;
+}
+
+/** The request asks to RENAME something (the destination is a NEW name —
+ *  it must never be resolved as an existing target file). */
+const RENAME_INTENT_RE =
+  /\b(?:re-?name)\b|\bchange\s+(?:the\s+)?name\b|\bname[d]?\s+it\b|\bcall(?:ed)?\s+it\b/i;
+
+/** "rename X to Y" — X is the target-file mention (fallback when the target
+ *  is not caught by the basename / name-before-file patterns). */
+const RENAME_TARGET_RE =
+  /\bre-?name\s+(?:the\s+)?(?:file\s+)?["'“”]?([A-Za-z][\w@.+-]{1,47})\s+to\s+["'“”]?/i;
+
+/** The NEW name in a rename request ("…named it watchparty", "rename X to
+ *  watchparty", "name it Y", "call it Y", "…to watchparty"). */
+const RENAME_DEST_RES: RegExp[] = [
+  /\bnamed?\s+(?:it|the\s+file|this\s+file|that\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
+  /\bcall\s+(?:it|the\s+file|this\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
+  /\bre-?name\s+(?:the\s+)?(?:[\w@.-]+\s+)?(?:file\s+)?(?:to\s+)?[\w@.-]+\s+to\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
+  /\bto\s+["'“”]?([A-Za-z][\w@.+-]{0,47})\s*[.!]?\s*$/i,
+];
 
 interface AgentTargetResolution {
   /** Resolved repo-relative paths the change-set is confined to. */
@@ -946,18 +1015,23 @@ function nameMatchesPath(mention: string, path: string): boolean {
   return stem === candidate || stem.includes(candidate) || candidate.includes(stem);
 }
 
-/** Build the ONE clarify question for an unresolved/ambiguous file mention. */
+/** Build the ONE clarify question for an unresolved/ambiguous file mention.
+ *  With no near-match suggestions the question is STILL asked — free-text
+ *  only — because running the change against a guessed file is exactly the
+ *  failure this flow exists to prevent. */
 function buildTargetClarifyBatch(
   mention: string,
   suggestions: string[],
   multipleMatches: boolean,
-): IntakeQuestionBatch | null {
-  if (suggestions.length === 0) return null;
+): IntakeQuestionBatch {
   const question: ClarifyQuestion = {
     id: "q-target-file",
-    question: multipleMatches
-      ? `I found ${suggestions.length} files matching “${mention}”. Which one should I change?`
-      : `I couldn't find a file named “${mention}” in the repository. Did you mean one of these?`,
+    question:
+      multipleMatches
+        ? `I found ${suggestions.length} files matching “${mention}”. Which one should I change?`
+        : suggestions.length > 0
+          ? `I couldn't find a file named “${mention}” in the repository. Did you mean one of these?`
+          : `I couldn't find any file matching “${mention}” in the repository. Which file should I change? Type the exact file name or path.`,
     options: suggestions.map((path, i) => ({
       id: `opt-${i + 1}`,
       label: `${path.slice(path.lastIndexOf("/") + 1)} (${path.slice(0, path.lastIndexOf("/")) || "."})`,
@@ -969,7 +1043,7 @@ function buildTargetClarifyBatch(
     questions: [question],
     rationale: multipleMatches
       ? "Several files match the name you gave — the choice changes what gets modified."
-      : "The file name you gave doesn't exist in the repository — pick the real file so the change lands in the right place.",
+      : "The change must land in the exact file you mean — pick it (or type its name) before anything is modified.",
     askedAt: Date.now(),
   };
 }
@@ -991,24 +1065,58 @@ function targetsFromAnswers(
     }
     const custom = answer.customText?.trim();
     if (!custom) continue;
-    // Free text: accept a real path directly, else resolve by stem match.
-    const norm = custom.replace(/^\.?\//, "");
-    if (workspacePaths.includes(norm)) {
+    // Free text: tiered resolution — exact path → suffix → exact stem →
+    // stem containment. Deterministic, and "greeting2" picks greeting2.py
+    // (never greeting.py).
+    const norm = custom.replace(/^\.?\//, "").trim();
+    if (norm && workspacePaths.includes(norm)) {
       chosen.push(norm);
       continue;
     }
-    const suffix = workspacePaths.find((p) => p.endsWith(`/${norm}`));
-    if (suffix) {
-      chosen.push(suffix);
+    if (norm) {
+      const suffix = workspacePaths.find((p) => p.endsWith(`/${norm}`));
+      if (suffix) {
+        chosen.push(suffix);
+        continue;
+      }
+    }
+    const candidate = normalizeName(custom);
+    if (candidate.length < 3) continue;
+    const exact = workspacePaths.filter((p) => stemOfName(p) === candidate);
+    if (exact.length > 0) {
+      chosen.push(exact[0]);
       continue;
     }
-    const stemHit = workspacePaths.find((p) => nameMatchesPath(custom, p));
-    if (stemHit) chosen.push(stemHit);
+    const contains = workspacePaths.find((p) => {
+      const stem = stemOfName(p);
+      return stem.length >= 3 && (stem.includes(candidate) || candidate.includes(stem));
+    });
+    if (contains) chosen.push(contains);
   }
   return [...new Set(chosen)];
 }
 
-/** Resolve the user-designated target file(s) for an agent-mode run. */
+/** Compute the rename DESTINATION path from a resolved target + the user's
+ *  new name: same directory, extension preserved unless the new name carries
+ *  one ("greeting2.py" + "watchparty" → "examples/watchparty.py"). */
+function renameDestinationPath(target: string, newName: string): string | null {
+  const clean = newName.trim().replace(/["'“”]/g, "").replace(/^\.?\//, "");
+  if (!clean || !/^[A-Za-z][\w.+-]*$/.test(clean)) return null;
+  const dir = target.includes("/") ? `${target.slice(0, target.lastIndexOf("/"))}/` : "";
+  const ext = target.match(/\.[A-Za-z0-9]{1,8}$/)?.[0] ?? "";
+  const withExt = /\.[A-Za-z0-9]{1,8}$/.test(clean) ? clean : `${clean}${ext}`;
+  const destination = `${dir}${withExt}`;
+  return destination === target ? null : destination;
+}
+
+/** Resolve the user-designated target file(s) for an agent-mode run.
+ *
+ *  The change-set must land ONLY in the file(s) the user designated — by
+ *  attaching, pinning, having open, or naming in the request. When a named
+ *  file cannot be resolved (or resolves to several real files) the run
+ *  pauses ONCE with a Claude-style pick-one question listing same/nearly-
+ *  same names — it NEVER silently proceeds against whatever retrieval
+ *  scored highest (that produced the random-file approval cards). */
 async function resolveAgentTargets(
   query: string,
   context: AssistantTurnInput["context"],
@@ -1027,75 +1135,207 @@ async function resolveAgentTargets(
   }
   const pathSet = new Set(workspacePaths);
 
-  // Attachment/pinned paths are the user's strongest signal — keep only
-  // ones that really exist (readAttachedFiles reports the rest honestly).
-  const attachmentPaths = [
+  /** Tiered mention resolution: exact path → path suffix → EXACT stem
+   *  equality (all confident) → stem containment (NEVER a silent pick —
+   *  near-same names become clarify suggestions, per the targeting rule:
+   *  if the exact file cannot be identified, ask). */
+  const resolveMention = (
+    mention: string,
+  ): { status: "resolved" | "ambiguous" | "missing"; hits: string[] } => {
+    const norm = mention.trim().replace(/^\.?\//, "");
+    if (!norm) return { status: "missing", hits: [] };
+    if (pathSet.has(norm)) return { status: "resolved", hits: [norm] };
+    const suffix = workspacePaths.filter((p) => p.endsWith(`/${norm}`));
+    if (suffix.length === 1) return { status: "resolved", hits: suffix };
+    if (suffix.length > 1) return { status: "ambiguous", hits: suffix.slice(0, 5) };
+    const candidate = normalizeName(norm);
+    if (candidate.length >= 3) {
+      const exact = workspacePaths.filter((p) => stemOfName(p) === candidate);
+      if (exact.length === 1) return { status: "resolved", hits: exact };
+      if (exact.length > 1) return { status: "ambiguous", hits: exact.slice(0, 5) };
+      // Near-same names: suggestions for the clarify question, never a
+      // silent guess (a guessed file is exactly the random-file bug).
+      const contains = workspacePaths.filter((p) => {
+        const stem = stemOfName(p);
+        return stem.length >= 3 && (stem.includes(candidate) || candidate.includes(stem));
+      });
+      if (contains.length > 0) return { status: "ambiguous", hits: contains.slice(0, 5) };
+    }
+    return { status: "missing", hits: [] };
+  };
+
+  // ---- Rename-awareness FIRST: the new name is a DESTINATION, not an
+  // existing target file. "rename greeting2 to watchparty" / "…named it
+  // watchparty" must never ask "which file is watchparty?".
+  const isRename = RENAME_INTENT_RE.test(query);
+  const destinationNames: string[] = [];
+  if (isRename) {
+    for (const destRe of RENAME_DEST_RES) {
+      const match = destRe.exec(query);
+      if (!match) continue;
+      const cleaned = cleanFileMention(match[1]);
+      if (!cleaned) continue;
+      destinationNames.push(cleaned);
+      break; // the first well-formed destination wins
+    }
+  }
+  const isDestinationName = (mention: string): boolean => {
+    const stem = stemOfName(mention);
+    if (!stem) return false;
+    return destinationNames.some((d) => stemOfName(d) === stem);
+  };
+
+  const targets = new Set<string>();
+  /** A file the user clearly named but that resolved to nothing. */
+  let unresolvedMention: string | null = null;
+  /** A mention that matched SEVERAL real files (the pick-one case). */
+  let ambiguousMention: string | null = null;
+  let ambiguousHits: string[] = [];
+
+  // ---- 0) Attachments/pins are the user's strongest signal. Lenient
+  // matching (exact → suffix → stem): an attached "greeting2" IS
+  // examples/greeting2.py. An unresolvable attachment is recorded — never
+  // silently dropped.
+  const rawAttachmentPaths = [
     ...(context?.attachments
       ?.filter((a) => a.kind === "repository-file" && typeof a.path === "string")
       .map((a) => a.path!.trim()) ?? []),
     ...(context?.pinnedRefs ?? []),
-  ].filter((p) => p.length > 0 && pathSet.has(p));
-
-  const targets = new Set<string>(attachmentPaths);
-
-  // 1) Explicit paths written in the request ("src/app/page.tsx").
-  for (const match of query.matchAll(EXPLICIT_PATH_RE)) {
-    const norm = match[0].replace(/^\.?\//, "");
-    if (pathSet.has(norm)) {
-      targets.add(norm);
-      continue;
-    }
-    const suffix = workspacePaths.find((p) => p.endsWith(`/${norm}`));
-    if (suffix) targets.add(suffix);
-  }
-
-  // 2) Bare filename mentions ("fix MemoryPanel.tsx") — exact basename.
-  let unresolvedBasename: string | null = null;
-  for (const match of query.matchAll(BASENAME_RE)) {
-    const name = match[1];
-    const hits = workspacePaths.filter(
-      (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase() === name.toLowerCase(),
-    );
-    if (hits.length > 0) {
-      for (const hit of hits) targets.add(hit);
-    } else {
-      unresolvedBasename = name;
+  ].filter((p) => p.length > 0);
+  let stopAndClarify = false;
+  for (const raw of rawAttachmentPaths) {
+    const resolution = resolveMention(raw);
+    if (resolution.status === "resolved") {
+      for (const hit of resolution.hits) targets.add(hit);
+    } else if (resolution.status === "ambiguous") {
+      ambiguousMention = raw;
+      ambiguousHits = resolution.hits;
+      stopAndClarify = true;
+      break;
+    } else if (!unresolvedMention) {
+      unresolvedMention = raw;
     }
   }
 
-  // 3) "file called X / named X" — resolve by stem similarity; an attached
-  //    file whose name matches IS the named file.
-  for (const match of query.matchAll(CALLED_RE)) {
-    const mention = match[1].trim();
-    if (!mention) continue;
-    const stemHits = workspacePaths.filter((p) => nameMatchesPath(mention, p));
-    if (stemHits.length === 1) {
-      targets.add(stemHits[0]);
-    } else if (stemHits.length > 1) {
-      // Several near-matches: let the user pick the real file.
-      return {
-        targets: [...targets],
-        clarify: buildTargetClarifyBatch(mention, stemHits.slice(0, 5), true),
-      };
-    } else {
-      // Nothing matches by name — ask with near-match suggestions.
-      return {
-        targets: [...targets],
-        clarify: await buildUnresolvedClarify(query, mention, workspacePaths),
-      };
+  // ---- 1) Explicit paths written in the request ("src/app/page.tsx").
+  if (!stopAndClarify) {
+    for (const match of query.matchAll(EXPLICIT_PATH_RE)) {
+      const resolution = resolveMention(match[0]);
+      if (resolution.status === "resolved") {
+        for (const hit of resolution.hits) targets.add(hit);
+      } else if (resolution.status === "ambiguous") {
+        ambiguousMention = match[0];
+        ambiguousHits = resolution.hits;
+        stopAndClarify = true;
+        break;
+      } else if (!unresolvedMention) {
+        unresolvedMention = match[0];
+      }
     }
   }
 
-  // A bare basename that matched nothing is also an unresolved mention.
-  if (unresolvedBasename) {
+  // ---- 2) Bare filename mentions ("fix MemoryPanel.tsx") — exact basename.
+  // In a rename request the destination may carry an extension ("rename
+  // greeting2.py to watchparty.py") — it is NOT a target.
+  if (!stopAndClarify) {
+    for (const match of query.matchAll(BASENAME_RE)) {
+      const name = match[1];
+      if (isDestinationName(name)) continue;
+      const hits = workspacePaths.filter(
+        (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase() === name.toLowerCase(),
+      );
+      if (hits.length > 0) {
+        for (const hit of hits) targets.add(hit);
+      } else if (!unresolvedMention) {
+        unresolvedMention = name;
+      }
+    }
+  }
+
+  // ---- 3) Rename target ("rename greeting2 to watchparty" — no "file"
+  // word, no extension). The destination is already extracted above.
+  if (!stopAndClarify && isRename && destinationNames.length > 0) {
+    const renameTargetMatch = RENAME_TARGET_RE.exec(query);
+    if (renameTargetMatch) {
+      const mention = cleanFileMention(renameTargetMatch[1]);
+      if (mention && !isDestinationName(mention)) {
+        const resolution = resolveMention(mention);
+        if (resolution.status === "resolved") {
+          for (const hit of resolution.hits) targets.add(hit);
+        } else if (resolution.status === "ambiguous") {
+          ambiguousMention = mention;
+          ambiguousHits = resolution.hits;
+          stopAndClarify = true;
+        } else if (!unresolvedMention) {
+          unresolvedMention = mention;
+        }
+      }
+    }
+  }
+
+  // ---- 4) "<name> file" mentions ("find greeting2 file …") and
+  // "called/named X" mentions ("a file called aiside bar"). Fillers are
+  // cleaned ("it watchparty" → "watchparty"); rename destinations skipped.
+  if (!stopAndClarify) {
+    const mentionMatches: string[] = [];
+    const pushMention = (mention: string): void => {
+      if (!mention) return;
+      if (!mentionMatches.some((m) => stemOfName(m) === stemOfName(mention))) {
+        mentionMatches.push(mention);
+      }
+    };
+    for (const match of query.matchAll(NAME_BEFORE_FILE_RE)) {
+      pushMention(cleanFileMention(match[1]));
+    }
+    for (const match of query.matchAll(CALLED_RE)) {
+      pushMention(cleanFileMention(match[1]));
+    }
+    for (const mention of mentionMatches) {
+      if (isDestinationName(mention)) continue; // rename destination, not a target
+      const resolution = resolveMention(mention);
+      if (resolution.status === "resolved") {
+        for (const hit of resolution.hits) targets.add(hit);
+      } else if (resolution.status === "ambiguous") {
+        ambiguousMention = mention;
+        ambiguousHits = resolution.hits;
+        stopAndClarify = true;
+        break;
+      } else if (!unresolvedMention) {
+        unresolvedMention = mention;
+      }
+    }
+  }
+
+  // ---- 5) Ambiguous mention → ask with the REAL matching files
+  // (Claude-style pick-one; the run never guesses between material files).
+  if (stopAndClarify && ambiguousMention) {
     return {
       targets: [...targets],
-      clarify: await buildUnresolvedClarify(query, unresolvedBasename, workspacePaths),
+      clarify: buildTargetClarifyBatch(ambiguousMention, ambiguousHits, true),
     };
   }
 
-  // 4) Nothing named and nothing attached → the currently open file (when
-  //    one is open) is the change target; otherwise retrieval decides.
+  // ---- 6) The user named a file that could not be resolved → ALWAYS ask
+  // (same/nearly-same suggestions when they exist; free-text otherwise).
+  // Never run the change against a guessed file.
+  if (targets.size === 0 && unresolvedMention) {
+    return {
+      targets: [],
+      clarify: await buildUnresolvedClarify(unresolvedMention, workspacePaths),
+    };
+  }
+
+  // ---- 7) Rename: add the DESTINATION path so the change-set can create
+  // the new file while staying confined to user-designated paths.
+  if (isRename && destinationNames.length > 0 && targets.size > 0) {
+    for (const target of [...targets]) {
+      const destination = renameDestinationPath(target, destinationNames[0]);
+      if (destination) targets.add(destination);
+    }
+  }
+
+  // ---- 8) Nothing named and nothing attached → the currently open file
+  // (when one is open) is the change target; otherwise retrieval decides.
   if (targets.size === 0) {
     const active = context?.activeFile?.trim();
     if (active && pathSet.has(active)) targets.add(active);
@@ -1105,20 +1345,24 @@ async function resolveAgentTargets(
 }
 
 /** Near-match suggestions for a file mention that resolved to nothing:
- *  deterministic stem matches first, then the hybrid search index. */
+ *  deterministic stem matches first, then the hybrid search index. The
+ *  question is ALWAYS returned — even with zero suggestions (the free-text
+ *  input is the answer surface) — so an unresolvable name can never fall
+ *  through to a guessed target file. */
 async function buildUnresolvedClarify(
-  query: string,
   mention: string,
   workspacePaths: string[],
-): Promise<IntakeQuestionBatch | null> {
+): Promise<IntakeQuestionBatch> {
+  // Deterministic near-matches first (same/nearly-same names).
   let candidates = workspacePaths.filter((p) => nameMatchesPath(mention, p)).slice(0, 5);
   if (candidates.length === 0) {
+    // Fuzzy content suggestions from the hybrid index.
     try {
       const { index } = await getSearchIndex();
       const response = await runHybridSearch(index, { query: mention, limit: 8, mode: "auto" });
       candidates = [...new Set(response.results.map((h) => h.file))].slice(0, 4);
     } catch {
-      candidates = []; // suggestions unavailable — no fake options
+      candidates = []; // suggestions unavailable — the free-text question still asks
     }
   }
   return buildTargetClarifyBatch(mention, candidates, false);
@@ -1252,11 +1496,15 @@ export async function runAssistantTurn(
           }
           requestText = requestText + "\n" + renderAnswersBlock(resolution.clarify, answers);
           const { index } = await getSearchIndex();
-          targetFiles = targetsFromAnswers(
-            resolution.clarify,
-            answers,
-            index.files.map((f) => f.path),
-          );
+          // Merge with targets already resolved before the question (e.g. a
+          // valid attachment) — the answers never discard real designations.
+          targetFiles = [
+            ...new Set([...resolution.targets, ...targetsFromAnswers(
+              resolution.clarify,
+              answers,
+              index.files.map((f) => f.path),
+            )]),
+          ];
         }
       } else {
         targetFiles = resolution.targets;

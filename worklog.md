@@ -1473,3 +1473,31 @@ Work Log:
 Stage Summary:
 - Agent mode now lands changes ONLY in the file the user designates (attach, pin, open, path, filename, or "called X"); wrong-file proposals are deterministically dropped; unresolvable names pause the run once with near-match suggestion chips + free text (standard 8C question flow).
 - Files changed: src/server/orchestrator/{contracts,engine,agents}.ts, src/server/services/{assistant-service,orchestrator-turn}.ts — nothing else.
+
+---
+Task ID: 12-b
+Agent: Z.ai Code (main)
+Task: Continue 12 — user's live bug report (screenshot): "find greeting2 file and change the name and named it watchparty" still produced an approval card for src/features/workspace/chat/ConversationView.tsx (random file). Requirements: changes ONLY in the file the user names; if the exact file cannot be found, ask a choose-one suggestion question with same/nearly-same names.
+
+Work Log:
+- REPAIRED BUG DAMAGE FIRST: the wrongly-approved changeset had WIPED 707 lines of src/features/workspace/chat/ConversationView.tsx (git diff showed 10 insertions/707 deletions). Restored via `git checkout -- src/features/workspace/chat/ConversationView.tsx` (794 lines back).
+- ROOT CAUSES (proven with a standalone regex simulation against real workspace paths):
+  1. "greeting2" (name BEFORE the word "file", no extension) matched NO pattern → no target.
+  2. CALLED_RE captured pronouns: "named it watchparty" → mention "it watchparty" → resolves to nothing.
+  3. When an unresolvable mention also produced ZERO suggestions (buildUnresolvedClarify → buildTargetClarifyBatch returned null), the run SILENTLY PROCEEDED with zero targets → coding agent took the top retrieval hit (ConversationView.tsx). This silent path was the actual screenshot bug.
+  4. stemOfName leaked directory parts ("examples/greeting2.py" → stem "examplesgreeting2") making stem matching accidental.
+- FIXES (all in src/server/services/assistant-service.ts targeting section):
+  - NAME_BEFORE_FILE_RE + cleanFileMention + NON_NAME_WORDS: extract "<name> file(s)" mentions; strip pronouns/fillers ("it watchparty"→"watchparty", "find greeting2"→"greeting2"); cut captures at clause boundaries (and/then/to/into…) so "aiside bar to sidebar" = mention + destination.
+  - stemOfName now basename-only; resolveMention is tiered: exact path → path suffix → EXACT stem equality (confident) → stem containment = SUGGESTIONS ONLY, never a silent pick ("greeting3" asks, never silently edits greeting.py).
+  - RENAME-AWARENESS: RENAME_INTENT_RE + RENAME_DEST_RES + RENAME_TARGET_RE + renameDestinationPath — the new name is a DESTINATION, not a missing file: "…named it watchparty" / "rename greeting2.py to watchparty.py" resolves targets to [examples/greeting2.py, examples/watchparty.py] (same dir, extension preserved) instead of asking "which file is watchparty?".
+  - NEVER-SILENT-PROCEED rule: a named-but-unresolvable mention ALWAYS returns a clarify batch — suggestions when they exist (stem matches, then hybrid search), free-text-only question when none; buildTargetClarifyBatch no longer returns null on empty suggestions.
+  - Attachment/pinned paths resolve leniently (exact → suffix → stem) and an unresolvable attachment asks instead of being dropped; clarify answers MERGE with pre-resolved targets.
+- BONUS FIX (needed for the clarify flow to work end-to-end): src/app/api/assistant/runs/resume/route.ts — a resumed stream stayed open after a LIVE RUN_PAUSED (approval gate reached AFTER the intake answers), so the client never settled into the waiting state and the approval card never rendered (page then degraded to "network error"). The resume route now ends the stream on a LIVE RUN_PAUSED (seq > lastSeqAtOpen), mirroring the phase-1 contract; replayed pauses (seq ≤ lastSeqAtOpen) are correctly ignored. evals.ts: AgentCall builder missing required targetFiles (type fix).
+- VERIFIED IN BROWSER (agent-browser, agent mode):
+  - "find greeting2 file and change the name and named it watchparty" → log: targets ["examples/greeting2.py","examples/watchparty.py"], clarified:false → approval card: "Rename greeting2.py to watchparty.py — 1 created · 0 modified · 1 deleted · affected: examples/watchparty.py, examples/greeting2.py" (screenshot .zshots/fix-approval-correct-file.png). NO random file. Rejected → "no files were modified".
+  - "find greeting3 file and change the name to alphapack" → paused with "I found 1 files matching 'greeting3'. Which one should I change?" + chip greeting.py (examples) + free text (screenshot .zshots/fix-clarify-question.png) → picked chip → resumed → approval card rendered on the RESUMED stream: "Rename greeting.py to alphapack — affected: examples/greeting.py" (screenshot .zshots/fix-resumed-approval-card.png) → Rejected → honest outcome.
+- bun run lint: 0 errors; tsc: no errors in touched files. Repo left clean (only the intentional fix files modified).
+
+Stage Summary:
+- The approval card now targets EXACTLY the user-designated file for every phrasing tested (attached/named/path/"X file"/rename); rename requests allow the destination file too; unresolvable names always ask with same/nearly-same suggestion chips (Claude-style choose-one) and can no longer fall through to a guessed file.
+- Files changed this session: src/server/services/assistant-service.ts (targeting rewrite), src/app/api/assistant/runs/resume/route.ts (live-pause stream close), src/server/orchestrator/evals.ts (1-line type fix) + restored the bug-damaged ConversationView.tsx. Nothing else.
