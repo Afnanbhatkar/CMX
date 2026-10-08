@@ -43,6 +43,39 @@ export function isPreviewable(language: string | null | undefined): boolean {
   return PREVIEWABLE.has((language ?? "").toLowerCase().trim());
 }
 
+/** The typed result consumed by the AI code block's preview dialog. */
+export interface PreviewDocument {
+  html: string;
+  note: string;
+}
+
+const PREVIEW_NOTES: Record<Exclude<PreviewKind, "none">, string> = {
+  html: "HTML renders as-is inside the sandbox.",
+  css: "CSS is applied to a minimal sample document.",
+  javascript: "JavaScript runs inline inside the sandbox.",
+  jsx: "JSX is transformed with Sucrase; React loads from a CDN.",
+};
+
+/** Build the self-contained sandboxed preview document for a snippet.
+ *  One call-site helper over previewKindForLanguage + renderPreview so the
+ *  chat's code block never has to know the per-kind details. */
+export function buildPreviewDocument(
+  code: string,
+  language: string | null | undefined,
+): PreviewDocument {
+  const kind = previewKindForLanguage(language);
+  if (kind === "none") {
+    return {
+      html: baseDocument("<div>Preview not supported for this language.</div>"),
+      note: "This language has no sandboxed preview.",
+    };
+  }
+  return {
+    html: renderPreview(code, kind, language ?? undefined),
+    note: PREVIEW_NOTES[kind],
+  };
+}
+
 /** Error-overlay bootstrap injected into every preview document. */
 const ERROR_OVERLAY = `
 <script>
@@ -88,88 +121,122 @@ function transformJsx(code: string): string {
   return result.code;
 }
 
-const REACT_BOOTSTRAP = `
-<script type="module">
-  import React from "https://esm.sh/react@18.3.1";
-  import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
-  window.React = React;
-  window.ReactDOM = { createRoot };
-  window.__mount = function (elId) {
-    var el = document.getElementById(elId);
-    var rootEl = document.createElement("div");
-    rootEl.id = "root";
-    el.parentNode.insertBefore(rootEl, el.nextSibling);
-    return createRoot(rootEl);
-  };
-  window.dispatchEvent(new Event("react-ready"));
-</script>`;
-
-export interface PreviewDocument {
-  kind: PreviewKind;
-  html: string;
-  /** Honest note when the preview is transformed/partial. */
-  note?: string;
+/** Render a calculator UI */
+export function renderCalculator(): string {
+  const calculatorHtml = `
+<div class="calculator">
+  <div class="display">0</div>
+  <div class="keypad">
+    <button class="key clear">C</button>
+    <button class="key">/</button>
+    <button class="key">*</button>
+    <button class="key">-</button>
+    <button class="key">7</button>
+    <button class="key">8</button>
+    <button class="key">9</button>
+    <button class="key">+</button>
+    <button class="key">4</button>
+    <button class="key">5</button>
+    <button class="key">6</button>
+    <button class="key equals">=</button>
+    <button class="key">1</button>
+    <button class="key">2</button>
+    <button class="key">3</button>
+    <button class="key" style="grid-row: span 2;">0</button>
+    <button class="key">.</button>
+  </div>
+</div>
+<style>
+.calculator {
+  width: 300px;
+  border: 2px solid #333;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.display {
+  background-color: #222;
+  color: #fff;
+  font-size: 2em;
+  text-align: right;
+  padding: 20px;
+  font-family: 'Courier New', monospace;
+}
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-gap: 1px;
+  background-color: #333;
+}
+.key {
+  background-color: #f0f0f0;
+  border: none;
+  font-size: 1.2em;
+  padding: 20px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.key:hover {
+  background-color: #e0e0e0;
+}
+.key.clear {
+  background-color: #ff6b6b;
+  color: white;
+}
+.key.clear:hover {
+  background-color: #ff5252;
+}
+.key.equals {
+  background-color: #4ecdc4;
+  color: white;
+}
+.key.equals:hover {
+  background-color: #26a69a;
+}
+</style>`;
+  return baseDocument(calculatorHtml);
 }
 
-/**
- * Build the sandboxed preview document. Never executes anything here — the
- * caller renders the returned HTML inside a sandboxed iframe only.
- */
-export function buildPreviewDocument(code: string, language: string | null | undefined): PreviewDocument {
-  const kind = previewKindForLanguage(language);
-
+/** Render a preview document */
+export function renderPreview(
+  code: string,
+  kind: PreviewKind,
+  language?: string,
+): string {
   if (kind === "html") {
-    return { kind, html: baseDocument(code) };
+    return baseDocument(code);
   }
-
   if (kind === "css") {
-    return {
-      kind,
-      html: baseDocument(
-        `<h1>Heading</h1><p>Paragraph with <a href="#">a link</a> and <strong>bold</strong> text.</p>
-<div class="demo box">.demo.box</div><button>Button</button><input placeholder="Input" />`,
-        `<style>${code}</style>`,
-      ),
-      note: "CSS preview — sample DOM elements styled by the snippet.",
-    };
+    return baseDocument(`<style>${code}</style><div>Preview</div>`);
   }
-
-  if (kind === "javascript") {
-    const wrapped = `<script>${code}<\/script>`;
-    return { kind, html: baseDocument(`<div id="output"></div>${wrapped}`) };
-  }
-
   if (kind === "jsx") {
-    const transformed = transformJsx(code);
-    const html = baseDocument(
-      `<div id="mount-point"></div>
-<script type="module">
-  import React from "https://esm.sh/react@18.3.1";
-  import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
-  window.React = React;
-  const userCode = ${JSON.stringify(transformed)};
-  try {
-    const factory = new Function("React", "useState", "useEffect", "useRef", "useMemo", "useCallback", userCode + "\\n;return typeof App !== 'undefined' ? App : (typeof main !== 'undefined' ? main : null);");
-    const App = factory(React, React.useState, React.useEffect, React.useRef, React.useMemo, React.useCallback);
-    if (App) {
-      createRoot(document.getElementById("mount-point")).render(React.createElement(App));
-    } else {
-      document.getElementById("mount-point").textContent = "No App component or main() found in the snippet.";
-    }
-  } catch (err) {
-    const bar = document.createElement("div");
-    bar.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483647;font:11px/1.5 ui-monospace,monospace;color:#ffd7d2;background:#5c1d16;padding:6px 10px;white-space:pre-wrap;max-height:40%;overflow:auto;";
-    bar.textContent = "Preview error: " + (err && err.message ? err.message : String(err));
-    document.body.appendChild(bar);
-  }
-<\/script>`,
+    const jsxCode = transformJsx(code);
+    return baseDocument(
+      `<script src="https://esm.sh/react@18/umd/react.development.js"></script>` +
+        `<script src="https://esm.sh/react-dom@18/umd/react-dom.development.js"></script>` +
+        `<script src="https://esm.sh/sucrase@3.34.0/dist/sucrase.min.js"></script>` +
+        `<script>
+          const { code } = Sucrase.transform("${escapeString(jsxCode)}", {
+            transforms: ["jsx"],
+            jsxPragma: "React.createElement",
+          });
+          eval(code);
+        </script>`,
     );
-    return {
-      kind,
-      html,
-      note: "JSX is transformed client-side (Sucrase); React 18 loads from the esm.sh CDN inside the sandbox.",
-    };
   }
+  if (kind === "javascript") {
+    return baseDocument(
+      `<script>${code}</script><div>Script executed</div>`,
+    );
+  }
+  return baseDocument("<div>Preview not supported for this language.</div>");
+}
 
-  return { kind: "none", html: "" };
+function escapeString(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
 }

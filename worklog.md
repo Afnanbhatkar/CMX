@@ -1415,3 +1415,23 @@ Stage Summary:
 - Agent Mode is now REALLY capable: approval is a genuine blocking backend state, approved change-sets are applied to the workspace by the application (never the LLM), every write is hash-guarded and verified by re-read, validation runs where a safe validator exists, and the final answer/result card are machine-generated from actual disk outcomes.
 - The thought chain never closes during approval/questions, the approval lives only inside the chain, the final response starts only after the chain closes, and paused runs survive reloads and server restarts (honest degradation).
 - No unrelated features touched; lint/type clean (only pre-existing project warnings remain).
+
+---
+Task ID: 10
+Agent: Z.ai Code (main)
+Task: Fix (a) Turbopack build error "Export buildPreviewDocument doesn't exist in target module" breaking the AI chat panel, and (b) agent mode creating repository files for non-code answers (e.g. "hi how are you" produced a greeting file).
+
+Work Log:
+- Traced the import error: src/features/workspace/chat/AICodeBlock.tsx imports buildPreviewDocument + previewKindForLanguage from @/features/workspace/editor/preview, but preview.ts only exported isPreviewable/renderPreview/renderCalculator (the export had been clobbered by an earlier approved agent changeset against preview.ts — see approvals table "Calculator — 1 file change(s): src/features/workspace/editor/preview.ts").
+- FIX 1 (preview.ts): restored the missing export — added typed PreviewDocument interface + buildPreviewDocument(code, language) built over the existing previewKindForLanguage + renderPreview helpers, with per-kind honest notes consumed by the sandboxed preview dialog.
+- Traced the file-creation bug end-to-end: assistant-service.ts routes agent mode to the orchestrator unless isCasualPrompt(query); src/lib/casual-prompt.ts CASUAL_RE required the WHOLE message to be ONE casual phrase, so "hi how are you" (two phrases) failed the test, reached the orchestrator, and the LLM planner proposed a file.
+- FIX 2 (casual-prompt.ts): rewrote isCasualPrompt as a phrase-consumption loop — a message is casual only when its ENTIRE text is consumed by known casual phrases ("hi", "how are you", "hi how are you", "hey there", "ok thanks bro", ...). Any leftover words ("hi create a login page") still route to the orchestrator. Limits kept conservative (<=64 chars, <=6 words).
+- FIX 3 (engine.ts): added a deterministic no-mutation guard in the plan audit — if the request has NO mutation verb (add/create/write/fix/update/...), every coding step is stripped from the plan and a coding intent is downgraded to question (files are ONLY proposed for code-type requests, never for conversational/question answers). The existing coding-plan guarantee still forces a coding step for real mutation requests. Moved the "plan" engine event to AFTER the audit so every surface sees the final executed plan.
+- Verified greeting.py / greeting2.py in examples/ are git-tracked originals from the tarball (NOT bug artifacts) — left untouched per "change nothing else".
+- Verified via browser (agent-browser): agent mode "hi how are you" → run completed in ~1.2s on the direct path (dev.log: "assistant: completion ok, mode agent, latencyMs 1183"), thought chain "Thought for <1s", full answer rendered, NO orchestrator run, NO file proposal, NO approval card, zero console/page errors. A real code request ("rename a file called aiside bar") still routes through orchestrator → coding agent → approval gate (legit).
+- bun run lint: 0 errors (only pre-existing unrelated warning). tsc --noEmit: no errors in touched files (remaining errors pre-date this work in examples/skills/design-system/repository panels).
+
+Stage Summary:
+- AI chat panel compiles and renders again (buildPreviewDocument restored).
+- Agent mode answers conversational prompts instantly WITHOUT proposing files; only mutation-shaped (code-type) requests reach the coding agent and the approval gate. Files for code answers, answers for chat — exactly the requested behavior.
+- Files changed: src/features/workspace/editor/preview.ts, src/lib/casual-prompt.ts, src/server/orchestrator/engine.ts (nothing else).

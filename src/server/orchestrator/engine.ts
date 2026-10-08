@@ -711,7 +711,6 @@ async function executeRun(
     if (!plan || plan.steps.length === 0) {
       throw new Error("planner produced no plan");
     }
-    onEvent?.({ kind: "plan", intent: plan.intent, steps: plan.steps });
 
     /* ---- Agent Mode V2 (STEP 11): coding-plan guarantee ----
      * A mutation-shaped request MUST produce a coding step. The LLM
@@ -722,6 +721,25 @@ async function executeRun(
     const requestLower = input.request.toLowerCase();
     const mutationVerb =
       /\b(add|implement|create|write|fix|change|refactor|update|modify|edit|insert|delete|remove|rename|move)\b/.test(requestLower);
+
+    /* ---- Deterministic no-mutation guard (agent-mode file-creation fix) ----
+     * A coding step PROPOSES a real change-set (repository files!). A
+     * request that carries no mutation verb can never legitimize one — the
+     * LLM planner occasionally emits a coding step anyway (observed: a
+     * plain "hi how are you" produced a "greeting" file proposal). Files
+     * are ONLY for code-type requests: strip every coding step when the
+     * request has no mutation intent; conversational/question requests get
+     * an ANSWER, never repository files. */
+    if (!mutationVerb && plan.steps.some((s) => s.agent === "coding")) {
+      plan.steps = plan.steps.filter((s) => s.agent !== "coding");
+      if (plan.intent.kind === "coding") {
+        plan.intent = { ...plan.intent, kind: "question" };
+      }
+      logInfo("orchestrator: coding step stripped (no mutation verb in request)", {
+        run: runPublicId,
+      });
+    }
+
     const codeTarget =
       /\b(code|function|file|component|api|feature|endpoint|test|class|method|module|folder|directory)\b/.test(requestLower);
     if (mutationVerb && codeTarget && !plan.steps.some((s) => s.agent === "coding")) {
@@ -735,6 +753,10 @@ async function executeRun(
       plan.intent = { ...plan.intent, kind: "coding" };
       logInfo("orchestrator: coding step inserted by plan guarantee", { run: runPublicId });
     }
+
+    // The plan event carries the AUDITED plan (strip + guarantee applied) —
+    // every surface sees exactly the steps that will execute.
+    onEvent?.({ kind: "plan", intent: plan.intent, steps: plan.steps });
 
     // ---- Selection: only IMPLEMENTED agents may execute ----
     const implemented = new Set(implementedAgents().map((s) => s.name));
