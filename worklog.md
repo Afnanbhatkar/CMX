@@ -1522,3 +1522,31 @@ Stage Summary:
   4) "rename greet file …"（部分名）→ "I found 1 files matching …" 选择卡片 → 选中 greeting2.py → 卡片 greeting2.py→alphapack.py，批准后正确落盘。
 - 控制台零错误；"Export ConversationView doesn't exist" 随文件恢复消失。
 - 教训：LLM 提案的目标约束必须机械强制 + rename 必须双半边完整；用户拒绝澄清选项时必须终止 run。
+
+---
+Task ID: 13
+Agent: Z.ai Code (main)
+Task: 修复 agent 模式 (1) delete 命令产生 create（n.py 幽灵文件）；(2) "file already exists — refusing to overwrite a 'create' operation" 报错；(3) 附件文件 + "add a comment/button" 不生效；(4) 审批卡片每个文件加 ✕ 取消图标；(5) 澄清问题加"Choose a file"文件选择器；(6) "delte this file" 拼写错误不识别；(7) "this attach file"/"at the top of this file" 填充词被当作文件名。
+
+Work Log:
+- 取证：DB 显示多次 delete 请求的 changeset 均含 "add examples/n.py"，rationale="rename: content moved from …" —— 定位为 Task 12 的 rename 兜底网被请求里附加的 [SAVED USER MEMORY] 块污染（memory 引用截断文本 "rename greeting file to n" → 提取新名 "n" → 每次 delete 都合成 n.py create）；其中一个 n.py create 被批准落盘后，后续 apply 报 "file already exists" 整单失败 —— 这也解释了用户 "add a comment 不生效"（整个 changeset 应用失败）。
+- 新建 src/server/orchestrator/context-blocks.ts：stripContextBlocks() 剥离 [SAVED USER MEMORY]/[intake answers] 上下文块；engine.ts 意图动词检测、agents.ts rename 兜底网、assistant-service 目标解析全部改为只分析用户自己的文本。
+- agents.ts runCoding：新增 delete-only 强制（用户纯删除请求 → 机械丢弃所有 add 提案，"only do what user said"）；rename 兜底网目标地存在时转 modify（真实 beforeContent+baseHash，版本守卫仍生效）。
+- assistant-service.ts：MODIFICATION_INTENT 加 "delte" 拼写；NON_NAME_WORDS 加 attach/attached/upload + top/bottom/beginning 等位置词；目标解析顺序修正 —— 明确指定（附件/pin）后跳过弱启发式 mention（步骤4），activeFile 回退（5b）提前到 clarify 之前。
+- engine.ts mutationVerb 加 "delte"。
+- apply.ts：只应用 status="proposed" 的 change 行（被用户 ✕ 排除的 discarded 行永不落盘）。
+- approvals 路由：body 支持 excludePaths；approve 时先 discard 对应行并刷新 approval payload（counts/affectedFiles/whatWillChange）。
+- ApprovalCard.tsx：文件 chip 加 ✕（"Do not change <path>"）、excluded 走 "will NOT be changed" 条（可点击恢复）、counts 实时重算（created/modified/deleted 徽章）、全部移除时禁用 Approve；onDecision 携带 excludePaths。
+- ActivityChain/ConversationView/use-assistant-run：excludePaths 全链路透传。
+- QuestionFlow.tsx：澄清问题 UI 加 "Choose a file" Popover（/api/repository/tree + 搜索 + 失败重试），选中即填充答案。
+- 清理：删除 agent 垃圾文件 examples/n.py；恢复测试文件。
+- bun run lint 通过（仅既有无关 warning）。
+
+Stage Summary:
+- 浏览器端到端验证全部通过：
+  1) 附件 partybro.py + "delete this attach file" → targets=[partybro.py]、无幽灵 n.py（0 created · 0 modified · 1 deleted）→ 批准后磁盘删除成功；
+  2) ✕ 排除 → "will NOT be changed" + Approve 禁用（空集）→ 恢复 → 批准正常；
+  3) 附件 + "add a comment at the top of this file saying CHECKED" → modify-only 卡片 → 批准后磁盘文件顶部出现 "# CHECKED"（此前完全不生效）；
+  4) 无引用 + 不存在名 "zzznope" → 澄清问题带 "Choose a file" 选择器 → 选 notes.py 填入答案 → resume 后 targets=[examples/notes.py]；
+  5) 澄清回答 "stop" → run 诚实终止。
+- 教训：确定性正则分析必须只作用于用户原始文本（上下文块引用旧请求会跨 run 污染意图）；显式用户指定必须优先于启发式猜测；LLM 提案与真实磁盘状态之间的一切差异都要在 proposal 阶段对齐。

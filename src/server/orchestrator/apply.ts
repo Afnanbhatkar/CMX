@@ -99,7 +99,14 @@ export async function applyChangeSet(opts: {
   const changeSet = await db.changeSet.findFirst({
     where: { runId: runInternalId, status: "proposed" },
     orderBy: { createdAt: "desc" as const },
-    include: { changes: { orderBy: { createdAt: "asc" as const } } },
+    include: {
+      changes: {
+        // Per-file exclusion (user removed chips on the approval card):
+        // discarded rows are NEVER applied — only still-proposed changes.
+        where: { status: "proposed" },
+        orderBy: { createdAt: "asc" as const },
+      },
+    },
   });
 
   if (!changeSet) {

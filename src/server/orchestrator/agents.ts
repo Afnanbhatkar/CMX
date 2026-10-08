@@ -14,8 +14,14 @@
 
 import { z } from "zod";
 
+import { readFile } from "node:fs/promises";
+
 import { db } from "@/lib/db";
-import { contentHash } from "@/lib/server/workspace-mutation";
+import {
+  contentHash,
+  resolveMutationPath,
+  snapshotFile,
+} from "@/lib/server/workspace-mutation";
 import { logInfo, logWarn } from "@/server/security/logger";
 import {
   extractFileRefs,
@@ -45,6 +51,7 @@ import {
   SECURITY_PREAMBLE,
 } from "./fence";
 import { AGENT_SPECS } from "./registry";
+import { stripContextBlocks } from "./context-blocks";
 import {
   evidenceFrom,
   toolDependencyScan,
@@ -1113,6 +1120,33 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
     }
   }
 
+  // ---- Delete-intent confinement ("only do what the user said") ----
+  // When the user's OWN text is a pure delete/remove command (no other
+  // mutation verb), the change-set may only DELETE. Observed: "delete this
+  // attach file" also proposed a brand-new file — the approval card offered
+  // a create the user never asked for. Adds are dropped mechanically;
+  // modifies stay (a legit "remove the helper function from X" is a modify).
+  // Intent is analyzed on the user's own text ONLY — appended memory blocks
+  // quote old requests full of mutation verbs (see context-blocks.ts).
+  {
+    const analysis = stripContextBlocks(call.request).toLowerCase();
+    const deleteIntent = /\b(delete|remove|delte)\b/.test(analysis);
+    const otherMutation =
+      /\b(add|create|make|write|implement|update|modify|edit|append|insert|refactor|rename|change|fix|improve|extend|move)\b/.test(analysis);
+    if (deleteIntent && !otherMutation) {
+      const droppedAdds = parsed.changes.filter((c) => c.changeKind === "add");
+      if (droppedAdds.length > 0) {
+        parsed.changes = parsed.changes.filter((c) => c.changeKind !== "add");
+        parsed.description =
+          (parsed.description ? `${parsed.description} ` : "") +
+          `(ignored ${droppedAdds.length} proposed create(s) — you asked only to delete)`;
+        logInfo("coding: dropped create(s) on a delete-only request", {
+          count: droppedAdds.length,
+        });
+      }
+    }
+  }
+
   // Validate paths honestly + capture the REAL proposal-time state of every
   // target (spec §17): modify/delete must reference real files whose current
   // content is hashed NOW — apply time later compares against this hash to
@@ -1192,9 +1226,14 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
   // the model is never trusted with the rename's integrity. (The regexes
   // mirror assistant-service's targeting extraction — same request, same
   // name, so both layers agree on the destination.)
+  // NOTE: the rename analysis runs on the user's own text ONLY — the
+  // appended memory block quotes old rename requests (truncated, e.g.
+  // "rename greeting file to n") and once manufactured an examples/n.py
+  // create on EVERY delete request (see context-blocks.ts).
   const RENAME_REQ_RE =
     /\b(?:re-?name)\b|\bchange\s+(?:this\s+|that\s+|the\s+)?(?:file\s+)?name\b|\bname[d]?\s+it\b|\bcall(?:ed)?\s+it\b/i;
-  if (RENAME_REQ_RE.test(call.request)) {
+  const renameAnalysis = stripContextBlocks(call.request);
+  if (RENAME_REQ_RE.test(renameAnalysis)) {
     const NEW_NAME_RES: RegExp[] = [
       /\bnamed?\s+(?:it|the\s+file|this\s+file|that\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
       /\bcall\s+(?:it|the\s+file|this\s+file)\s+["'“”]?([A-Za-z][\w@.+-]{0,47})/i,
@@ -1204,7 +1243,7 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
     ];
     let newName: string | null = null;
     for (const destRe of NEW_NAME_RES) {
-      const match = destRe.exec(call.request);
+      const match = destRe.exec(renameAnalysis);
       if (!match) continue;
       const candidate = match[match.length - 1].trim().replace(/["'“”]/g, "");
       if (candidate) {
@@ -1230,6 +1269,31 @@ async function runCoding(call: AgentCall): Promise<AgentResult> {
           (await cachedRead(call, "coding", change.path))?.content ??
           "";
         if (!content.trim()) continue; // no real content — never invent one
+        // Disk reality check: when the destination ALREADY exists, a create
+        // would be refused at apply time ("file already exists") and fail
+        // the WHOLE change-set. Record an honest modify with the real
+        // proposal-time hash instead — the version guard still protects
+        // concurrent external work.
+        const destinationSnap = await snapshotFile(destination);
+        if (destinationSnap.exists) {
+          const check = resolveMutationPath(destination);
+          const current = check.ok
+            ? await readFile(check.absolute, "utf8").catch(() => null)
+            : null;
+          if (current !== null) {
+            synthesized.push({
+              path: destination,
+              changeKind: "modify",
+              content,
+              diff: content,
+              rationale: `rename: content moved from ${change.path} (replacing the existing file)`,
+              beforeContent: current,
+              baseHash: contentHash(current),
+            });
+            coveredPaths.add(destination);
+            continue;
+          }
+        }
         synthesized.push({
           path: destination,
           changeKind: "add",

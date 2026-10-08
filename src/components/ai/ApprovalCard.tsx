@@ -14,13 +14,14 @@
  * The blast-radius area is a reserved slot (no fake graph).
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Check,
   ChevronDown,
   ChevronUp,
   FileCode2,
   Pencil,
+  RotateCcw,
   ShieldCheck,
   ShieldX,
   X,
@@ -36,8 +37,13 @@ import { BlastRadiusSlot } from "./BlastRadiusSlot";
 export interface ApprovalCardProps {
   approval: ApprovalRequest;
   decision: ApprovalDecision | null;
-  /** Called with the user's decision (the caller records it on the message). */
-  onDecision: (decision: ApprovalDecision) => void;
+  /** Called with the user's decision (the caller records it on the message).
+   *  `excludePaths` carries the files the user removed with the per-chip ✕ —
+   *  the server discards them before the change-set is applied. */
+  onDecision: (
+    decision: ApprovalDecision,
+    extras?: { excludePaths?: string[] },
+  ) => void;
   disabled?: boolean;
 }
 
@@ -76,6 +82,37 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
 export function ApprovalCard({ approval, decision, onDecision, disabled }: ApprovalCardProps) {
   /** Review toggles the full detail region (why / permission / tests / security / blast radius). */
   const [reviewing, setReviewing] = useState(false);
+  /** Per-file opt-out (the ✕ on a file chip): files the user removed will
+   *  NOT be changed when this approval is approved. Reversible until the
+   *  decision lands. */
+  const [excludedPaths, setExcludedPaths] = useState<string[]>([]);
+
+  const lockChips = disabled || decision !== null;
+
+  const remainingFiles = useMemo(
+    () => approval.affectedFiles.filter((p) => !excludedPaths.includes(p)),
+    [approval.affectedFiles, excludedPaths],
+  );
+
+  /** Honest per-kind counts for what WILL be applied (exclusions removed). */
+  const counts = useMemo(() => {
+    const kindOf = (path: string): "add" | "modify" | "delete" =>
+      approval.changes?.find((c) => c.path === path)?.changeKind ?? "modify";
+    return {
+      created: remainingFiles.filter((p) => kindOf(p) === "add").length,
+      modified: remainingFiles.filter((p) => kindOf(p) === "modify").length,
+      deleted: remainingFiles.filter((p) => kindOf(p) === "delete").length,
+    };
+  }, [remainingFiles, approval.changes]);
+
+  const excludeFile = (path: string) => {
+    setExcludedPaths((paths) =>
+      paths.includes(path) ? paths : [...paths, path],
+    );
+  };
+  const restoreFile = (path: string) => {
+    setExcludedPaths((paths) => paths.filter((p) => p !== path));
+  };
 
   const openAffectedFile = async (path: string) => {
     await editorNavigation.openFile(path, "manual");
@@ -83,7 +120,7 @@ export function ApprovalCard({ approval, decision, onDecision, disabled }: Appro
 
   const handleEdit = async () => {
     onDecision("edited");
-    const first = approval.affectedFiles[0];
+    const first = remainingFiles[0];
     if (first) await openAffectedFile(first);
   };
 
@@ -102,15 +139,15 @@ export function ApprovalCard({ approval, decision, onDecision, disabled }: Appro
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-medium">Approval needed</p>
           <p className="truncate text-[11px] text-muted-foreground">
-            {approval.affectedFiles.length} file
-            {approval.affectedFiles.length === 1 ? "" : "s"} · {approval.requestedPermission}
+            {remainingFiles.length} file
+            {remainingFiles.length === 1 ? "" : "s"} · {approval.requestedPermission}
           </p>
         </div>
         <Badge
           variant="outline"
           className="shrink-0 border-warning/40 text-warning"
         >
-          {approval.risk.length > 42 ? `${approval.risk.slice(0, 42)}…` : approval.risk}
+          {counts.created} created · {counts.modified} modified · {counts.deleted} deleted
         </Badge>
       </div>
 
@@ -121,19 +158,59 @@ export function ApprovalCard({ approval, decision, onDecision, disabled }: Appro
         </DetailRow>
         <DetailRow label="Files">
           <div className="flex flex-wrap gap-1">
-            {approval.affectedFiles.map((path) => (
-              <button
+            {remainingFiles.map((path) => (
+              <span
                 key={path}
-                type="button"
-                onClick={() => void openAffectedFile(path)}
-                title={`Open ${path} in the editor`}
-                className="inline-flex max-w-full items-center gap-1 rounded-full border border-border-subtle bg-background px-2 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+                className="inline-flex max-w-full items-center gap-1 rounded-full border border-border-subtle bg-background pl-2 pr-0.5 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors"
               >
-                <FileCode2 aria-hidden="true" className="size-3 shrink-0" />
-                <span className="truncate">{path}</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => void openAffectedFile(path)}
+                  title={`Open ${path} in the editor`}
+                  className="inline-flex min-w-0 items-center gap-1 transition-colors hover:text-foreground"
+                >
+                  <FileCode2 aria-hidden="true" className="size-3 shrink-0" />
+                  <span className="truncate">{path}</span>
+                </button>
+                {!lockChips && (
+                  <button
+                    type="button"
+                    onClick={() => excludeFile(path)}
+                    title={`Do not change ${path} — remove it from this change-set`}
+                    aria-label={`Do not change ${path}`}
+                    data-testid={`approval-exclude-${path}`}
+                    className="ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-danger/10 hover:text-danger focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <X aria-hidden="true" className="size-3" />
+                  </button>
+                )}
+              </span>
             ))}
+            {remainingFiles.length === 0 && (
+              <span className="text-[11px] text-muted-foreground">
+                every file was removed — nothing will be changed
+              </span>
+            )}
           </div>
+          {excludedPaths.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <span className="text-[10px] text-muted-foreground/80">
+                will NOT be changed:
+              </span>
+              {excludedPaths.map((path) => (
+                <button
+                  key={path}
+                  type="button"
+                  onClick={() => restoreFile(path)}
+                  title={`Restore ${path} to this change-set`}
+                  className="inline-flex max-w-full items-center gap-1 rounded-full border border-danger/30 bg-danger/5 pl-2 pr-1 py-0.5 font-mono text-[10px] text-danger transition-colors hover:bg-danger/10"
+                >
+                  <span className="truncate line-through">{path}</span>
+                  <RotateCcw aria-hidden="true" className="size-3 shrink-0" aria-label={`Restore ${path}`} />
+                </button>
+              ))}
+            </div>
+          )}
         </DetailRow>
 
         {reviewing && (
@@ -204,8 +281,18 @@ export function ApprovalCard({ approval, decision, onDecision, disabled }: Appro
         <Button
           type="button"
           size="sm"
-          disabled={disabled || decision === "approved"}
-          onClick={() => onDecision("approved")}
+          disabled={disabled || decision === "approved" || remainingFiles.length === 0}
+          onClick={() =>
+            onDecision(
+              "approved",
+              excludedPaths.length > 0 ? { excludePaths: [...excludedPaths] } : undefined,
+            )
+          }
+          title={
+            remainingFiles.length === 0
+              ? "Every file was removed — reject this change-set instead"
+              : undefined
+          }
           className="h-7 gap-1 px-2.5 text-[11px]"
           data-testid="approval-approve"
         >

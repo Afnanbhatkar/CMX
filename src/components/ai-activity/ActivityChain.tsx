@@ -368,7 +368,10 @@ export interface ActivityChainViewProps {
    * the real engine gate through /api/assistant/approvals. */
   approval?: ApprovalRequest | null;
   approvalDecision?: ApprovalDecision | null;
-  onApprovalDecision?: (decision: "approved" | "rejected") => void;
+  onApprovalDecision?: (
+    decision: "approved" | "rejected",
+    extras?: { excludePaths?: string[] },
+  ) => void;
 }
 
 export function ActivityChainView({
@@ -604,7 +607,7 @@ export function ActivityChainView({
                       <ApprovalCard
                         approval={approval}
                         decision={approvalDecision ?? null}
-                        onDecision={(decision) => {
+                        onDecision={(decision, extras) => {
                           if (decision === "edited") {
                             // "Edit" opens the affected files for manual
                             // review; it never releases the engine gate.
@@ -612,7 +615,7 @@ export function ActivityChainView({
                             if (first) void editorNavigation.openFile(first, "manual");
                             return;
                           }
-                          onApprovalDecision?.(decision);
+                          onApprovalDecision?.(decision, extras);
                         }}
                         disabled={approvalDecision !== null && approvalDecision !== undefined}
                       />
@@ -647,7 +650,10 @@ export function ActivityChainLive({
   minimal?: boolean;
   approval?: ApprovalRequest | null;
   approvalDecision?: ApprovalDecision | null;
-  onApprovalDecision?: (decision: "approved" | "rejected") => void;
+  onApprovalDecision?: (
+    decision: "approved" | "rejected",
+    extras?: { excludePaths?: string[] },
+  ) => void;
 }) {
   const snapshot = useRunActivity(runId);
   // Before the run's first real event the chain shows nothing — nothing is
@@ -754,7 +760,10 @@ export interface ActivityChainProps {
   /* ---- Agent Mode V2: approval inside the chain (history + waiting) ---- */
   approval?: ApprovalRequest | null;
   approvalDecision?: ApprovalDecision | null;
-  onApprovalDecision?: (decision: "approved" | "rejected") => void;
+  onApprovalDecision?: (
+    decision: "approved" | "rejected",
+    extras?: { excludePaths?: string[] },
+  ) => void;
 }
 
 export function ActivityChain({

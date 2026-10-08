@@ -187,13 +187,14 @@ function RunActivityLive({
         minimal={minimal}
         approval={message.approval ?? null}
         approvalDecision={message.approvalDecision ?? null}
-        onApprovalDecision={(decision) => {
+        onApprovalDecision={(decision, extras) => {
           if (!message.approval) return;
           void decideApproval(
             conversationId,
             message.id,
             message.approval.id,
             decision,
+            extras?.excludePaths,
           );
         }}
       />
@@ -326,9 +327,15 @@ function AssistantMessage({
           legacyRunId={message.runId ?? null}
           approval={message.approval ?? null}
           approvalDecision={message.approvalDecision ?? null}
-          onApprovalDecision={(decision) => {
+          onApprovalDecision={(decision, extras) => {
             if (!message.approval) return;
-            void decideApproval(conversationId, message.id, message.approval.id, decision);
+            void decideApproval(
+              conversationId,
+              message.id,
+              message.approval.id,
+              decision,
+              extras?.excludePaths,
+            );
           }}
         />
       )}

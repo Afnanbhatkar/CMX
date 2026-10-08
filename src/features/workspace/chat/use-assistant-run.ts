@@ -1138,6 +1138,9 @@ export function useAssistantRun(): AssistantRun {
       messageId: string,
       approvalId: string,
       decision: "approved" | "rejected",
+      /** Paths the user removed on the approval card — applied server-side
+       *  BEFORE the gate releases (the apply step never touches them). */
+      excludePaths?: string[],
     ): Promise<void> => {
       useWorkspaceStore.getState().updateMessage(conversationId, messageId, {
         approvalDecision: decision,
@@ -1146,7 +1149,11 @@ export function useAssistantRun(): AssistantRun {
         const res = await fetch("/api/assistant/approvals", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ approvalId, decision }),
+          body: JSON.stringify(
+            excludePaths && excludePaths.length > 0
+              ? { approvalId, decision, excludePaths }
+              : { approvalId, decision },
+          ),
         });
         const data = (await res.json().catch(() => null)) as
           | { ok?: boolean; error?: string; success?: boolean; data?: { ok?: boolean; message?: string } }

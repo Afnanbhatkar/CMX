@@ -822,7 +822,7 @@ async function buildSdkMessages(
  * trigger an intake pause — questions are never asked for plain questions.
  */
 const MODIFICATION_INTENT =
-  /\b(modify|change|fix|update|refactor|implement|rewrite|migrate|replace|extend|remove|delete|edit|improve|rename|move|add)\b/i;
+  /\b(modify|change|fix|update|refactor|implement|rewrite|migrate|replace|extend|remove|delete|delte|edit|improve|rename|move|add)\b/i;
 
 /**
  * Decides whether the run must pause and ask a material question (8C §6).
@@ -957,6 +957,14 @@ const NON_NAME_WORDS = new Set([
   "add", "write", "find", "show", "read", "see", "tell", "mention",
   "mentioned", "want", "need", "let", "us", "can", "could", "would",
   "should", "will", "shall", "just", "simply", "now", "here",
+  // Attachment-speak: "delete this attach file" — "attach" is a filler for
+  // the attached/open file, NEVER a file name (it once produced a spurious
+  // "I couldn't find a file named attach" question with the file OPEN).
+  "attach", "attached", "attachment", "attachments", "upload", "uploaded",
+  // Position words that describe WHERE in a file something goes — never a
+  // file name ("add a comment at the top of this file" must not resolve to
+  // a phantom file named "top").
+  "top", "bottom", "beginning", "end", "start", "middle", "head", "tail",
 ]);
 
 /** Clean a raw captured mention: cut at clause boundaries (conjunctions and
@@ -1323,7 +1331,12 @@ async function resolveAgentTargets(
   // ---- 4) "<name> file" mentions ("find greeting2 file …") and
   // "called/named X" mentions ("a file called aiside bar"). Fillers are
   // cleaned ("it watchparty" → "watchparty"); rename destinations skipped.
-  if (!stopAndClarify) {
+  // WEAK signals only — skipped entirely when an EXPLICIT designation
+  // (attachment/pin/strong name) already resolved a target: otherwise a
+  // filler phrase ("add a comment at the top of this file" → phantom
+  // mention "top") could override the user's actual file with a question
+  // or a wrong pick.
+  if (!stopAndClarify && targets.size === 0) {
     const mentionMatches: string[] = [];
     const pushMention = (mention: string): void => {
       if (!mention) return;
@@ -1362,6 +1375,18 @@ async function resolveAgentTargets(
     };
   }
 
+  // ---- 5b) The active (open) file is a REAL designation — the user's
+  // "this file" phrasing ("delete this attach file") refers to it. Resolve
+  // it BEFORE asking about any unresolved mention: with the file open, a
+  // filler like "attach" must never produce a spurious question.
+  if (targets.size === 0) {
+    const active = context?.activeFile?.trim();
+    if (active && pathSet.has(active)) {
+      targets.add(active);
+      unresolvedMention = null;
+    }
+  }
+
   // ---- 6) The user named a file that could not be resolved → ALWAYS ask
   // (same/nearly-same suggestions when they exist; free-text otherwise).
   // Never run the change against a guessed file.
@@ -1381,13 +1406,8 @@ async function resolveAgentTargets(
     }
   }
 
-  // ---- 8) Nothing named and nothing attached → the currently open file
-  // (when one is open) is the change target; otherwise retrieval decides.
-  if (targets.size === 0) {
-    const active = context?.activeFile?.trim();
-    if (active && pathSet.has(active)) targets.add(active);
-  }
-
+  // ---- 8) Nothing named and nothing attached → retrieval decides (the
+  // active-file fallback ran at step 5b; nothing further to resolve here).
   return { targets: [...targets], clarify: null };
 }
 

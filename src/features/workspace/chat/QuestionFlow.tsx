@@ -12,18 +12,32 @@
  * implementations. Which one should I modify?" with one button per real
  * candidate file — exactly what the backend's retrieval-driven heuristic
  * produces.
+ *
+ * Agent Mode V2 (file-targeting follow-up): a "Choose a file" picker opens
+ * the REAL repository file list (same source the composer's attach popover
+ * uses) so the user can answer "which file?" by SELECTING it instead of
+ * typing an exact name the run could not resolve itself.
  */
 
-import { useState } from "react";
-import { HelpCircle, MessageSquareReply, PauseCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  FileCode2,
+  FolderOpen,
+  HelpCircle,
+  Loader2,
+  MessageSquareReply,
+  PauseCircle,
+} from "lucide-react";
 
 import { editorNavigation } from "@/features/workspace/editor-navigation";
 import type {
   IntakeAnswer,
   IntakeQuestionBatch,
 } from "@/features/workspace/assistant/contracts";
+import type { RepoTreeNode } from "@/features/workspace/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
 export interface QuestionFlowProps {
@@ -34,6 +48,140 @@ export interface QuestionFlowProps {
   onAnswer: (answers: IntakeAnswer[]) => void;
   /** True while the resume round-trip is in flight. */
   submitting?: boolean;
+}
+
+/** Flatten the repo tree into a searchable file-path list. */
+function flattenFilePaths(nodes: RepoTreeNode[], out: string[] = []): string[] {
+  for (const node of nodes) {
+    if (node.type === "file") {
+      out.push(node.path);
+    } else if (Array.isArray(node.children) && node.children.length > 0) {
+      flattenFilePaths(node.children, out);
+    }
+  }
+  return out;
+}
+
+const MAX_PICKER_RESULTS = 60;
+
+/** One "Choose a file" popover: real workspace files + search. */
+function FilePickerPopover({
+  onPick,
+  disabled,
+  questionId,
+}: {
+  onPick: (path: string) => void;
+  disabled?: boolean;
+  questionId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [files, setFiles] = useState<string[] | null>(null);
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const loadedRef = useRef(false);
+
+  useEffect(() => {
+    if (!open || loadedRef.current) return;
+    loadedRef.current = true;
+    const controller = new AbortController();
+    void (async () => {
+      setStatus("loading");
+      try {
+        const res = await fetch("/api/repository/tree", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = (await res.json().catch(() => null)) as
+          | { ok?: boolean; tree?: RepoTreeNode[] }
+          | null;
+        const list =
+          data?.ok && Array.isArray(data.tree) ? flattenFilePaths(data.tree) : null;
+        if (list === null) {
+          setStatus("error");
+          loadedRef.current = false; // allow a retry on the next open
+          return;
+        }
+        setFiles(list);
+        setStatus("ready");
+      } catch {
+        setStatus("error");
+        loadedRef.current = false; // allow a retry on the next open
+      }
+    })();
+    return () => controller.abort();
+  }, [open]);
+
+  const results = useMemo(() => {
+    if (!files) return [];
+    const q = query.trim().toLowerCase();
+    const matches = q
+      ? files.filter((path) => path.toLowerCase().includes(q))
+      : files;
+    return matches.slice(0, MAX_PICKER_RESULTS);
+  }, [files, query]);
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setQuery("");
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={disabled}
+          className="h-7 shrink-0 gap-1 px-2 text-[11px]"
+          aria-label="Choose a file from the repository"
+        >
+          <FolderOpen aria-hidden="true" className="size-3.5 shrink-0" />
+          Choose a file
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-1.5" aria-label="Repository files">
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search repository files…"
+          aria-label={`Search repository files for ${questionId}`}
+          className="mb-1 h-7 w-full rounded-md border border-border-subtle bg-surface px-2 text-[11px] outline-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-primary/50"
+        />
+        <div className="max-h-56 overflow-y-auto">
+          {status === "loading" && (
+            <p className="flex items-center gap-1.5 px-1 py-2 text-[11px] text-muted-foreground">
+              <Loader2 aria-hidden="true" className="size-3 animate-spin" />
+              Loading files…
+            </p>
+          )}
+          {status === "error" && (
+            <p className="px-1 py-2 text-[11px] text-muted-foreground">
+              File tree unavailable right now — type the file name instead.
+            </p>
+          )}
+          {status === "ready" && results.length === 0 && (
+            <p className="px-1 py-2 text-[11px] text-muted-foreground">No files match.</p>
+          )}
+          {results.map((path) => (
+            <button
+              key={path}
+              type="button"
+              onClick={() => {
+                onPick(path);
+                setOpen(false);
+              }}
+              className="flex w-full items-center gap-1.5 rounded-[4px] px-1.5 py-1 text-left font-mono text-[11px] text-foreground/90 transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <FileCode2 aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 truncate">{path}</span>
+            </button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 export function QuestionFlow({ batch, answers, onAnswer, submitting }: QuestionFlowProps) {
@@ -125,7 +273,7 @@ export function QuestionFlow({ batch, answers, onAnswer, submitting }: QuestionF
                       );
                     })}
                   </div>
-                  <div className="ml-5 mt-2 flex gap-1.5">
+                  <div className="ml-5 mt-2 flex items-center gap-1.5">
                     <Input
                       value={customs[question.id] ?? ""}
                       onChange={(e) => {
@@ -140,6 +288,18 @@ export function QuestionFlow({ batch, answers, onAnswer, submitting }: QuestionF
                       disabled={submitting}
                       className="h-7 border-border-subtle text-[11px]"
                       aria-label={`Custom answer for: ${question.question}`}
+                    />
+                    <FilePickerPopover
+                      questionId={question.id}
+                      disabled={submitting}
+                      onPick={(path) => {
+                        setCustoms((c) => ({ ...c, [question.id]: path }));
+                        setSelections((s) => {
+                          const next = { ...s };
+                          delete next[question.id];
+                          return next;
+                        });
+                      }}
                     />
                   </div>
                 </>

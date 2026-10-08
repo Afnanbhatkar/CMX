@@ -32,6 +32,7 @@ import {
 import { applyChangeSet, type ApplyChangeSetResult } from "./apply";
 import { validateFile } from "./validation";
 import { resolveMutationPath } from "@/lib/server/workspace-mutation";
+import { stripContextBlocks } from "./context-blocks";
 import {
   type AgentName,
   type AgentResult,
@@ -718,9 +719,12 @@ async function executeRun(
      * for clear change requests (the run then "answers" without doing the
      * work). The engine audits the plan deterministically — same spirit as
      * the forced critic — and inserts the coding step when missing. */
-    const requestLower = input.request.toLowerCase();
+    // Intent tests run on the USER'S OWN TEXT — appended memory/answers
+    // blocks quote old requests ("5 files created", "rename … to n") and
+    // would otherwise fake mutation intent (see context-blocks.ts).
+    const requestLower = stripContextBlocks(input.request).toLowerCase();
     const mutationVerb =
-      /\b(add|implement|create|write|fix|change|refactor|update|modify|edit|insert|delete|remove|rename|move)\b/.test(requestLower);
+      /\b(add|implement|create|write|fix|change|refactor|update|modify|edit|insert|delete|delte|remove|rename|move)\b/.test(requestLower);
 
     /* ---- Deterministic no-mutation guard (agent-mode file-creation fix) ----
      * A coding step PROPOSES a real change-set (repository files!). A
