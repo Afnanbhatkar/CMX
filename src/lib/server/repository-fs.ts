@@ -145,7 +145,20 @@ export function resolveAllowedPath(input: string): PathCheckResult {
     const absRoot = path.resolve(PROJECT_ROOT, root);
     return absolute === absRoot || absolute.startsWith(absRoot + path.sep);
   });
-  if (!allowed) return { ok: false };
+
+  if (!allowed) {
+    // Agent Mode V2 (spec §124): the MUTATION boundary accepts the whole
+    // workspace root, so the agent can create top-level files (e.g.
+    // "webpage.html"). The read boundary must show the same files — a
+    // single-segment path (a loose root file) that passed every safety
+    // check above is accepted when its extension is a known text language.
+    // Logs ("*.log"), locks ("bun.lock"), extensionless files, binaries,
+    // dotfiles and secrets all fail the text-extension check and stay denied.
+    if (!relative.includes("/") && isTextFile(relative)) {
+      return { ok: true, absolute, relative };
+    }
+    return { ok: false };
+  }
 
   return { ok: true, absolute, relative };
 }
@@ -243,7 +256,19 @@ async function walkDir(
   return { nodes: [...dirs, ...files], cut };
 }
 
-/** Build the real workspace tree (allowlisted roots only). Cached 30s. */
+/**
+ * Drop the whole-tree and per-directory caches.
+ * Called by the mutation layer after every successful write/delete/rename so
+ * the explorer's "cmx:repository-mutated" reload reads REAL fresh disk state
+ * instead of a 30s-stale listing (files the agent just created showed up
+ * only after the TTL expired before this existed).
+ */
+export function invalidateWorkspaceTreeCache(): void {
+  treeCache = null;
+  subtreeCache.clear();
+}
+
+/** Build the real workspace tree (allowlisted roots + loose root files). Cached 30s. */
 export async function buildWorkspaceTree(): Promise<RepoTreeNode[]> {
   if (treeCache && Date.now() - treeCache.at < TREE_CACHE_MS) {
     return treeCache.tree;
@@ -271,6 +296,32 @@ export async function buildWorkspaceTree(): Promise<RepoTreeNode[]> {
     } catch {
       // root not present in this project — skip it silently
     }
+  }
+
+  // Loose files at the workspace ROOT (Agent Mode V2 §124): files the agent
+  // creates at the top level (webpage.html, calculator.css, notes.md …) must
+  // appear in the explorer. Same exclusions as walkDir (dotfiles, .DS_Store)
+  // plus the text-extension rule — no logs, locks or binaries are listed.
+  try {
+    const covered = new Set<string>(ALLOWED_ROOTS as readonly string[]);
+    const dirents = await fs.readdir(PROJECT_ROOT, { withFileTypes: true });
+    const rootFiles: RepoTreeNode[] = [];
+    for (const dirent of dirents) {
+      if (!dirent.isFile()) continue;
+      if (dirent.name.startsWith(".") || EXCLUDED_FILES.has(dirent.name)) continue;
+      if (covered.has(dirent.name)) continue; // already listed via ALLOWED_ROOTS
+      if (!isTextFile(dirent.name)) continue;
+      rootFiles.push({
+        path: dirent.name,
+        name: dirent.name,
+        type: "file",
+        language: languageForPath(dirent.name),
+      });
+    }
+    rootFiles.sort(compareEntries);
+    roots.push(...rootFiles);
+  } catch {
+    // unreadable root — honestly skip; the allowlisted roots above remain
   }
 
   treeCache = { at: Date.now(), tree: roots };

@@ -1568,3 +1568,24 @@ Stage Summary:
 - 根因：dev server 被沙箱回收后无人拉起（keepalive 未运行 + 自身启动方式会被收割器杀掉）→ Preview Panel 连接拒绝黑屏。
 - 修复：dev server 重启 + keepalive.sh 重写为探测式监督（curl /api/health → setsid dev.sh），keepalive 常驻。
 - 预览面板恢复显示；工作区各视图与文件预览功能浏览器验证通过。应用代码本身无 bug，未改动任何 src 文件。
+
+---
+Task ID: 14
+Agent: Z.ai Code (main)
+Task: "webpage.html 报 Could not open file / not added in the repo / fake file?" — 修复根级文件不可见 bug + 新增 workspace runner 与 live preview 特性
+
+Work Log:
+- 取证：webpage.html 真实存在于仓库根（896B, 20:09）——agent 没有造假；examples/web page（空格无扩展名, 20:03）是早前一次失败的 agent 尝试产生的垃圾文件 → 已删除。
+- 根因（读写边界不对称）：src/lib/server/workspace-mutation.ts 的 MUTATION 边界接受整个工作区根（agent 能创建根级文件），但 src/lib/server/repository-fs.ts 的读边界 ALLOWED_ROOTS 只列目录/固定文件 → 根级文件 file API 403 → editor-navigation 报 "not part of the connected workspace tree"，Explorer 树也永不显示（calculator.html 同样受影响）。
+- repository-fs.ts 修复：resolveAllowedPath 对单段路径（根级文件）且扩展名为已知文本语言时放行（log/lock/无扩展名/二进制/点文件仍拒绝）；buildWorkspaceTree 枚举项目根目录的文本文件（跳过 ALLOWED_ROOTS 已覆盖项），追加进树。
+- repository-fs.ts 新增 invalidateWorkspaceTreeCache()；workspace-mutation.ts 在 create/write/delete/rename 四个突变成功后调用 → 前端已有的 cmx:repository-mutated 事件 reload 不再读到 30s 陈旧缓存（此前 agent 新建文件要等 TTL 过期才出现 = "not added in the repo" 观感）。
+- 新特性 1 — Python 运行器：POST /api/repository/run（resolveAllowedPath + 仅 .py + spawn python3 -I -X utf8，无 shell，15s 超时 SIGKILL，stdout/stderr 各 64KB 上限，诚实 timedOut/truncated）；src/lib/server/project-root.ts 单一根路径源；CodeEditorViewport .py 文件头部 Run 按钮 + 终端风 RUN OUTPUT 面板（exit code 徽章/耗时/清空/关闭）。
+- 新特性 2 — HTML Live Preview：.html/.htm（含 generated html）文件头部 MonitorPlay 开关 → 编辑器+沙箱 iframe 分栏（lg 并排/窄屏堆叠），srcDoc 来自内存缓冲 400ms 防抖，sandbox="allow-scripts allow-forms allow-modals allow-popups"（无 allow-same-origin，无法触达应用）。
+- 新增 API 路由 src/app/api/repository/run/route.ts；lint 通过（仅既有 TanStack Virtual warning）。
+- 浏览器端到端验证：Explorer 树显示 webpage.html/calculator.html/*.md 等根文件；点击打开无任何 toast；Live Preview 渲染出 "Welcome to the AI Web Page"；partybro.py Run → exit 0 / 0.09s / "(no output)" 诚实提示；hello_agent.py Run → exit 0 / 0.10s / 完整 stdout 三行 + sum: 45；期间 dev server 一次重启由 keepalive 自动拉起（20:22，监督链路实测生效）。
+- 清理：删除 examples/web page 垃圾文件与本轮测试产物 hello_agent.py。
+
+Stage Summary:
+- "fake file" 是误会：agent 创建的根级文件一直真实落盘，只是读边界把根级文件挡在树与编辑器之外。
+- 修复后：agent 创建的任何根级文本文件立即可见于 Explorer、可打开、可 diff/blame/下载；apply 后树缓存即时失效，"not added in the repo" 消失。
+- 新增两个罕见特性：工作区内直接运行 Python（隔离+超时+流量上限）与 HTML 实时沙箱预览（改代码即改画面），均通过浏览器端到端验证。

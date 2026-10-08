@@ -25,7 +25,11 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { resolveAllowedPath, type PathCheckResult } from "./repository-fs";
+import {
+  invalidateWorkspaceTreeCache,
+  resolveAllowedPath,
+  type PathCheckResult,
+} from "./repository-fs";
 
 /* ------------------------------------------------------------------ */
 /* Mutation path boundary (spec §103)                                  */
@@ -239,6 +243,8 @@ export async function createFile(
   try {
     await mkdir(path.dirname(check.absolute), { recursive: true });
     await writeFile(check.absolute, content, "utf8");
+    // The file list changed on disk — the explorer must see it immediately.
+    invalidateWorkspaceTreeCache();
     const after = await verifyFileContent(check.absolute, content);
     return {
       ok: after.verified,
@@ -331,6 +337,7 @@ export async function writeFileContent(
   }
   try {
     await writeFile(check.absolute, content, "utf8");
+    invalidateWorkspaceTreeCache();
     const after = await verifyFileContent(check.absolute, content);
     return {
       ok: after.verified,
@@ -406,6 +413,7 @@ export async function deleteFile(
   }
   try {
     await rm(check.absolute, { force: false });
+    invalidateWorkspaceTreeCache();
     let gone = false;
     try {
       await stat(check.absolute);
@@ -485,6 +493,7 @@ export async function renameFile(
   try {
     await mkdir(path.dirname(to.absolute), { recursive: true });
     await rename(from.absolute, to.absolute);
+    invalidateWorkspaceTreeCache();
     const after = await snapshotFile(toPath);
     const verified = after.exists && after.hash !== null && after.hash === before.hash;
     let sourceGone = false;

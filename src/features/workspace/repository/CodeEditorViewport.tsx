@@ -17,10 +17,23 @@
  * indicator (no faked save), and the selected-code AI actions toolbar.
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
 import { formatDistanceToNow } from "date-fns";
-import { Check, Copy, Download, FileCode2, FileDiff, GitCommitVertical } from "lucide-react";
+import {
+  Check,
+  Copy,
+  Download,
+  Eraser,
+  FileCode2,
+  FileDiff,
+  GitCommitVertical,
+  Loader2,
+  MonitorPlay,
+  Play,
+  TerminalSquare,
+  X,
+} from "lucide-react";
 
 import type { FileProvenanceMeta } from "@/features/workspace/types";
 import { Badge } from "@/components/ui/badge";
@@ -100,6 +113,126 @@ function inferLanguage(path: string): string {
   const idx = path.lastIndexOf(".");
   const ext = idx === -1 ? "" : path.slice(idx).toLowerCase();
   return LANGUAGE_BY_EXT[ext] ?? "text";
+}
+
+/** Files that render in the sandboxed live preview (workspace webpage). */
+function isHtmlPath(p: string): boolean {
+  return /\.html?$/i.test(p);
+}
+
+/** Files the workspace runner can execute. */
+function isPythonPath(p: string): boolean {
+  return /\.py$/i.test(p);
+}
+
+/* ------------------------------------------------------------------ */
+/* Workspace runner (V2.2) — run a real .py file, show real output     */
+/* ------------------------------------------------------------------ */
+
+interface PythonRunRecord {
+  path: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+}
+
+type RunState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "done"; record: PythonRunRecord }
+  | { kind: "failed"; message: string };
+
+function PythonRunPanel({
+  state,
+  onClose,
+}: {
+  state: Exclude<RunState, { kind: "idle" }>;
+  onClose: () => void;
+}) {
+  return (
+    <section
+      aria-label="Python run output"
+      className="flex h-44 shrink-0 flex-col border-t border-border-subtle bg-zinc-950"
+    >
+      <header className="flex h-7 shrink-0 items-center gap-2 border-b border-zinc-800 px-2.5 text-[10px] text-zinc-400">
+        <TerminalSquare aria-hidden="true" className="size-3.5" />
+        <span className="font-medium tracking-wide">RUN OUTPUT</span>
+        {state.kind === "running" ? (
+          <span className="flex items-center gap-1.5 text-amber-400">
+            <Loader2 aria-hidden="true" className="size-3 animate-spin" /> running…
+          </span>
+        ) : state.kind === "failed" ? (
+          <span className="text-red-400">run failed</span>
+        ) : (
+          <>
+            <span
+              className={cn(
+                "rounded border px-1.5 py-0 font-mono",
+                state.record.exitCode === 0
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                  : "border-red-500/40 bg-red-500/10 text-red-400",
+              )}
+            >
+              exit {state.record.exitCode ?? "—"}
+            </span>
+            <span className="tabular-nums">{(state.record.durationMs / 1000).toFixed(2)}s</span>
+            {state.record.timedOut ? (
+              <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0 text-amber-400">
+                timed out (killed after 15s)
+              </span>
+            ) : null}
+            {state.record.truncated ? (
+              <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0 text-amber-400">
+                output truncated (64 KB cap)
+              </span>
+            ) : null}
+          </>
+        )}
+        <span className="ml-auto flex items-center gap-1">
+          {state.kind === "done" ? (
+            <button
+              type="button"
+              aria-label="Clear run output"
+              onClick={onClose}
+              className="flex size-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Eraser aria-hidden="true" className="size-3" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label="Close run output"
+            onClick={onClose}
+            className="flex size-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <X aria-hidden="true" className="size-3" />
+          </button>
+        </span>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[11px] leading-relaxed" role="log">
+        {state.kind === "running" ? (
+          <p className="text-zinc-500">python3 — executing…</p>
+        ) : state.kind === "failed" ? (
+          <p className="whitespace-pre-wrap text-red-400">{state.message}</p>
+        ) : (
+          <>
+            {state.record.stdout ? (
+              <pre className="whitespace-pre-wrap text-zinc-100">{state.record.stdout}</pre>
+            ) : null}
+            {state.record.stderr ? (
+              <pre className="mt-1 whitespace-pre-wrap text-red-400">{state.record.stderr}</pre>
+            ) : null}
+            {!state.record.stdout && !state.record.stderr ? (
+              <p className="text-zinc-500">(no output — the program printed nothing)</p>
+            ) : null}
+          </>
+        )}
+      </div>
+    </section>
+  );
 }
 
 function formatSize(bytes: number): string {
@@ -279,6 +412,16 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
   /* Git-aware editor state (Phase 6 §4) — real fetches, honest failures. */
   const [diffMode, setDiffMode] = useState(false);
   const [blameMode, setBlameMode] = useState(false);
+
+  /* Live preview (V2.2): sandboxed iframe for HTML files, fed by the
+     in-memory buffer so edits appear as you type (debounced). */
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState("");
+
+  /* Workspace runner (V2.2): run the active .py file on the server. */
+  const [runState, setRunState] = useState<RunState>({ kind: "idle" });
+  const runAbortRef = useRef<AbortController | null>(null);
+
   const [gitState, setGitState] = useState<{
     diffStatus: "idle" | "loading" | "ready" | "error";
     diff?: GitFileDiff;
@@ -291,7 +434,7 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
     blameStatus: "idle",
   });
 
-  /* Reset git overlays when the tab changes. */
+  /* Reset git overlays + preview + run output when the tab changes. */
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -299,12 +442,31 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
       if (cancelled) return;
       setDiffMode(false);
       setBlameMode(false);
+      setPreviewOpen(false);
+      setPreviewDoc("");
+      setRunState({ kind: "idle" });
       setGitState({ diffStatus: "idle", blameStatus: "idle" });
     })();
     return () => {
       cancelled = true;
     };
   }, [tabPath]);
+
+  /* Live preview document — debounced so typing stays smooth. The in-memory
+     buffer is read via activeTab so the effect can live above the early
+     returns without a temporal-dead-zone reference. */
+  const bufferedContent = activeTab?.content ?? "";
+  useEffect(() => {
+    if (!previewOpen) return;
+    const timer = setTimeout(() => setPreviewDoc(bufferedContent), 400);
+    return () => clearTimeout(timer);
+  }, [previewOpen, bufferedContent]);
+
+  /* Abort an in-flight run when the tab closes/unmounts. */
+  useEffect(() => {
+    const controller = runAbortRef.current;
+    return () => controller?.abort();
+  }, []);
 
   const loadDiff = useCallback(async () => {
     if (!tabPath) return;
@@ -397,6 +559,47 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
       setCopied(false);
     }
   };
+
+  const runPython = useCallback(async () => {
+    if (!tabPath || !isPythonPath(tabPath)) return;
+    runAbortRef.current?.abort();
+    const controller = new AbortController();
+    runAbortRef.current = controller;
+    setRunState({ kind: "running" });
+    try {
+      const res = await fetch("/api/repository/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: tabPath }),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { ok?: boolean; run?: PythonRunRecord; error?: string }
+        | null;
+      if (controller.signal.aborted) return;
+      if (res.ok && data?.ok && data.run) {
+        setRunState({ kind: "done", record: data.run });
+      } else {
+        setRunState({
+          kind: "failed",
+          message: data?.error ?? `The run service responded with HTTP ${res.status}.`,
+        });
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setRunState({
+        kind: "failed",
+        message: err instanceof Error ? err.message : "The run service is unreachable.",
+      });
+    }
+  }, [tabPath, setRunState]);
+
+  /* Derived feature flags for the ACTIVE tab. */
+  const canPreview =
+    isHtmlPath(activeTab?.path ?? "") ||
+    Boolean(activeTab?.generated && (activeTab.generatedLanguage ?? "").toLowerCase().trim() === "html");
+  const canRun = Boolean(activeTab && !activeTab.generated && isPythonPath(activeTab.path));
 
   /* ---- states (all hooks above; conditional rendering below) ---- */
 
@@ -603,6 +806,55 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
           </TooltipTrigger>
           <TooltipContent side="bottom">{copied ? "Copied" : "Copy file contents"}</TooltipContent>
         </Tooltip>
+        {canRun ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Run this Python file"
+                onClick={() => void runPython()}
+                disabled={runState.kind === "running"}
+                className={cn(
+                  "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+                  "hover:bg-surface-hover hover:text-foreground",
+                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  "disabled:cursor-not-allowed disabled:opacity-50",
+                  runState.kind !== "idle" && "text-primary",
+                )}
+              >
+                {runState.kind === "running" ? (
+                  <Loader2 aria-hidden="true" className="size-3.5 animate-spin" />
+                ) : (
+                  <Play aria-hidden="true" className="size-3.5" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Run this file (python3 · isolated · 15s cap)</TooltipContent>
+          </Tooltip>
+        ) : null}
+        {canPreview ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Toggle live preview"
+                aria-pressed={previewOpen}
+                onClick={() => setPreviewOpen((v) => !v)}
+                className={cn(
+                  "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground",
+                  "hover:bg-surface-hover hover:text-foreground",
+                  "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  previewOpen && "text-primary",
+                )}
+              >
+                <MonitorPlay aria-hidden="true" className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {previewOpen ? "Close live preview" : "Live preview (sandboxed)"}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
         {!activeTab.generated ? (
           <>
             <Tooltip>
@@ -647,7 +899,8 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
         ) : null}
       </header>
 
-      {/* Body — the REAL editor; contained to this panel. */}
+      {/* Body — the REAL editor; contained to this panel. Live preview
+          splits the pane for HTML files (editor + sandboxed iframe). */}
       {diffMode ? (
         <div className="min-h-0 flex-1 overflow-hidden p-1">
           {gitState.diffStatus === "loading" || gitState.diffStatus === "idle" ? (
@@ -672,7 +925,43 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
             />
           ) : null}
         </div>
-      ) : activeTab.generated && !activeTab.content ? null : (
+      ) : activeTab.generated && !activeTab.content ? null : previewOpen && canPreview ? (
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+          <div className="min-h-48 min-w-0 flex-1 overflow-hidden lg:min-h-0">
+            <MonacoCodeEditor
+              key={`${paneId}:${activeTab.path}`}
+              path={activeTab.path}
+              content={content}
+              language={monacoLanguage}
+              generated={activeTab.generated}
+              line={line}
+              range={range}
+              paneId={paneId}
+              largeFile={largeFile}
+              changedHunks={gitState.diff?.hunks ?? null}
+              blameRanges={blameMode ? gitState.blame?.ranges ?? null : null}
+            />
+          </div>
+          <div
+            aria-label="Live preview"
+            className="flex h-72 min-h-48 shrink-0 flex-col border-t border-border-subtle lg:h-auto lg:min-h-0 lg:w-1/2 lg:border-l lg:border-t-0"
+          >
+            <div className="flex h-6 shrink-0 items-center gap-1.5 border-b border-border-subtle px-2.5 text-[10px] font-medium tracking-wide text-muted-foreground">
+              <MonitorPlay aria-hidden="true" className="size-3" />
+              LIVE PREVIEW
+              <span className="ml-auto font-normal text-muted-foreground/70">
+                sandboxed · updates as you type
+              </span>
+            </div>
+            <iframe
+              title={`Live preview of ${activeTab.path}`}
+              sandbox="allow-scripts allow-forms allow-modals allow-popups"
+              srcDoc={previewDoc}
+              className="min-h-0 w-full flex-1 border-0 bg-white"
+            />
+          </div>
+        </div>
+      ) : (
         <MonacoCodeEditor
           key={`${paneId}:${activeTab.path}`}
           path={activeTab.path}
@@ -687,6 +976,11 @@ export function CodeEditorViewport({ line, range, meta, paneId = "a" }: CodeEdit
           blameRanges={blameMode ? gitState.blame?.ranges ?? null : null}
         />
       )}
+
+      {/* Workspace runner output (V2.2) — real stdout/stderr, honest errors. */}
+      {runState.kind !== "idle" ? (
+        <PythonRunPanel state={runState} onClose={() => setRunState({ kind: "idle" })} />
+      ) : null}
 
       {/* Footer — honest capability note + V2.1 capability badges + perf HUD */}
       <footer className="flex h-6 shrink-0 items-center gap-2 border-t border-border-subtle px-2.5 text-[10px] text-muted-foreground">
