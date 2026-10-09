@@ -435,14 +435,76 @@ async function runRetrieval(call: AgentCall): Promise<AgentResult> {
   call.hits = response.results;
   call.scopePaths = [...new Set(response.results.map((h) => h.file))].slice(0, 8);
 
+  // ---- USER-DESIGNATED TARGET FILES ----
+  // The user explicitly named/attached these file(s). They must be READ into
+  // the shared cache and the evidence no matter what the index search scored
+  // — a stale or blind index must never erase a designated file from the run
+  // (observed bug: "ludo.html what we can improve in this" — the file existed
+  // on disk and was correctly resolved into targetFiles, but retrieval never
+  // read it, the search index didn't know it yet, and the reasoning agent
+  // answered "there is no file named ludo.html in the repository").
+  // Question/review plans (retrieval → reasoning → critic) have no coding
+  // step to compensate — retrieval itself must honor the designation.
+  const targetFindings: string[] = [];
+  const targetEvidence: Evidence[] = [];
+  for (const targetPath of call.targetFiles.slice(0, 3)) {
+    if (call.signal.aborted) break;
+    let read: { path: string; content: string } | null = null;
+    try {
+      read = await cachedRead(call, "retrieval", targetPath);
+    } catch {
+      // Permission/transport failure on the read — degrade to an honest
+      // "designated but unreadable" finding instead of failing the agent.
+      read = null;
+    }
+    toolCount += 1;
+    if (!read) {
+      targetFindings.push(
+        `${targetPath} — USER-DESIGNATED target file could NOT be read (missing outside the workspace boundary, binary, or over the size limit). State this honestly; do NOT claim the file was reviewed, and do NOT silently answer from search hits alone.`,
+      );
+      continue;
+    }
+    // Designated targets lead the scope so downstream agents read them first.
+    call.scopePaths = [targetPath, ...call.scopePaths.filter((p) => p !== targetPath)].slice(0, 8);
+    const lineCount = read.content.split("\n").length;
+    targetFindings.push(
+      `${targetPath} — user-designated target file READ (${lineCount} lines, ${read.content.length} chars${read.truncated ? ", content truncated at the read limit" : ""}). Full content is in the evidence; base the answer on it.`,
+    );
+    // Spread a few real-content evidence rows across the file.
+    const contentLines = read.content.split("\n");
+    const step = Math.max(1, Math.floor(contentLines.length / 4));
+    for (let i = 0; i < contentLines.length && targetEvidence.length < 4; i += step) {
+      if (!contentLines[i]?.trim()) continue;
+      targetEvidence.push(
+        evidenceFrom(
+          targetPath,
+          read.content,
+          i + 1,
+          "user-designated target file — read directly from disk, not from the search index",
+        ),
+      );
+    }
+    if (targetEvidence.length === 0) {
+      targetEvidence.push(
+        evidenceFrom(
+          targetPath,
+          read.content,
+          1,
+          "user-designated target file — read directly from disk, not from the search index",
+        ),
+      );
+    }
+  }
+
   const best = response.results.reduce(
     (acc, hit) => (hit.confidence === "high" ? Math.max(acc, 2) : hit.confidence === "probable" ? Math.max(acc, 1) : acc),
     0,
   );
+  const targetsRead = targetFindings.filter((f) => f.includes("READ (")).length;
   const confidence: AgentResult["confidence"] =
-    response.results.length >= 5 && best === 2
+    (response.results.length >= 5 && best === 2) || (targetsRead > 0 && best === 2)
       ? "high"
-      : response.results.length >= 3
+      : response.results.length >= 3 || targetsRead > 0
         ? "probable"
         : "weak";
 
@@ -451,10 +513,11 @@ async function runRetrieval(call: AgentCall): Promise<AgentResult> {
     "completed",
     {
       findings: [
+        ...targetFindings, // designations first — they define the answer's ground truth
         `${response.totalHits} hits for "${response.query.normalized.slice(0, 80)}" (${response.timings.totalMs}ms, index: ${response.index.files} files)`,
         `top files: ${call.scopePaths.slice(0, 5).join(", ") || "none"}`,
       ],
-      evidence: hitEvidence(response.results, 6),
+      evidence: [...targetEvidence, ...hitEvidence(response.results, 6)].slice(0, 10),
       confidence,
       sources: call.scopePaths,
     },
@@ -665,6 +728,32 @@ async function runGit(call: AgentCall): Promise<AgentResult> {
 
 function evidenceDigest(call: AgentCall): string {
   const blocks: string[] = [];
+  // USER-DESIGNATED TARGET FILES first — when the user named/attached file(s),
+  // their REAL content (not just structure) is the answer's ground truth.
+  // Question plans otherwise only show search snippets + structural summaries,
+  // which is how a question about an existing file got answered with
+  // "there is no file named ludo.html in the repository" (observed bug).
+  if (call.targetFiles.length) {
+    const targetContents = call.targetFiles
+      .map((path) => ({ path, content: call.fileCache.get(path) }))
+      .filter((t): t is { path: string; content: string } => typeof t.content === "string")
+      .slice(0, 3);
+    if (targetContents.length > 0) {
+      blocks.push(
+        "USER-DESIGNATED TARGET FILES (full content, read directly from disk — the user explicitly named/attached these):\n" +
+          targetContents
+            .map(
+              (t) =>
+                `${t.path}:\n${t.content.slice(0, 6000)}${t.content.length > 6000 ? "\n… (truncated at 6000 chars)" : ""}`,
+            )
+            .join("\n\n"),
+      );
+    } else {
+      blocks.push(
+        `USER-DESIGNATED TARGET FILES: ${call.targetFiles.join(", ")} — designated but NOT readable into evidence. Say this honestly; never claim their content was reviewed.`,
+      );
+    }
+  }
   if (call.hits.length) {
     blocks.push(
       "SEARCH HITS:\n" +
@@ -774,8 +863,18 @@ async function runCritic(call: AgentCall): Promise<AgentResult> {
         issues.push({ kind: "missing-evidence", detail: `claim lacks any support path: "${claim.claim.slice(0, 120)}"`, path: null });
         continue;
       }
+      // Support paths arrive as the reasoning agent wrote them — commonly
+      // "path:line" or "path:start-end" (the reasoning prompt asks for
+      // exactly that). Passing them RAW as `path` made the verifier look up
+      // a file literally named "ludo.html:65-80" → every claim flagged
+      // unsupported even when the citation was real (observed bug). Parse
+      // each entry through the same reference extraction the answer's
+      // inline refs use, so line suffixes become line ranges.
       const checked = await verifyReferences(
-        claim.supportPaths.slice(0, 5).map((path) => ({ raw: path, path, line: null, lineEnd: null })),
+        claim.supportPaths.slice(0, 5).map((supportPath) => {
+          const parsed = extractFileRefs(supportPath)[0];
+          return parsed ?? { raw: supportPath, path: supportPath, line: null, lineEnd: null };
+        }),
       );
       if (checked.some((c) => c.status !== "verified")) {
         issues.push({

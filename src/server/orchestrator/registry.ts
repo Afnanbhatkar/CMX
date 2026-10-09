@@ -75,10 +75,18 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
     status: "implemented",
     tier: "core",
     description:
-      "Runs the real hybrid search engine (BM25 + vectors + symbols + paths + import graph + git) and returns ranked, cited hits.",
+      "Runs the real hybrid search engine (BM25 + vectors + symbols + paths + import graph + git), then reads the USER-DESIGNATED target file(s) directly so a named/attached file always reaches the evidence even when the index is stale. Returns ranked, cited hits.",
     inputSchema: "AgentCall",
     outputSchema: "AgentResult",
-    allowedTools: grants(["repo.search", "read/search only (spec §4)"]),
+    allowedTools: grants(
+      ["repo.search", "read/search only (spec §4)"],
+      // Read-only. Required for user-designated target files: retrieval must
+      // be able to READ an explicitly named/attached file into the evidence
+      // (observed bug: "ludo.html what we can improve" — the file existed and
+      // was designated, but the read threw Permission denied → the reasoning
+      // agent answered "there is no file named ludo.html").
+      ["repo.read-file", "read user-designated target files into evidence (read-only)"],
+    ),
     // Local hybrid search — 15s is generous (measured sub-second typical).
     timeoutMs: 15_000,
     approvalPolicy: "never",

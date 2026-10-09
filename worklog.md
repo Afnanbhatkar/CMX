@@ -1611,3 +1611,23 @@ Stage Summary:
 - The "OCR feature" previously reported by an agent NEVER EXISTED — pure vaporware. Root cause of the user's error: nothing was built.
 - Now shipped for real: OCR Studio in the workspace sidebar — vision-model text extraction with 5 modes, verbatim output, honest measured metadata, persisted history, upload/drag/paste input, mobile-ready UI. Every claim on screen is backed by a DB row and a real API response.
 - API surface: POST/GET /api/ocr, GET/DELETE /api/ocr/[id]. Schema: ocr_jobs table. Engine: src/server/services/ocr-service.ts.
+
+---
+Task ID: 16
+Agent: Z.ai Code (main)
+Task: "agent mode can't read attached file (ludo.html) while search mode can" — root-cause and fix the orchestrator attachment blindness
+
+Work Log:
+- Forensics: ludo.html EXISTS on disk (5138B, created by an earlier agent run). The failing agent-mode run's DB input had targetFiles:["ludo.html"] already resolved — upstream attachment→target resolution was NEVER the bug.
+- Root cause #1 (agents.ts runRetrieval): the retrieval agent ignored call.targetFiles entirely — it only ran toolRepoSearch with the instruction text. For question/review plans (retrieval→reasoning→critic, no coding step) the designated file's content never reached the evidence; with the search index stale (file created after index build), reasoning answered "there is no file named ludo.html". runCoding already honored targets — only retrieval didn't.
+- Fix #1: runRetrieval now reads each user-designated target file via cachedRead (try/catch — honest "designated but unreadable" finding on failure), puts targets FIRST in scopePaths, injects real-content evidence rows (spread across the file, "read directly from disk, not from the search index"), and prepends honest READ/NOT-READABLE findings. Confidence upgraded when targets read.
+- Fix #2 (agents.ts evidenceDigest): designated target files' FULL content (up to 3 files × 6000 chars) now leads the digest consumed by BOTH reasoning and critic — previously only line-count + JS-export summaries were shown (useless for HTML). Unreadable targets render an explicit honest block instead.
+- Root cause #2 (registry.ts): retrieval's allowedTools was ["repo.search"] only — the target read threw OrchestratorToolError → retrieval "failed" in 48ms with 0 tools (confirmed in run spans). Granted ["repo.read-file"] (read-only, documented reason).
+- Root cause #3 (agents.ts runCritic): claim supportPaths like "ludo.html:65-80" were passed RAW as paths → verifier looked up a file literally named "ludo.html:65-80" → every claim flagged unsupported even with real citations. Fixed: each supportPath parsed through extractFileRefs (path:line-start-end) before verifyReferences.
+- Sandbox incident during verification: the container had restarted (boot 14:37) — untracked .zscripts/{dev.sh,keepalive.sh} were WIPED and the background process reaper now kills spawned servers ~30s after the spawning tool call ends. Recreated both scripts verbatim; dev-server starts now verified per-call. Preview panel may need a re-open to trigger the sandbox's own auto-start.
+- Browser E2E (agent mode + attached ludo.html): retrieval completed with 2 tool calls (search+read); answer became a real content-grounded review with line citations (ludo.html:17-26 board, :87-103 movement "only moves horizontally by dice value" — true facts, no more "file does not exist"). Remaining critic "weak-evidence" flags are LLM-judgment on line ranges, not the mechanical false-positive (deterministic check now verifies parsed ranges against real line counts).
+
+Stage Summary:
+- Agent mode can now ALWAYS see attached/named files: retrieval reads user-designated targets into evidence regardless of index staleness; reasoning+critic receive full target content; read grant added; citation parser fixed.
+- The asymmetry the user saw: search/explain mode always injected attachment content into the prompt (assistant-service reads attachments server-side), while agent mode delegated evidence to the orchestrator which dropped them. Both paths now honor designations.
+- ludo.html itself was read and reviewed; real code bugs identified (critical: click handler redeclares playerPositions → pieces snap back every roll; x-axis-only movement; no capture/win/6-rule; 1 piece per player).

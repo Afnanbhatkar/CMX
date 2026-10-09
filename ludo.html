@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ludo Game</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        .game-container {
+            text-align: center;
+        }
+        .board {
+            display: grid;
+            grid-template-columns: repeat(15, 30px);
+            grid-template-rows: repeat(15, 30px);
+            gap: 1px;
+            background-color: #333;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .cell {
+            background-color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            border-radius: 3px;
+        }
+        .home {
+            background-color: #e0e0e0;
+        }
+        .safe {
+            background-color: #aaffaa;
+        }
+        .player {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin: 2px;
+        }
+        .player1 { background-color: red; }
+        .player2 { background-color: blue; }
+        .player3 { background-color: green; }
+        .player4 { background-color: yellow; }
+        .controls {
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <h1>Ludo Game</h1>
+        <div class="board" id="board"></div>
+        <div class="controls">
+            <button id="rollDice">Roll Dice</button>
+            <p id="diceResult"></p>
+            <p id="currentPlayer">Current Player: Player 1</p>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const board = document.getElementById('board');
+            const rollDiceButton = document.getElementById('rollDice');
+            const diceResult = document.getElementById('diceResult');
+            const currentPlayerDisplay = document.getElementById('currentPlayer');
+            
+            let currentPlayer = 1;
+            let diceValue = 0;
+
+            // Initialize the board
+            for (let i = 0; i < 15; i++) {
+                for (let j = 0; j < 15; j++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.id = `cell-${i}-${j}`;
+                    board.appendChild(cell);
+                }
+            }
+
+            // Set up initial player positions (simplified)
+            const playerPositions = [
+                { x: 1, y: 1, color: 'player1' },
+                { x: 13, y: 1, color: 'player2' },
+                { x: 13, y: 13, color: 'player3' },
+                { x: 1, y: 13, color: 'player4' },
+            ];
+
+            playerPositions.forEach(player => {
+                const cell = document.getElementById(`cell-${player.y}-${player.x}`);
+                const piece = document.createElement('div');
+                piece.className = `player ${player.color}`;
+                cell.appendChild(piece);
+            });
+
+            // Roll dice functionality
+            rollDiceButton.addEventListener('click', () => {
+                diceValue = Math.floor(Math.random() * 6) + 1;
+                diceResult.textContent = `You rolled: ${diceValue}`;
+                
+                // Simple move logic (placeholder)
+                const playerPositions = [
+                    { x: 1, y: 1, color: 'player1' },
+                    { x: 13, y: 1, color: 'player2' },
+                    { x: 13, y: 13, color: 'player3' },
+                    { x: 1, y: 13, color: 'player4' },
+                ];
+                
+                const currentPos = playerPositions[currentPlayer - 1];
+                const newX = currentPos.x + diceValue;
+                const newY = currentPos.y;
+                
+                if (newX < 15) {
+                    const oldCell = document.getElementById(`cell-${currentPos.y}-${currentPos.x}`);
+                    const piece = oldCell.querySelector(`.${currentPos.color}`);
+                    oldCell.removeChild(piece);
+                    
+                    const newCell = document.getElementById(`cell-${newY}-${newX}`);
+                    newCell.appendChild(piece);
+                    
+                    playerPositions[currentPlayer - 1].x = newX;
+                }
+                
+                // Switch to next player
+                currentPlayer = (currentPlayer % 4) + 1;
+                currentPlayerDisplay.textContent = `Current Player: Player ${currentPlayer}`;
+            });
+        });
+    </script>
+</body>
+</html>
