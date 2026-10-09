@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .chat-container {
+            width: 400px;
+            height: 600px;
+            background-color: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .chat-header {
+            background-color: #007bff;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .chat-messages {
+            flex-grow: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message {
+            max-width: 80%;;
+            padding: 10px 15px;
+            border-radius: 18px;
+            word-wrap: break-word;
+        }
+        .user-message {
+            align-self: flex-end;
+            background-color: #007bff;
+            color: white;
+        }
+        .bot-message {
+            align-self: flex-start;
+            background-color: #e9ecef;
+            color: #333;
+        }
+        .chat-input-container {
+            display: flex;
+            padding: 15px;
+            border-top: 1px solid #ddd;
+        }
+        .chat-input {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            outline: none;
+        }
+        .send-button {
+            margin-left: 10px;
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        .send-button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            Chatbot
+        </div>
+        <div class="chat-messages" id="chat-messages">
+            <div class="message bot-message">Hello! I am a chatbot. How can I help you today?</div>
+        </div>
+        <div class="chat-input-container">
+            <input type="text" class="chat-input" id="chat-input" placeholder="Type your message...">
+            <button class="send-button" id="send-button">Send</button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const chatMessages = document.getElementById('chat-messages');
+            const chatInput = document.getElementById('chat-input');
+            const sendButton = document.getElementById('send-button');
+
+            function addMessage(content, isUser = false) {
+                const messageDiv = document.createElement('div');
+                messageDiv.classList.add('message');
+                messageDiv.classList.add(isUser ? 'user-message' : 'bot-message');
+                messageDiv.textContent = content;
+                chatMessages.appendChild(messageDiv);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+
+            function getBotResponse(userMessage) {
+                const responses = [
+                    "That's interesting! Tell me more.",
+                    "I understand. How does that make you feel?",
+                    "Could you elaborate on that?",
+                    "I'm here to help. What would you like to know?",
+                    "Thanks for sharing! What's next?",
+                    "I'm not sure I understand. Can you rephrase?"
+                ];
+                return responses[Math.floor(Math.random() * responses.length)];
+            }
+
+            function sendMessage() {
+                const message = chatInput.value.trim();
+                if (message) {
+                    addMessage(message, true);
+                    chatInput.value = '';
+                    
+                    setTimeout(() => {
+                        const botResponse = getBotResponse(message);
+                        addMessage(botResponse);
+                    }, 1000);
+                }
+            }
+
+            sendButton.addEventListener('click', sendMessage);
+
+            chatInput.addEventListener('keypress', (event) => {
+                if (event.key === 'Enter') {
+                    sendMessage();
+                }
+            });
+        });
+    </script>
+</body>
+</html>

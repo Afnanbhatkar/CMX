@@ -1631,3 +1631,21 @@ Stage Summary:
 - Agent mode can now ALWAYS see attached/named files: retrieval reads user-designated targets into evidence regardless of index staleness; reasoning+critic receive full target content; read grant added; citation parser fixed.
 - The asymmetry the user saw: search/explain mode always injected attachment content into the prompt (assistant-service reads attachments server-side), while agent mode delegated evidence to the orchestrator which dropped them. Both paths now honor designations.
 - ludo.html itself was read and reviewed; real code bugs identified (critical: click handler redeclares playerPositions → pieces snap back every roll; x-axis-only movement; no capture/win/6-rule; 1 piece per player).
+
+---
+Task ID: 17
+Agent: Z.ai Code (main)
+Task: "you changed the search mode feature — revoke it, give me previous search mode" — forensic investigation (user request to revert search mode)
+
+Work Log:
+- Git forensics: `git diff 67e936f HEAD` over the ENTIRE search/chat surface (src/server/services/assistant-service.ts, src/server/search/**, src/features/workspace/chat/**, src/features/workspace/search/**, src/app/api/search) → only a 0-insertion/0-deletion file-mode change on AICodeBlockPreview.tsx. Search mode logic is BYTE-IDENTICAL to the version the user used when they reported "search mode can read ludo.html" (Oct 9, pre-Task-16).
+- Confirmed today's only code change (commit 5847ab6, Task 16) touched src/server/orchestrator/agents.ts + registry.ts exclusively = AGENT mode, i.e. the attachment fix the user requested.
+- Checked every "mode change" suspect: DEFAULT_COMPOSER_MODE ("agent" since Phase 8 f384d4f — never altered, used only for local metrics frames); chat-ui-store default mode "search" (in-memory, resets on reload); MODES array in AIComposer (Search/Code/Agent/Loop unchanged since Phase 9.6); `mode: options?.mode ?? "agent"` fallbacks in use-assistant-run (introduced Phase 8D, predates the user's "previous search mode" era); no setMode auto-switching anywhere; memory_items has exactly 1 proposed item (cannot pollute).
+- DB evidence: the user's last 6 chat runs (15:55:16–15:58:12) ALL have kind=orchestrator → those messages were sent with the AGENT pill active. That is why recent answers looked different (slower multi-agent chain, "Reading ludo.html" rows, evidence-grounded review with line citations, critic verdicts) — the Task 16 fix working as requested, not a search-mode change.
+- Live E2E proof search mode is intact: POST /api/assistant/runs {mode:"search", attachments:[ludo.html]} → Understanding → Searching repository (14 hits) → Composing → answer "Looking at your ludo.html file, here are several improvements…" (attachment injected, fast single-turn, exactly the previous behavior).
+- Live UI proof: agent-browser on /app → composer pills Search/Code/Agent/Loop present; computed colors show Search pill ACTIVE (copper) on fresh load, Agent/Code/Loop muted/inactive.
+- NO code changes made. Reverting "the change" would mean undoing the user's own requested agent-mode attachment fix; search mode itself has nothing to revert.
+
+Stage Summary:
+- Conclusion: search mode was NEVER modified. The perceived change is (a) the user's composer being left on the Agent pill (all recent runs are orchestrator runs) and (b) agent mode now answering differently after the requested Task 16 attachment fix.
+- User guidance delivered: click the Search pill (or Alt+1) before sending — it is also the default after every page reload; offered optional "auto-return to Search after each send" UX tweak if they want it.
