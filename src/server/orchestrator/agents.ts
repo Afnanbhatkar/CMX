@@ -59,6 +59,7 @@ import {
   toolGitOverview,
   toolImportGraph,
   toolReadFile,
+  toolReadTree,
   toolRepoSearch,
   toolSecurityScan,
   toolSymbolScan,
@@ -66,6 +67,7 @@ import {
   type GitReadView,
   type ImportGraphView,
   type ToolContext,
+  type TreeFileEntry,
 } from "./tools";
 import type { StaticFinding } from "./security-scan";
 
@@ -98,6 +100,14 @@ export interface AgentCall {
   /** User-designated target files (Agent Mode V2 file-targeting fix). When
    *  non-empty the change-set MUST be confined to exactly these paths. */
   targetFiles: string[];
+  /** Honest retrieval notes from direct workspace-tree lookups (V2.1 full-repo
+   *  access): files read directly + missing files with their closest REAL
+   *  alternatives. Flows into the reasoning + critic evidence digest. */
+  retrievalNotes?: string[];
+  /** Mentions retrieval could NOT resolve to any real path. The critic
+   *  suppresses wrong-file-reference flags for exactly these paths so an
+   *  HONEST "this file does not exist" answer survives verification. */
+  unresolvedFileMentions?: string[] | null;
   signal: AbortSignal;
   onToolUse: (tool: ToolName) => void;
 }
@@ -227,6 +237,110 @@ function hitEvidence(hits: SearchHit[], limit: number): Evidence[] {
       hit.whyMatched[0] ??
       `matched via ${hit.retrievalMethod.join(", ")} (${hit.confidence})`,
   }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Direct file resolution (V2.1 full-repo access for agent mode)       */
+/* ------------------------------------------------------------------ */
+
+/** Path-like token in a request: "examples/ludo.py", "calculator.css",
+ *  "src/app/page.tsx". The first alternative matches directory-qualified
+ *  paths; the second matches loose filenames with a KNOWN text extension. */
+const FILE_MENTION_RE =
+  /(?:[\w@-]+\/)+[\w.-]+\.[A-Za-z]{1,8}\b|[\w@-]+\.(?:tsx?|jsx?|mjs|cjs|json|css|scss|sass|less|html?|mdx?|py|rb|go|java|kt|swift|c|h|cpp|hpp|cc|cs|php|sql|prisma|sh|ya?ml|toml|svg|txt|xml|ini|cfg)\b/gi;
+
+function normalizeMention(m: string): string {
+  return m
+    .trim()
+    .replace(/^\.\//, "")
+    .replace(/\/{2,}/g, "/")
+    .replace(/[.,;:)]+$/, "")
+    .toLowerCase();
+}
+
+function basenameOf(p: string): string {
+  return p.split("/").pop() ?? p;
+}
+
+function stemOf(name: string): string {
+  const idx = name.lastIndexOf(".");
+  return idx === -1 ? name : name.slice(0, idx);
+}
+
+/**
+ * Tiered match of a user file mention against the REAL workspace tree:
+ * exact path → path suffix → basename → stem (loose names only).
+ * Returns the real tree entry or null — NEVER guesses, so a missing file
+ * stays an honest negative instead of a silent wrong pick.
+ */
+function matchTreePath(tree: TreeFileEntry[], mention: string): TreeFileEntry | null {
+  const m = normalizeMention(mention);
+  if (!m) return null;
+  let hit = tree.find((f) => f.path.toLowerCase() === m);
+  if (hit) return hit;
+  hit = tree.find((f) => f.path.toLowerCase().endsWith(`/${m}`));
+  if (hit) return hit;
+  const mBase = basenameOf(m);
+  hit = tree.find((f) => basenameOf(f.path).toLowerCase() === mBase);
+  if (hit) return hit;
+  if (!m.includes("/")) {
+    const mStem = stemOf(mBase);
+    hit = tree.find((f) => stemOf(basenameOf(f.path)).toLowerCase() === mStem);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Closest REAL files for a mention that matched nothing: same extension,
+ *  same top-level directory, similar stem — straight from the tree. */
+function closestTreeFiles(tree: TreeFileEntry[], mention: string): string[] {
+  const m = normalizeMention(mention);
+  const ext = m.includes(".") ? `.${m.split(".").pop()?.toLowerCase()}` : "";
+  const mStem = stemOf(basenameOf(m));
+  const stemToken = mStem.split(/[.\-_\s]/).filter(Boolean)[0] ?? "";
+  const sameExt = ext
+    ? tree.filter((f) => f.path.toLowerCase().endsWith(ext)).map((f) => f.path)
+    : [];
+  const sameDir = m.includes("/")
+    ? tree
+        .filter((f) => f.path.toLowerCase().startsWith(`${m.split("/")[0]}/`))
+        .map((f) => f.path)
+    : [];
+  const similarStem = stemToken
+    ? tree
+        .filter((f) => stemOf(basenameOf(f.path)).toLowerCase().includes(stemToken))
+        .map((f) => f.path)
+    : [];
+  return [...new Set([...sameExt, ...sameDir, ...similarStem])].slice(0, 8);
+}
+
+/** Claims phrased as an absence ("the requested file does not exist"). When
+ *  retrieval proved a file absent from the REAL tree, such claims are backed
+ *  by the retrieval notes — not missing evidence. */
+const ABSENCE_CLAIM_RE =
+  /\b(does not exist|doesn'?t exist|do not exist|don'?t exist|not exist|no file|not found|could not find|cannot find|can'?t find|not present|isn'?t present|no matching)\b/i;
+
+/** A REAL direct hit: the requested file exists and was actually read. */
+function makeDirectHit(entry: TreeFileEntry, content: string | null, lines: number): SearchHit {
+  const firstLine = (content ?? "").split("\n", 1)[0] ?? "";
+  return {
+    file: entry.path,
+    symbol: null,
+    lineStart: 1,
+    lineEnd: Math.max(1, Math.min(lines, 400)),
+    snippet: firstLine.slice(0, 200),
+    language: entry.language,
+    score: 1,
+    retrievalMethod: ["exact", "path"],
+    whyMatched: [
+      "direct workspace-tree lookup: the requested file exists and was read through the real file tool",
+    ],
+    confidence: "high",
+    confidenceReason:
+      "direct file resolution against the real workspace tree (not fuzzy search)",
+    gitStatus: null,
+    intent: null,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -428,96 +542,133 @@ async function runRetrieval(call: AgentCall): Promise<AgentResult> {
   const onUse = () => {
     toolCount += 1;
   };
+  const findings: string[] = [];
+  const evidence: Evidence[] = [];
+
+  /* Phase A — DIRECT workspace-tree resolution of path-like mentions
+   * ("examples/ludo.py", "calculator.css", target files). This is the
+   * full-repo access path: ANY text file in the workspace (py/css/html/…)
+   * is resolved against the REAL tree and read through the real file tool,
+   * independent of BM25 content ranking. A mention that matches nothing
+   * becomes an HONEST negative backed by the real tree inventory. */
+  const mentions = [
+    ...new Set(
+      [
+        ...(stripContextBlocks(call.request).match(FILE_MENTION_RE) ?? []).map((m) => m.trim()),
+        ...call.targetFiles,
+      ]
+        .map(normalizeMention)
+        .filter(Boolean),
+    ),
+  ].slice(0, 6);
+
+  const direct: { entry: TreeFileEntry; content: string | null }[] = [];
+  const unresolved: string[] = [];
+  const alternativesByMention = new Map<string, string[]>();
+
+  if (mentions.length > 0) {
+    const tree = await toolReadTree({
+      agent: "retrieval",
+      signal: call.signal,
+      onToolUse: onUse,
+    });
+    for (const mention of mentions) {
+      const entry = matchTreePath(tree, mention);
+      if (!entry) {
+        unresolved.push(mention);
+        continue;
+      }
+      const read = await cachedRead(call, "retrieval", entry.path);
+      direct.push({ entry, content: read?.content ?? null });
+    }
+    for (const mention of unresolved) {
+      alternativesByMention.set(mention, closestTreeFiles(tree, mention));
+    }
+  }
+
+  /* Phase B — hybrid search over the index (existing behavior). */
   const response = await toolRepoSearch(
     { agent: "retrieval", signal: call.signal, onToolUse: onUse },
     { query: call.instruction.slice(0, 300), mode: "auto", limit: 14 },
   );
-  call.hits = response.results;
-  call.scopePaths = [...new Set(response.results.map((h) => h.file))].slice(0, 8);
+  const directPaths = new Set(direct.map((d) => d.entry.path));
+  call.hits = [
+    ...direct.map((d) =>
+      makeDirectHit(d.entry, d.content, (d.content ?? "").split("\n").length),
+    ),
+    ...response.results.filter((h) => !directPaths.has(h.file)),
+  ];
+  call.scopePaths = [...new Set(call.hits.map((h) => h.file))].slice(0, 8);
 
-  // ---- USER-DESIGNATED TARGET FILES ----
-  // The user explicitly named/attached these file(s). They must be READ into
-  // the shared cache and the evidence no matter what the index search scored
-  // — a stale or blind index must never erase a designated file from the run
-  // (observed bug: "ludo.html what we can improve in this" — the file existed
-  // on disk and was correctly resolved into targetFiles, but retrieval never
-  // read it, the search index didn't know it yet, and the reasoning agent
-  // answered "there is no file named ludo.html in the repository").
-  // Question/review plans (retrieval → reasoning → critic) have no coding
-  // step to compensate — retrieval itself must honor the designation.
-  const targetFindings: string[] = [];
-  const targetEvidence: Evidence[] = [];
-  for (const targetPath of call.targetFiles.slice(0, 3)) {
-    if (call.signal.aborted) break;
-    let read: { path: string; content: string } | null = null;
-    try {
-      read = await cachedRead(call, "retrieval", targetPath);
-    } catch {
-      // Permission/transport failure on the read — degrade to an honest
-      // "designated but unreadable" finding instead of failing the agent.
-      read = null;
-    }
-    toolCount += 1;
-    if (!read) {
-      targetFindings.push(
-        `${targetPath} — USER-DESIGNATED target file could NOT be read (missing outside the workspace boundary, binary, or over the size limit). State this honestly; do NOT claim the file was reviewed, and do NOT silently answer from search hits alone.`,
-      );
-      continue;
-    }
-    // Designated targets lead the scope so downstream agents read them first.
-    call.scopePaths = [targetPath, ...call.scopePaths.filter((p) => p !== targetPath)].slice(0, 8);
-    const lineCount = read.content.split("\n").length;
-    targetFindings.push(
-      `${targetPath} — user-designated target file READ (${lineCount} lines, ${read.content.length} chars${read.truncated ? ", content truncated at the read limit" : ""}). Full content is in the evidence; base the answer on it.`,
+  /* Findings + evidence: direct reads first (real content, real paths). */
+  for (const d of direct) {
+    const lines = (d.content ?? "").split("\n").length;
+    findings.push(
+      `direct file lookup: ${d.entry.path} EXISTS (${d.entry.language}, ${lines} lines) — content read into scope`,
     );
-    // Spread a few real-content evidence rows across the file.
-    const contentLines = read.content.split("\n");
-    const step = Math.max(1, Math.floor(contentLines.length / 4));
-    for (let i = 0; i < contentLines.length && targetEvidence.length < 4; i += step) {
-      if (!contentLines[i]?.trim()) continue;
-      targetEvidence.push(
-        evidenceFrom(
-          targetPath,
-          read.content,
-          i + 1,
-          "user-designated target file — read directly from disk, not from the search index",
-        ),
-      );
-    }
-    if (targetEvidence.length === 0) {
-      targetEvidence.push(
-        evidenceFrom(
-          targetPath,
-          read.content,
-          1,
-          "user-designated target file — read directly from disk, not from the search index",
-        ),
-      );
+    evidence.push(
+      evidenceFrom(
+        d.entry.path,
+        d.content,
+        1,
+        "direct workspace-tree lookup — requested file exists and was read",
+      ),
+    );
+  }
+  for (const mention of unresolved) {
+    const alts = alternativesByMention.get(mention) ?? [];
+    findings.push(
+      `no file matching "${mention}" exists in the workspace (checked the real file tree)` +
+        (alts.length ? `; closest existing files: ${alts.slice(0, 5).join(", ")}` : ""),
+    );
+    for (const alt of alts.slice(0, 3)) {
+      evidence.push({
+        path: alt,
+        line: null,
+        snippet: "",
+        why: `workspace tree listing — closest existing file for the missing "${mention}"`,
+      });
     }
   }
+  findings.push(
+    `${response.totalHits} search hits for "${response.query.normalized.slice(0, 80)}" (${response.timings.totalMs}ms, index: ${response.index.files} files)`,
+  );
+  evidence.push(...hitEvidence(response.results, 6));
+
+  /* Honest notes flow to reasoning + critic via the evidence digest. */
+  call.retrievalNotes = [
+    ...direct.map(
+      (d) => `file "${d.entry.path}" exists and was read (${d.entry.language})`,
+    ),
+    ...unresolved.map((u) => {
+      const alts = alternativesByMention.get(u) ?? [];
+      return `no file matching "${u}" exists in the workspace; closest existing: ${alts.slice(0, 5).join(", ") || "none"}`;
+    }),
+  ];
+  call.unresolvedFileMentions = unresolved.length ? unresolved : null;
 
   const best = response.results.reduce(
-    (acc, hit) => (hit.confidence === "high" ? Math.max(acc, 2) : hit.confidence === "probable" ? Math.max(acc, 1) : acc),
+    (acc, hit) =>
+      hit.confidence === "high" ? Math.max(acc, 2) : hit.confidence === "probable" ? Math.max(acc, 1) : acc,
     0,
   );
-  const targetsRead = targetFindings.filter((f) => f.includes("READ (")).length;
   const confidence: AgentResult["confidence"] =
-    (response.results.length >= 5 && best === 2) || (targetsRead > 0 && best === 2)
+    direct.length > 0
       ? "high"
-      : response.results.length >= 3 || targetsRead > 0
-        ? "probable"
-        : "weak";
+      : unresolved.length > 0
+        ? "probable" // an honest negative backed by the real tree IS repo info
+        : response.results.length >= 5 && best === 2
+          ? "high"
+          : response.results.length >= 3
+            ? "probable"
+            : "weak";
 
   return makeResult(
     "retrieval",
     "completed",
     {
-      findings: [
-        ...targetFindings, // designations first — they define the answer's ground truth
-        `${response.totalHits} hits for "${response.query.normalized.slice(0, 80)}" (${response.timings.totalMs}ms, index: ${response.index.files} files)`,
-        `top files: ${call.scopePaths.slice(0, 5).join(", ") || "none"}`,
-      ],
-      evidence: [...targetEvidence, ...hitEvidence(response.results, 6)].slice(0, 10),
+      findings,
+      evidence: evidence.slice(0, 12),
       confidence,
       sources: call.scopePaths,
     },
@@ -728,31 +879,11 @@ async function runGit(call: AgentCall): Promise<AgentResult> {
 
 function evidenceDigest(call: AgentCall): string {
   const blocks: string[] = [];
-  // USER-DESIGNATED TARGET FILES first — when the user named/attached file(s),
-  // their REAL content (not just structure) is the answer's ground truth.
-  // Question plans otherwise only show search snippets + structural summaries,
-  // which is how a question about an existing file got answered with
-  // "there is no file named ludo.html in the repository" (observed bug).
-  if (call.targetFiles.length) {
-    const targetContents = call.targetFiles
-      .map((path) => ({ path, content: call.fileCache.get(path) }))
-      .filter((t): t is { path: string; content: string } => typeof t.content === "string")
-      .slice(0, 3);
-    if (targetContents.length > 0) {
-      blocks.push(
-        "USER-DESIGNATED TARGET FILES (full content, read directly from disk — the user explicitly named/attached these):\n" +
-          targetContents
-            .map(
-              (t) =>
-                `${t.path}:\n${t.content.slice(0, 6000)}${t.content.length > 6000 ? "\n… (truncated at 6000 chars)" : ""}`,
-            )
-            .join("\n\n"),
-      );
-    } else {
-      blocks.push(
-        `USER-DESIGNATED TARGET FILES: ${call.targetFiles.join(", ")} — designated but NOT readable into evidence. Say this honestly; never claim their content was reviewed.`,
-      );
-    }
+  if (call.retrievalNotes?.length) {
+    blocks.push(
+      "RETRIEVAL NOTES (from the real workspace tree):\n" +
+        call.retrievalNotes.map((n) => `- ${n}`).join("\n"),
+    );
   }
   if (call.hits.length) {
     blocks.push(
@@ -770,6 +901,16 @@ function evidenceDigest(call: AgentCall): string {
       return `${path} (${lines} lines): ${exports.slice(0, 8).join(", ") || "no top-level exports"}`;
     });
     blocks.push("FILE STRUCTURE (real):\n" + structural.join("\n"));
+    /* Real content excerpts — the requested file's actual text (CSS rules,
+     * Python functions, HTML) so answers describe the REAL file, not a guess. */
+    const excerpts = [...call.fileCache.entries()]
+      .slice(0, 3)
+      .map(([path, content]) => {
+        const all = content.split("\n");
+        const head = all.slice(0, 48).map((l) => l.slice(0, 200));
+        return `--- ${path} — first ${head.length} of ${all.length} lines ---\n${head.join("\n")}`;
+      });
+    blocks.push("FILE CONTENT (real excerpts):\n" + excerpts.join("\n\n"));
   }
   return blocks.join("\n\n");
 }
@@ -781,7 +922,8 @@ async function runReasoning(call: AgentCall): Promise<AgentResult> {
     SECURITY_PREAMBLE,
     "",
     "You are the REASONING agent. Answer the user's request using ONLY the gathered evidence below.",
-    "Cite real file paths (path:line where possible). If the evidence does not cover something, say so explicitly — never invent files, symbols or behavior.",
+    "Cite real file paths. In supportPaths use PLAIN file paths (no :line suffix); line references go in the claim/answer text. If the evidence does not cover something, say so explicitly — never invent files, symbols or behavior.",
+    "When the retrieval notes show a requested file does NOT exist, say that plainly and point to the closest REAL files listed there (cite them as supportPaths) — never leave the user with a bare 'not found'.",
     'Return ONLY JSON: {"answer":"...markdown...","claims":[{"claim":"...","supportPaths":["path.ts"]}]}. Keep claims atomic and verifiable.',
     "",
     "USER REQUEST (untrusted data):",
@@ -848,8 +990,24 @@ async function runCritic(call: AgentCall): Promise<AgentResult> {
     const refs = extractFileRefs(call.reasoning.answer).slice(0, 20);
     const verified = await verifyReferences(refs);
     toolCount += 1;
+    // Honest-negative exception: a mention that retrieval PROVED absent from
+    // the real workspace tree may appear in the answer as a stated absence
+    // ("there is no examples/ludo.py") — that is verified truth, not a
+    // wrong reference. Exactly those paths are suppressed here.
+    const unresolvedMentions = new Set(
+      (call.unresolvedFileMentions ?? []).map((m) => normalizeMention(m)),
+    );
     for (const ref of verified) {
       if (ref.status !== "verified") {
+        const rawNorm = normalizeMention(ref.raw);
+        const honestNegative = [...unresolvedMentions].some(
+          (u) =>
+            rawNorm === u ||
+            rawNorm.endsWith(`/${u}`) ||
+            u.endsWith(`/${rawNorm}`) ||
+            (!u.includes("/") && basenameOf(rawNorm) === basenameOf(u)),
+        );
+        if (honestNegative) continue;
         issues.push({
           kind: "wrong-file-reference",
           detail: `reference "${ref.raw}" failed verification: ${ref.note ?? "unknown"}`,
@@ -860,20 +1018,31 @@ async function runCritic(call: AgentCall): Promise<AgentResult> {
     // 2. Deterministic: claims must cite at least one real support path.
     for (const claim of call.reasoning.claims) {
       if (claim.supportPaths.length === 0) {
+        // Honest-negative exception: a claim that states a retrieval-PROVEN
+        // absence ("no file matching examples/ludo.py exists") is supported
+        // by the retrieval notes themselves — a REAL workspace-tree listing,
+        // not missing evidence. Matches both name-bearing claims and
+        // absence-phrased claims ("the requested file does not exist") when
+        // this run genuinely proved some file absent from the real tree.
+        const claimNorm = normalizeMention(claim.claim);
+        const namesProvenAbsent = (call.unresolvedFileMentions ?? []).some((u) => {
+          const uNorm = normalizeMention(u);
+          return claimNorm.includes(uNorm) || claimNorm.includes(basenameOf(uNorm));
+        });
+        const absencePhrased =
+          (call.unresolvedFileMentions ?? []).length > 0 &&
+          ABSENCE_CLAIM_RE.test(claim.claim);
+        if (namesProvenAbsent || absencePhrased) continue;
         issues.push({ kind: "missing-evidence", detail: `claim lacks any support path: "${claim.claim.slice(0, 120)}"`, path: null });
         continue;
       }
-      // Support paths arrive as the reasoning agent wrote them — commonly
-      // "path:line" or "path:start-end" (the reasoning prompt asks for
-      // exactly that). Passing them RAW as `path` made the verifier look up
-      // a file literally named "ludo.html:65-80" → every claim flagged
-      // unsupported even when the citation was real (observed bug). Parse
-      // each entry through the same reference extraction the answer's
-      // inline refs use, so line suffixes become line ranges.
       const checked = await verifyReferences(
-        claim.supportPaths.slice(0, 5).map((supportPath) => {
-          const parsed = extractFileRefs(supportPath)[0];
-          return parsed ?? { raw: supportPath, path: supportPath, line: null, lineEnd: null };
+        claim.supportPaths.slice(0, 5).map((raw) => {
+          /* supportPaths may legitimately carry a line citation
+           * ("calculator.css:15") — verify the PATH part, never the
+           * composite string, or a real file fails as "non-existent". */
+          const stripped = raw.replace(/:(\d+)(?:-(\d+))?$/, "");
+          return { raw, path: stripped, line: null, lineEnd: null };
         }),
       );
       if (checked.some((c) => c.status !== "verified")) {

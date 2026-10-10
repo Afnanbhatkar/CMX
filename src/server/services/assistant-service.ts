@@ -1157,6 +1157,125 @@ function addRenameDestinations(query: string, targets: string[]): string[] {
  *  choice is always a real selection. */
 const STOP_ANSWER_RE =
   /^(?:no\b|none\b|non\b|nothing\b|nah\b|nope\b|not\s+any\b|stop\b|cancel\b|never\s*mind|forget\s*it|skip\b|don'?t\b|do\s*not\b)/i;
+
+/**
+ * Demonstrative file references — the user POINTS at a specific file without
+ * naming it: "this file", "that file", "the current file", "this attach
+ * file", "that script". Deliberately excludes indefinite forms ("a file",
+ * "any file", "some file") and bare "the file" — those are usually general
+ * questions, and clarifying on them would be noise. When a demonstrative
+ * reference resolves to NO real file (nothing attached/pinned/named, no open
+ * editor tab), the run asks which file — it never guesses and never
+ * dead-ends on weak evidence (observed: "tell me about this file" with no
+ * editor tab open ran targetless and answered a bare "you did not specify
+ * which file" with a weak-evidence banner).
+ */
+const DEMONSTRATIVE_FILE_RE =
+  /\b(?:this|that|said)\s+(?:current|open|active|opened|attach(?:ed)?|upload(?:ed)?|select(?:ed)?|pin(?:ned)?)?\s*(?:file|document|script|program)\b|\bthe\s+(?:current|open|active)\s+file\b/i;
+
+/** Path-shaped mention detector — mirrors the orchestrator's own
+ *  FILE_MENTION_RE (same extension allowlist). A question that contains ANY
+ *  path-shaped token ("examples/ludo.py tell me about this file") is NEVER
+ *  paused for the which-file question: the orchestrator's retrieval phase
+ *  resolves real paths directly and reports honest negatives for missing
+ *  ones (with the closest real files). Pausing there would replace a good
+ *  answer with a redundant question. */
+const PATH_SHAPED_MENTION_RE =
+  /(?:[\w@-]+\/)+[\w.-]+\.[A-Za-z]{1,8}\b|[\w@-]+\.(?:tsx?|jsx?|mjs|cjs|json|css|scss|sass|less|html?|mdx?|py|rb|go|java|kt|swift|c|h|cpp|hpp|cc|cs|php|sql|prisma|sh|ya?ml|toml|svg|txt|xml|ini|cfg)\b/i;
+
+/** Real-file suggestion list for the which-file question: shallowest paths
+ *  first (root files before deep folders) so the offered chips are the files
+ *  the user most plausibly means. A stale active-file path (editor tab still
+ *  open but the file since moved) is rescued by suffix match and offered
+ *  first — it is the closest thing to "this file" the user had. */
+function pickWhichFileSuggestions(
+  workspacePaths: string[],
+  activeFile: string | null,
+): string[] {
+  const shallow = [...workspacePaths].sort(
+    (a, b) =>
+      a.split("/").length - b.split("/").length || a.localeCompare(b),
+  );
+  if (activeFile) {
+    const pick =
+      shallow.find((p) => p === activeFile) ??
+      shallow.find((p) => p.endsWith(`/${activeFile}`));
+    if (pick) return [pick, ...shallow.filter((p) => p !== pick).slice(0, 4)];
+  }
+  return shallow.slice(0, 5);
+}
+
+/** The honest framing appended to the orchestrator request when a file was
+ *  pointed at but nothing designates it and no question can be asked (no
+ *  answers surface — headless sessions). Gives reasoning REAL data: the
+ *  workspace file list — so the answer reports the repository instead of a
+ *  bare weak-evidence dead end. Never invites invention. */
+function buildNoDesignationNote(phrase: string, realPaths: string[]): string {
+  return (
+    "\n\n[NO FILE DESIGNATED] The user pointed at a file (" +
+    JSON.stringify(phrase) +
+    ") without naming one, and no interactive question can be asked in this session. " +
+    (realPaths.length > 0
+      ? `Real workspace files: ${realPaths.join(", ")}. `
+      : "") +
+    "If the request can be answered from the repository as a whole, answer from real evidence. If it needs one specific file, say plainly that no file was designated, list the real workspace files above, and ask the user to name one — never describe a file you have not actually read."
+  );
+}
+
+/** Resolve extension-bearing file names written in a QUESTION query against
+ *  the real workspace ("calculator.css tell me about this file" →
+ *  ["calculator.css"]). Deliberately conservative — full path or exact
+ *  basename WITH extension only; bare stems ("registry", "index") are far
+ *  too ambiguous in free questions and would fabricate targets. A named but
+ *  NONEXISTENT file ("ludo.py") resolves to nothing here — the orchestrator
+ *  then reports the honest negative with the closest real files (Task 18). */
+function resolveQuestionFileMentions(
+  query: string,
+  paths: string[],
+): string[] {
+  const escapeRegExp = (s: string): string =>
+    s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const hits: string[] = [];
+  for (const p of paths) {
+    const base = p.slice(p.lastIndexOf("/") + 1);
+    if (!/\.[A-Za-z0-9]{1,8}$/.test(base)) continue;
+    const re = new RegExp(`(^|[^\\w.-])${escapeRegExp(base)}(?!\\w)`, "i");
+    if (re.test(query)) hits.push(p);
+  }
+  return [...new Set(hits)].slice(0, 3);
+}
+
+/** The which-file clarify batch for a demonstrative reference that resolved
+ *  to nothing ("tell me about this file" with no open tab). Same 8C surface
+ *  as the target clarify (option chips + free text + Choose-a-file picker),
+ *  but asked as a QUESTION, not a change — the wording never implies a
+ *  modification is coming. */
+function buildWhichFileClarifyBatch(
+  phrase: string,
+  suggestions: string[],
+): IntakeQuestionBatch {
+  const question: ClarifyQuestion = {
+    id: "q-target-file",
+    question:
+      suggestions.length > 0
+        ? `You said “${phrase}”, but no file is attached, pinned, or open in the editor. Which file do you mean?`
+        : `You said “${phrase}”, but no file is attached, pinned, or open in the editor, and the workspace has no text files to offer. Type the exact file name or path.`,
+    options: suggestions.map((path, i) => ({
+      id: `opt-${i + 1}`,
+      label: `${path.slice(path.lastIndexOf("/") + 1)} (${path.slice(0, path.lastIndexOf("/")) || "."})`,
+      value: path,
+    })),
+  };
+  return {
+    id: `intake-${Date.now().toString(36)}`,
+    questions: [question],
+    rationale:
+      "“This file” needs a designation — pick the file you mean (or type its name) before the run continues.",
+    askedAt: Date.now(),
+  };
+}
+
+/** Free-text clarify answers that mean "none of these — stop". */
 function answersIndicateStop(answers: IntakeAnswer[]): boolean {
   return answers.some((a) => {
     const text = (a.customText ?? "").trim();
@@ -1387,6 +1506,27 @@ async function resolveAgentTargets(
     }
   }
 
+  // ---- 5c) A demonstrative file reference ("this file", "the current
+  // file", "that script") that resolved to NOTHING — nothing attached or
+  // pinned, no file named, no open editor tab — must ASK which file. Both
+  // failure modes are unacceptable: running against a guessed file (the
+  // random-file bug) and the old dead-end ("you did not specify which
+  // file" + weak-evidence banner for "tell me about this file"). The 8C
+  // question flow offers the REAL workspace files; the picked file becomes
+  // the run's target and the orchestrator reads its actual content.
+  if (targets.size === 0 && !stopAndClarify && !unresolvedMention) {
+    const demonstrative = DEMONSTRATIVE_FILE_RE.exec(query)?.[0];
+    if (demonstrative) {
+      return {
+        targets: [],
+        clarify: buildWhichFileClarifyBatch(
+          demonstrative,
+          pickWhichFileSuggestions(workspacePaths, context?.activeFile?.trim() ?? null),
+        ),
+      };
+    }
+  }
+
   // ---- 6) The user named a file that could not be resolved → ALWAYS ask
   // (same/nearly-same suggestions when they exist; free-text otherwise).
   // Never run the change against a guessed file.
@@ -1550,10 +1690,30 @@ export async function runAssistantTurn(
       if (resolution.clarify) {
         if (!input.answersProvider) {
           // No answers surface available — proceed honestly without targets
-          // (the clarify question simply cannot be asked here).
+          // (the clarify question simply cannot be asked here). The old
+          // behavior was a targetless run whose answer dead-ended on weak
+          // evidence ("you did not specify which file"). The orchestrator
+          // now receives the REAL workspace file list with honest framing:
+          // answer from what the repository actually contains, and when a
+          // specific file is required, name the candidates and ask the user
+          // to pick one — never invent a file, never guess.
           logWarn("assistant: target clarify skipped (no answers provider)", {
             runId: input.runId,
           });
+          let realPaths: string[] = [];
+          try {
+            const { index } = await getSearchIndex();
+            realPaths = pickWhichFileSuggestions(
+              index.files.map((f) => f.path),
+              null,
+            );
+          } catch {
+            realPaths = []; // tree unavailable — the note still stands
+          }
+          requestText += buildNoDesignationNote(
+            DEMONSTRATIVE_FILE_RE.exec(built.query)?.[0] ?? "this file",
+            realPaths,
+          );
         } else {
           onStage?.({ type: "INTAKE_QUESTIONS", batch: resolution.clarify });
           input.onPause?.({ reason: "answers" });
@@ -1583,6 +1743,94 @@ export async function runAssistantTurn(
         }
       } else {
         targetFiles = resolution.targets;
+      }
+      // ---- Question-path demonstrative reference ("tell me about this
+      // file") ---- resolveAgentTargets only runs for MODIFICATION requests;
+      // a question that POINTS at a file (“this file”, “the current file”)
+      // used to run targetless and answer a bare “you did not specify which
+      // file” on weak evidence. Resolution mirrors the modification path:
+      // a named real file answers directly; an open editor file IS the
+      // referent; otherwise pause ONCE with the which-file question (real
+      // file chips + free text + picker); headless sessions get the honest
+      // no-designation note instead of a pause. Skipped entirely when the
+      // query carries a path-shaped token — real or not, the orchestrator's
+      // retrieval phase owns that case (direct read / honest negative with
+      // closest files) and a pause would only be redundant.
+      if (
+        !resolution.clarify &&
+        targetFiles.length === 0 &&
+        DEMONSTRATIVE_FILE_RE.test(built.query) &&
+        !PATH_SHAPED_MENTION_RE.test(built.query)
+      ) {
+        const phrase =
+          DEMONSTRATIVE_FILE_RE.exec(built.query)?.[0] ?? "this file";
+        const active = input.context?.activeFile?.trim() ?? null;
+        let paths: string[] = [];
+        try {
+          const { index } = await getSearchIndex();
+          paths = index.files.map((f) => f.path);
+        } catch {
+          paths = []; // tree unavailable — free-text-only question / bare note
+        }
+        if (paths.length > 0) {
+          const named = resolveQuestionFileMentions(built.query, paths);
+          if (named.length > 0) {
+            // The question NAMES a real file — answer directly, exactly
+            // like the modification path would. Never pause when the file
+            // is identifiable ("calculator.css tell me about this file").
+            targetFiles = named;
+            logInfo("assistant: question file mentions resolved", {
+              runId: input.runId,
+              targets: named,
+            });
+          } else if (active && paths.includes(active)) {
+            targetFiles = [active];
+            logInfo(
+              "assistant: demonstrative file resolved to the open file",
+              { runId: input.runId, target: active },
+            );
+          }
+        }
+        if (targetFiles.length === 0) {
+          if (input.answersProvider) {
+            // Nothing names the file and none is open — pause ONCE and ask.
+            const batch = buildWhichFileClarifyBatch(
+              phrase,
+              pickWhichFileSuggestions(paths, active),
+            );
+            onStage?.({ type: "INTAKE_QUESTIONS", batch });
+            input.onPause?.({ reason: "answers" });
+            const answers = await input.answersProvider(batch);
+            if (!answers || answers.length === 0) {
+              throw new AssistantError(
+                "cancelled",
+                "The run was cancelled while waiting for your answers.",
+              );
+            }
+            const answered = targetsFromAnswers(batch, answers, paths);
+            if (answered.length === 0 && answersIndicateStop(answers)) {
+              throw new AssistantError(
+                "cancelled",
+                "The run was stopped — you chose none of the suggested files.",
+              );
+            }
+            if (answered.length === 0) {
+              throw new AssistantError(
+                "cancelled",
+                "The run was cancelled — no file was chosen. Name the file and ask again.",
+              );
+            }
+            targetFiles = answered;
+          } else {
+            let realPaths: string[] = [];
+            try {
+              realPaths = pickWhichFileSuggestions(paths, null);
+            } catch {
+              realPaths = []; // tree unavailable — the note still stands
+            }
+            requestText += buildNoDesignationNote(phrase, realPaths);
+          }
+        }
       }
       // A rename must be able to CREATE the new file: complete the target
       // set with the computed destination path (idempotent; also covers

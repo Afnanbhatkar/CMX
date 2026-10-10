@@ -71,23 +71,20 @@ export const AGENT_SPECS: Record<AgentName, AgentSpec> = {
   retrieval: {
     name: "retrieval",
     label: "Retrieval",
-    version: "1.0.0",
+    version: "1.1.0",
     status: "implemented",
     tier: "core",
     description:
-      "Runs the real hybrid search engine (BM25 + vectors + symbols + paths + import graph + git), then reads the USER-DESIGNATED target file(s) directly so a named/attached file always reaches the evidence even when the index is stale. Returns ranked, cited hits.",
+      "Full-repo file awareness: resolves path-like file mentions DIRECTLY against the real workspace tree (every text language — py/css/html/…) and reads them through the real file tool, on top of the real hybrid search engine (BM25 + vectors + symbols + paths + import graph + git). Missing files become honest negatives backed by the real tree inventory (closest existing files).",
     inputSchema: "AgentCall",
     outputSchema: "AgentResult",
     allowedTools: grants(
       ["repo.search", "read/search only (spec §4)"],
-      // Read-only. Required for user-designated target files: retrieval must
-      // be able to READ an explicitly named/attached file into the evidence
-      // (observed bug: "ludo.html what we can improve" — the file existed and
-      // was designated, but the read threw Permission denied → the reasoning
-      // agent answered "there is no file named ludo.html").
-      ["repo.read-file", "read user-designated target files into evidence (read-only)"],
+      ["repo.read-tree", "workspace tree listing for direct file resolution (spec §4)"],
+      ["repo.read-file", "read-only file access for direct file lookups (spec §4)"],
     ),
-    // Local hybrid search — 15s is generous (measured sub-second typical).
+    // Local hybrid search + cached tree build + a few direct reads — 15s is
+    // generous (measured sub-second typical).
     timeoutMs: 15_000,
     approvalPolicy: "never",
     retry: { maxAttempts: 1, backoffMs: 500 },
@@ -470,7 +467,7 @@ export function allowedToolsFor(agent: AgentName): Set<ToolName> {
 /** Permission tier label for the registry UI. */
 export function permissionTierFor(agent: AgentName): ToolPermissionTier | null {
   const tierByAgent: Partial<Record<AgentName, ToolPermissionTier>> = {
-    retrieval: "read-search-only",
+    retrieval: "read-analyze-only",
     "code-analyst": "read-analyze-only",
     graph: "read-analyze-only",
     reasoning: "read-analyze-only",
